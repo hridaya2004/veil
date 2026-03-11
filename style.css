@@ -1,0 +1,235 @@
+/* ============================================================
+   Smart Dark PDF - Styles
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  --bg-base: #141419;
+  --bg-surface: #1c1c24;
+  --bg-elevated: #24242e;
+  --text-primary: #d8d8e0;
+  --text-secondary: #8888a0;
+  --border: #2a2a38;
+  --accent: #6b8acd;
+  --accent-hover: #7d9cdf;
+  --toolbar-height: 48px;
+  --radius: 6px;
+  --transition: 150ms ease;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================
+   Drop Zone
+   ============================================================ */
+
+#drop-zone {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 100;
+  transition: background var(--transition);
+}
+
+#drop-zone.drag-over {
+  background: rgba(107, 138, 205, 0.06);
+}
+
+#drop-zone.drag-over .drop-content {
+  border-color: var(--accent);
+  background: rgba(107, 138, 205, 0.04);
+}
+
+.drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 56px 80px;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  transition: border-color var(--transition), background var(--transition);
+  user-select: none;
+}
+
+.drop-icon {
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.drop-title {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.drop-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   Toolbar
+   ============================================================ */
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--toolbar-height);
+  padding: 0 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.toolbar-left,
+.toolbar-center,
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.toolbar-left,
+.toolbar-right {
+  min-width: 60px;
+}
+
+.toolbar-right {
+  justify-content: flex-end;
+}
+
+#toolbar button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+#toolbar button:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+#toolbar button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+#toolbar button.toggle-active {
+  color: var(--accent);
+}
+
+#toolbar button.toggle-active:hover {
+  color: var(--accent-hover);
+}
+
+#page-info {
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-width: 64px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* ============================================================
+   Viewport / Page
+   ============================================================ */
+
+#viewport {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px;
+  position: relative;
+}
+
+#page-wrapper {
+  position: relative;
+  box-shadow: 0 2px 24px rgba(0, 0, 0, 0.4);
+  border-radius: 2px;
+  line-height: 0;
+  flex-shrink: 0;
+}
+
+#pdf-canvas {
+  display: block;
+  border-radius: 2px;
+}
+
+#overlay-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
+/* ============================================================
+   Dark Mode Filter
+   ============================================================ */
+
+#pdf-canvas.dark-active {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+/* ============================================================
+   Loading Indicator
+   ============================================================ */
+
+#loading-indicator {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 14px;
+  color: var(--text-secondary);
+  pointer-events: none;
+}
+
+/* ============================================================
+   Reader Layout
+   ============================================================ */
+
+#reader {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ============================================================
+   Utilities
+   ============================================================ */
+
+[hidden] {
+  display: none !important;
+}
