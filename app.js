@@ -131,6 +131,13 @@ let tesseractLoading = false;
 // pdf-lib module — loaded lazily for export.
 let pdfLibModule = null;
 
+// fontkit + Unicode font — loaded lazily for export.
+// fontkit is required by pdf-lib to embed custom (non-standard) fonts.
+// The Unicode font replaces Helvetica (WinAnsi-only, 256 chars) so that
+// symbols like −, ≥, α, β, ∑ are preserved in the exported PDF.
+let fontkitModule = null;
+let cachedFontBytes = null;
+
 // Export state
 let exporting = false;
 let originalFileName = 'document';
@@ -1253,6 +1260,37 @@ async function ensurePdfLib() {
   return pdfLibModule;
 }
 
+async function ensureUnicodeFont() {
+  // Load fontkit (required by pdf-lib for custom font embedding)
+  if (!fontkitModule) {
+    try {
+      const mod = await import(
+        'https://esm.sh/@pdf-lib/fontkit@1.1.1'
+      );
+      fontkitModule = mod.default || mod;
+    } catch (e) {
+      console.warn('Failed to load fontkit:', e);
+      return null;
+    }
+  }
+
+  // Load Noto Sans Regular TTF (comprehensive Unicode coverage)
+  if (!cachedFontBytes) {
+    try {
+      const resp = await fetch(
+        'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf'
+      );
+      if (!resp.ok) throw new Error(`Font fetch ${resp.status}`);
+      cachedFontBytes = new Uint8Array(await resp.arrayBuffer());
+    } catch (e) {
+      console.warn('Failed to load Unicode font:', e);
+      return null;
+    }
+  }
+
+  return { fontkit: fontkitModule, fontBytes: cachedFontBytes };
+}
+
 function showExportProgress(current, total) {
   exportProgressEl.hidden = false;
   const pct = total > 0 ? Math.round((current / total) * 100) : 0;
@@ -1266,7 +1304,7 @@ function hideExportProgress() {
 }
 
 async function embedLinkAnnotations(outPdf, outPage, annotations) {
-  const { PDFName, PDFArray, PDFString } = pdfLibModule;
+  const { PDFName, PDFString } = pdfLibModule;
 
   for (const annot of annotations) {
     if (annot.subtype !== 'Link') continue;
@@ -1298,38 +1336,90 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
         });
         annotDict.set(PDFName.of('A'), context.register(actionDict));
       } else if (dest) {
-        // Internal link
-        if (typeof dest === 'string') {
-          // Named destination — GoTo action with name string
-          const actionDict = context.obj({
-            Type: 'Action',
-            S: 'GoTo',
-            D: PDFString.of(dest),
-          });
-          annotDict.set(PDFName.of('A'), context.register(actionDict));
-        } else if (Array.isArray(dest) && dest.length > 0) {
-          // Explicit destination — dest[0] is a page ref object.
-          // Resolve it to a page index via PDF.js, then point to
-          // the corresponding page in the new PDF.
-          try {
-            const pageIndex = await pdfDoc.getPageIndex(dest[0]);
-            if (pageIndex < outPdf.getPageCount()) {
-              const targetPageRef = outPdf.getPage(pageIndex).ref;
-              // Build dest array: [pageRef, /FitType, ...params]
-              const destItems = [targetPageRef];
-              for (let d = 1; d < dest.length; d++) {
-                const v = dest[d];
-                if (v === null || v === undefined) destItems.push(context.obj(null));
-                else if (typeof v === 'string') destItems.push(PDFName.of(v));
-                else if (typeof v === 'number') destItems.push(context.obj(v));
-                else destItems.push(context.obj(v));
-              }
-              annotDict.set(PDFName.of('Dest'), context.obj(destItems));
-            }
-          } catch (_) {
-            // Page ref resolution failed — skip this internal link
+        // Internal link — resolve to explicit destination.
+        let explicitDest = null;
+
+        try {
+          if (typeof dest === 'string') {
+            explicitDest = await pdfDoc.getDestination(dest);
+          } else if (Array.isArray(dest) && dest.length > 0) {
+            explicitDest = dest;
+          }
+        } catch (e) {
+          console.warn('[LinkExport] Failed to resolve dest:', dest, e);
+          continue;
+        }
+
+        if (!explicitDest || !Array.isArray(explicitDest) || explicitDest.length === 0) {
+          console.warn('[LinkExport] Empty or invalid explicitDest for:', dest);
+          continue;
+        }
+
+        // --- DIAGNOSTIC LOGS ---
+        console.log('[LinkExport] explicitDest raw:', JSON.stringify(explicitDest, (k, v) => {
+          if (v && typeof v === 'object' && 'num' in v) return `{Ref num:${v.num} gen:${v.gen}}`;
+          return v;
+        }));
+        for (let d = 0; d < explicitDest.length; d++) {
+          const v = explicitDest[d];
+          console.log(`  [${d}] type=${typeof v}, constructor=${v?.constructor?.name}, value=`, v);
+        }
+
+        try {
+          const pageIndex = await pdfDoc.getPageIndex(explicitDest[0]);
+          console.log('[LinkExport] Resolved page index:', pageIndex);
+
+          if (pageIndex >= outPdf.getPageCount()) {
+            console.warn('[LinkExport] Page index out of range:', pageIndex, '>=', outPdf.getPageCount());
             continue;
           }
+
+          const targetPageRef = outPdf.getPage(pageIndex).ref;
+          console.log('[LinkExport] Target page ref:', targetPageRef?.toString());
+
+          // Build dest array: [pageRef, /FitType, ...params]
+          // Use context.obj() for individual values, assemble manually.
+          //
+          // PDF.js dest format (confirmed by analysis):
+          //   [0] = {num, gen} page ref — already resolved above
+          //   [1] = fit type — could be:
+          //         - string: "/XYZ" or "XYZ"
+          //         - object: {name: "XYZ"}
+          //   [2+] = number or null
+          const destValues = [targetPageRef];
+
+          for (let d = 1; d < explicitDest.length; d++) {
+            const v = explicitDest[d];
+
+            if (v === null || v === undefined) {
+              // Null parameter — use context.obj(null) to create
+              // a proper PDFNull instance (not the PDFNull class itself)
+              destValues.push(context.obj(null));
+            } else if (typeof v === 'object' && v.name) {
+              // Fit type as object: {name: "XYZ"} — extract the name
+              destValues.push(PDFName.of(v.name));
+            } else if (typeof v === 'string') {
+              // Fit type as string: "/XYZ" or "XYZ"
+              const name = v.startsWith('/') ? v.slice(1) : v;
+              destValues.push(PDFName.of(name));
+            } else if (typeof v === 'number') {
+              destValues.push(context.obj(v));
+            } else {
+              console.warn('[LinkExport] Unknown dest value type:', typeof v, v);
+              destValues.push(context.obj(null));
+            }
+          }
+
+          console.log('[LinkExport] destValues built:', destValues.length, 'items');
+
+          // Create the dest array via context.obj — it handles
+          // arrays of mixed PDF objects correctly.
+          const destArray = context.obj(destValues);
+          annotDict.set(PDFName.of('Dest'), destArray);
+          console.log('[LinkExport] Dest array set successfully');
+        } catch (e) {
+          console.warn('[LinkExport] Failed to build dest array:', e);
+          continue;
         }
       }
 
@@ -1338,14 +1428,15 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
       const pageDict = outPage.node;
       let annots = pageDict.lookup(PDFName.of('Annots'));
 
-      if (annots instanceof PDFArray) {
+      if (annots instanceof pdfLibModule.PDFArray) {
         annots.push(annotRef);
       } else {
         const newAnnots = context.obj([annotRef]);
         pageDict.set(PDFName.of('Annots'), newAnnots);
       }
-    } catch (_) {
-      // Skip annotations that fail to embed
+      console.log('[LinkExport] Annotation attached:', url ? `URL: ${url}` : 'Internal link');
+    } catch (e) {
+      console.warn('[LinkExport] Annotation failed:', e);
     }
   }
 }
@@ -1360,7 +1451,25 @@ async function exportDarkPdf() {
     const { PDFDocument, StandardFonts } = await ensurePdfLib();
 
     const outPdf = await PDFDocument.create();
-    const font = await outPdf.embedFont(StandardFonts.Helvetica);
+
+    // Try to load a Unicode font (Noto Sans) for full character support.
+    // Falls back to Helvetica (WinAnsi, 256 chars) if loading fails.
+    let font;
+    const fontResources = await ensureUnicodeFont();
+    if (fontResources) {
+      try {
+        outPdf.registerFontkit(fontResources.fontkit);
+        font = await outPdf.embedFont(fontResources.fontBytes, { subset: true });
+        console.log('[Export] Using Noto Sans (full Unicode support)');
+      } catch (e) {
+        console.warn('[Export] Failed to embed Unicode font, falling back to Helvetica:', e);
+        font = await outPdf.embedFont(StandardFonts.Helvetica);
+      }
+    } else {
+      console.warn('[Export] Unicode font not available, using Helvetica (limited charset)');
+      font = await outPdf.embedFont(StandardFonts.Helvetica);
+    }
+
     const totalPages = pdfDoc.numPages;
     const exportDpr = 2;
 
@@ -1440,15 +1549,13 @@ async function exportDarkPdf() {
 
       // --- Invisible text layer ---
       //
-      // Each text item is drawn in Helvetica at a fontSize adjusted
-      // so the string's width matches the original PDF width. This
-      // is the PDF-space equivalent of CSS scaleX(): Helvetica has
-      // different glyph widths than the original font, so without
-      // adjustment the selection would extend past the visible text.
+      // Each text item is drawn at a fontSize adjusted so the
+      // string's width matches the original PDF width. This is
+      // the PDF-space equivalent of CSS scaleX().
       //
-      // adjustedSize = baseFontSize * (targetWidth / helveticaWidth)
-      //
-      // The height distortion is invisible (opacity: 0 text).
+      // With Noto Sans (Unicode), virtually all characters are
+      // supported. With Helvetica fallback (WinAnsi), unsupported
+      // characters are silently skipped per-item via try/catch.
       if (textContent) {
         // Native PDF: use original text coordinates
         for (const item of textContent.items) {
@@ -1457,16 +1564,16 @@ async function exportDarkPdf() {
           const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
           if (baseFontSize < 1) continue;
 
-          // Adjust fontSize so Helvetica width matches PDF width
-          let drawSize = baseFontSize;
-          if (item.width > 0) {
-            const naturalWidth = font.widthOfTextAtSize(item.str, baseFontSize);
-            if (naturalWidth > 0) {
-              drawSize = baseFontSize * (item.width / naturalWidth);
-            }
-          }
-
           try {
+            // Adjust fontSize so font width matches PDF width
+            let drawSize = baseFontSize;
+            if (item.width > 0) {
+              const naturalWidth = font.widthOfTextAtSize(item.str, baseFontSize);
+              if (naturalWidth > 0) {
+                drawSize = baseFontSize * (item.width / naturalWidth);
+              }
+            }
+
             outPage.drawText(item.str, {
               x: tx[4],
               y: tx[5],
@@ -1475,7 +1582,7 @@ async function exportDarkPdf() {
               opacity: 0,
             });
           } catch (_) {
-            // Skip characters not in Helvetica encoding
+            // Skip characters not encodable in the current font
           }
         }
       } else if (isScannedDocument) {
@@ -1497,17 +1604,17 @@ async function exportDarkPdf() {
               const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
               if (baseFontSize < 1) continue;
 
-              // Adjust fontSize so Helvetica width matches OCR bbox width
-              const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
-              let drawSize = baseFontSize;
-              if (targetWidth > 0) {
-                const naturalWidth = font.widthOfTextAtSize(word.text, baseFontSize);
-                if (naturalWidth > 0) {
-                  drawSize = baseFontSize * (targetWidth / naturalWidth);
-                }
-              }
-
               try {
+                // Adjust fontSize so font width matches OCR bbox width
+                const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
+                let drawSize = baseFontSize;
+                if (targetWidth > 0) {
+                  const naturalWidth = font.widthOfTextAtSize(word.text, baseFontSize);
+                  if (naturalWidth > 0) {
+                    drawSize = baseFontSize * (targetWidth / naturalWidth);
+                  }
+                }
+
                 outPage.drawText(word.text, {
                   x: word.bbox.x0 * sx,
                   y: origVp.height - word.bbox.y1 * sy,
@@ -1516,7 +1623,7 @@ async function exportDarkPdf() {
                   opacity: 0,
                 });
               } catch (_) {
-                // Skip characters not in Helvetica encoding
+                // Skip characters not encodable in the current font
               }
             }
           }
