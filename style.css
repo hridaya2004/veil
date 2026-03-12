@@ -259,6 +259,23 @@ body {
 }
 
 /* ============================================================
+   Link Annotations
+   ============================================================ */
+
+.link-annot {
+  display: block;
+  border-radius: 2px;
+  cursor: pointer;
+  user-select: none;
+  text-decoration: none;
+  transition: background var(--transition);
+}
+
+.link-annot:hover {
+  background: rgba(107, 138, 205, 0.15);
+}
+
+/* ============================================================
    Page Number Label
    ============================================================ */
 

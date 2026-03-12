@@ -694,6 +694,14 @@ async function renderPageIfNeeded(pageNum) {
       renderCanvas.width = 0; // release temp canvas
     }
 
+    // --- Link annotations ---
+    try {
+      const annotations = await page.getAnnotations();
+      if (globalGeneration === myGen) {
+        buildLinkLayer(slot.container, annotations, scaledViewport, dpr, pageNum);
+      }
+    } catch (_) { /* some pages have no annotations */ }
+
     slot.rendered = true;
     applyDarkModeToPage(pageNum);
   } catch (err) {
@@ -946,6 +954,96 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 }
 
 // ============================================================
+// Link Annotation Layer
+//
+// Extracts link annotations from the PDF and overlays clickable
+// <a> elements on top of the page. External links open in a new
+// tab; internal links scroll to the target page in the viewport.
+//
+// These are position:absolute elements in the page-container,
+// sitting above the text layer but with pointer-events only on
+// themselves. user-select:none ensures they don't interfere
+// with text selection or copy/paste.
+// ============================================================
+
+function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
+  // Remove any previous link layer
+  container.querySelectorAll('.link-annot').forEach(el => el.remove());
+
+  for (const annot of annotations) {
+    if (annot.subtype !== 'Link') continue;
+    if (!annot.rect || annot.rect.length < 4) continue;
+
+    // Determine destination
+    const url = annot.url || null;
+    const dest = annot.dest || null;
+    if (!url && !dest) continue;
+
+    // Transform PDF rect [x1, y1, x2, y2] to CSS coordinates.
+    // viewport.transform is a 6-element affine matrix [a,b,c,d,e,f].
+    const [x1, y1, x2, y2] = annot.rect;
+    const vt = viewport.transform;
+    const p1 = transformPoint(vt, x1, y1);
+    const p2 = transformPoint(vt, x2, y2);
+
+    const left = Math.min(p1[0], p2[0]) / dpr;
+    const top = Math.min(p1[1], p2[1]) / dpr;
+    const width = Math.abs(p2[0] - p1[0]) / dpr;
+    const height = Math.abs(p2[1] - p1[1]) / dpr;
+
+    if (width < 1 || height < 1) continue;
+
+    const a = document.createElement('a');
+    a.className = 'link-annot';
+
+    if (url) {
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    } else if (dest) {
+      a.href = '#';
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        resolveInternalLink(dest);
+      });
+    }
+
+    a.style.position = 'absolute';
+    a.style.left = left + 'px';
+    a.style.top = top + 'px';
+    a.style.width = width + 'px';
+    a.style.height = height + 'px';
+
+    container.appendChild(a);
+  }
+}
+
+async function resolveInternalLink(dest) {
+  if (!pdfDoc) return;
+
+  try {
+    let pageIndex;
+
+    if (typeof dest === 'string') {
+      // Named destination — resolve via PDF.js
+      const resolved = await pdfDoc.getDestination(dest);
+      if (!resolved) return;
+      pageIndex = await pdfDoc.getPageIndex(resolved[0]);
+    } else if (Array.isArray(dest) && dest.length > 0) {
+      // Explicit destination — first element is page ref
+      pageIndex = await pdfDoc.getPageIndex(dest[0]);
+    } else {
+      return;
+    }
+
+    const targetPage = pageIndex + 1; // PDF.js uses 0-based index
+    scrollToPage(targetPage);
+  } catch (err) {
+    console.warn('Could not resolve internal link:', err);
+  }
+}
+
+// ============================================================
 // Image Region Extraction
 // ============================================================
 
@@ -1167,6 +1265,91 @@ function hideExportProgress() {
   exportProgressFill.style.width = '0%';
 }
 
+async function embedLinkAnnotations(outPdf, outPage, annotations) {
+  const { PDFName, PDFArray, PDFString } = pdfLibModule;
+
+  for (const annot of annotations) {
+    if (annot.subtype !== 'Link') continue;
+    if (!annot.rect || annot.rect.length < 4) continue;
+
+    const url = annot.url || null;
+    const dest = annot.dest || null;
+    if (!url && !dest) continue;
+
+    const [x1, y1, x2, y2] = annot.rect;
+
+    try {
+      const context = outPdf.context;
+
+      const annotDict = context.obj({
+        Type: 'Annot',
+        Subtype: 'Link',
+        Rect: [x1, y1, x2, y2],
+        Border: [0, 0, 0],
+        F: 4,
+      });
+
+      if (url) {
+        // External link: URI action
+        const actionDict = context.obj({
+          Type: 'Action',
+          S: 'URI',
+          URI: PDFString.of(url),
+        });
+        annotDict.set(PDFName.of('A'), context.register(actionDict));
+      } else if (dest) {
+        // Internal link
+        if (typeof dest === 'string') {
+          // Named destination — GoTo action with name string
+          const actionDict = context.obj({
+            Type: 'Action',
+            S: 'GoTo',
+            D: PDFString.of(dest),
+          });
+          annotDict.set(PDFName.of('A'), context.register(actionDict));
+        } else if (Array.isArray(dest) && dest.length > 0) {
+          // Explicit destination — dest[0] is a page ref object.
+          // Resolve it to a page index via PDF.js, then point to
+          // the corresponding page in the new PDF.
+          try {
+            const pageIndex = await pdfDoc.getPageIndex(dest[0]);
+            if (pageIndex < outPdf.getPageCount()) {
+              const targetPageRef = outPdf.getPage(pageIndex).ref;
+              // Build dest array: [pageRef, /FitType, ...params]
+              const destItems = [targetPageRef];
+              for (let d = 1; d < dest.length; d++) {
+                const v = dest[d];
+                if (v === null || v === undefined) destItems.push(context.obj(null));
+                else if (typeof v === 'string') destItems.push(PDFName.of(v));
+                else if (typeof v === 'number') destItems.push(context.obj(v));
+                else destItems.push(context.obj(v));
+              }
+              annotDict.set(PDFName.of('Dest'), context.obj(destItems));
+            }
+          } catch (_) {
+            // Page ref resolution failed — skip this internal link
+            continue;
+          }
+        }
+      }
+
+      // Attach annotation to page
+      const annotRef = context.register(annotDict);
+      const pageDict = outPage.node;
+      let annots = pageDict.lookup(PDFName.of('Annots'));
+
+      if (annots instanceof PDFArray) {
+        annots.push(annotRef);
+      } else {
+        const newAnnots = context.obj([annotRef]);
+        pageDict.set(PDFName.of('Annots'), newAnnots);
+      }
+    } catch (_) {
+      // Skip annotations that fail to embed
+    }
+  }
+}
+
 async function exportDarkPdf() {
   if (!pdfDoc || exporting) return;
 
@@ -1182,6 +1365,7 @@ async function exportDarkPdf() {
     const exportDpr = 2;
 
     showExportProgress(0, totalPages);
+    const deferredAnnotations = [];
 
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
       const page = await pdfDoc.getPage(pageNum);
@@ -1198,6 +1382,7 @@ async function exportDarkPdf() {
           viewport: renderVp,
         }).promise,
         page.getOperatorList(),
+        page.getAnnotations(),
       ];
       if (!isScannedDocument) {
         tasks.push(page.getTextContent());
@@ -1205,7 +1390,8 @@ async function exportDarkPdf() {
 
       const results = await Promise.all(tasks);
       const opList = results[1];
-      const textContent = isScannedDocument ? null : results[2];
+      const annotations = results[2];
+      const textContent = isScannedDocument ? null : results[3];
 
       // --- Determine dark mode for this page ---
       const isDarkBg = detectAlreadyDark(renderCanvas);
@@ -1337,6 +1523,13 @@ async function exportDarkPdf() {
         }
       }
 
+      // --- Collect link annotations for deferred embedding ---
+      // (Internal links may reference pages not yet added to outPdf,
+      // so we embed all annotations after all pages are created.)
+      if (annotations.length > 0) {
+        deferredAnnotations.push({ outPage, annotations });
+      }
+
       // --- Release memory ---
       renderCanvas.width = 0;
       finalCanvas.width = 0;
@@ -1345,6 +1538,11 @@ async function exportDarkPdf() {
 
       // Yield to UI thread for progress bar update
       await new Promise(r => setTimeout(r, 0));
+    }
+
+    // --- Embed link annotations (all pages now exist) ---
+    for (const { outPage, annotations } of deferredAnnotations) {
+      await embedLinkAnnotations(outPdf, outPage, annotations);
     }
 
     // --- Save and trigger download ---
