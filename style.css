@@ -235,14 +235,31 @@ body {
   left: 0;
   overflow: hidden;
   line-height: 1;
+  /* Override line-height:0 inherited from .page-container.
+     Normal document flow inside lets the browser's selection
+     algorithm traverse lines naturally. */
+}
+
+.text-line {
+  white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .text-layer span {
   color: transparent;
-  white-space: nowrap;
+  font-family: sans-serif;
+  vertical-align: top;
+  box-sizing: border-box;
 }
 
-.text-layer span::selection {
+.text-filler {
+  display: inline-block;
+  vertical-align: top;
+}
+
+.text-layer span::selection,
+.text-filler::selection,
+.text-line::selection {
   background: rgba(107, 138, 205, 0.3);
 }
 
