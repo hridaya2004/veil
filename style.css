@@ -180,7 +180,7 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
+  gap: 40px;
   padding: 24px 0;
   position: relative;
 }
@@ -196,7 +196,6 @@ body {
   line-height: 0;
   flex-shrink: 0;
   background: var(--bg-elevated);
-  margin-bottom: 8px;
 }
 
 .page-canvas {
@@ -250,9 +249,11 @@ body {
   font-family: sans-serif;
   vertical-align: top;
   box-sizing: border-box;
+  white-space: pre;
 }
 
 .text-layer span::selection,
+.text-layer br::selection,
 .text-line::selection {
   background: rgba(107, 138, 205, 0.3);
 }
@@ -263,7 +264,7 @@ body {
 
 .page-label {
   position: absolute;
-  bottom: -20px;
+  bottom: -24px;
   left: 50%;
   transform: translateX(-50%);
   font-size: 11px;

@@ -120,6 +120,14 @@ const pageSlots = new Map();
 // Monotonically increasing, bumped on new PDF load or resize
 let globalGeneration = 0;
 
+// true if the document is detected as scanned (full-page images, no text).
+// When true, image protection is skipped so CSS inversion covers the whole page.
+let isScannedDocument = false;
+
+// Tesseract.js worker — loaded lazily only for scanned documents.
+let tesseractWorker = null;
+let tesseractLoading = false;
+
 // ============================================================
 // DOM References
 // ============================================================
@@ -162,10 +170,14 @@ async function loadPDF(data) {
     pdfDoc = await pdfjsLib.getDocument({ data }).promise;
     pageDarkOverride.clear();
     pageAlreadyDark.clear();
+    isScannedDocument = false;
     globalGeneration++;
 
     dropZone.hidden = true;
     readerEl.hidden = false;
+
+    // Detect scanned document before building pages
+    isScannedDocument = await detectScannedDocument();
 
     await buildPageSlots();
     setupIntersectionObserver();
@@ -174,6 +186,266 @@ async function loadPDF(data) {
     console.error('Failed to load PDF:', err);
     alert('Could not load this PDF. It may be corrupted or password-protected.');
   }
+}
+
+// ============================================================
+// Scanned Document Detection
+//
+// Samples 3-5 pages spread across the document. If ALL sampled
+// pages have a single large image covering >85% of the page
+// area AND <50 characters of text, the document is scanned.
+//
+// When scanned, image protection is skipped: CSS inversion
+// covers the entire page including the scan image, turning
+// black-on-white text into white-on-dark. This is correct
+// because the "image" IS the text content.
+// ============================================================
+
+const SCAN_IMAGE_COVERAGE_THRESHOLD = 0.85;
+const SCAN_TEXT_CHAR_THRESHOLD = 50;
+
+async function detectScannedDocument() {
+  if (!pdfDoc || pdfDoc.numPages === 0) return false;
+
+  // Pick sample pages spread across the document
+  const numPages = pdfDoc.numPages;
+  const sampleIndices = new Set();
+  sampleIndices.add(1); // first page always
+  if (numPages >= 2) sampleIndices.add(numPages); // last
+  if (numPages >= 4) sampleIndices.add(Math.floor(numPages * 0.25));
+  if (numPages >= 6) sampleIndices.add(Math.floor(numPages * 0.5));
+  if (numPages >= 8) sampleIndices.add(Math.floor(numPages * 0.75));
+
+  // Need at least 2 samples for confidence (or all pages if <2)
+  const samplesToCheck = [...sampleIndices];
+
+  for (const pageNum of samplesToCheck) {
+    const page = await pdfDoc.getPage(pageNum);
+    const vp = page.getViewport({ scale: 1 });
+    const pageArea = vp.width * vp.height;
+
+    const [opList, textContent] = await Promise.all([
+      page.getOperatorList(),
+      page.getTextContent(),
+    ]);
+
+    // Count text characters
+    let charCount = 0;
+    for (const item of textContent.items) {
+      if (item.str) charCount += item.str.length;
+    }
+
+    // If this page has substantial text, it's not a scanned document
+    if (charCount >= SCAN_TEXT_CHAR_THRESHOLD) return false;
+
+    // Check image coverage at scale 1 (PDF user space)
+    const regions = extractImageRegions(opList, vp.transform);
+
+    // Find the largest image's coverage ratio
+    let maxCoverage = 0;
+    for (const r of regions) {
+      const coverage = (r.width * r.height) / pageArea;
+      if (coverage > maxCoverage) maxCoverage = coverage;
+    }
+
+    // If this page doesn't have a dominant full-page image, not scanned
+    if (maxCoverage < SCAN_IMAGE_COVERAGE_THRESHOLD) return false;
+  }
+
+  // ALL sampled pages matched the scanned pattern
+  console.log(`Scanned document detected (${samplesToCheck.length} pages sampled)`);
+  return true;
+}
+
+// ============================================================
+// Tesseract.js — Lazy OCR for Scanned Documents
+//
+// Loaded only when a scanned PDF is detected. The worker runs
+// in a separate thread, so OCR never blocks the UI. Text
+// becomes selectable silently once recognition completes.
+// ============================================================
+
+async function ensureTesseractWorker() {
+  if (tesseractWorker) return tesseractWorker;
+  if (tesseractLoading) {
+    // Another call is already loading — wait for it
+    while (tesseractLoading) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return tesseractWorker;
+  }
+
+  tesseractLoading = true;
+  try {
+    const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+    // Handle both named export and default export patterns
+    const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
+    if (!createWorker) throw new Error('createWorker not found in Tesseract module');
+
+    tesseractWorker = await createWorker('eng', 1, {
+      logger: () => {},
+    });
+    return tesseractWorker;
+  } catch (err) {
+    console.warn('Tesseract.js failed to load:', err);
+    return null;
+  } finally {
+    tesseractLoading = false;
+  }
+}
+
+async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
+  const worker = await ensureTesseractWorker();
+  if (!worker || globalGeneration !== myGen) return;
+
+  try {
+    // Convert canvas to blob for Tesseract (more reliable than passing canvas directly)
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (globalGeneration !== myGen) return;
+
+    const { data } = await worker.recognize(blob);
+    if (globalGeneration !== myGen) return;
+
+    buildOcrTextLayer(textLayerDiv, data.words, canvas.width, canvas.height, cssWidth, cssHeight);
+
+    // Release the canvas now that OCR is done
+    canvas.width = 0;
+  } catch (err) {
+    if (globalGeneration !== myGen) return;
+    console.warn('OCR failed for page:', err);
+  }
+}
+
+function buildOcrTextLayer(container, words, canvasW, canvasH, cssW, cssH) {
+  container.innerHTML = '';
+  if (!words || words.length === 0) return;
+
+  const scaleX = cssW / canvasW;
+  const scaleY = cssH / canvasH;
+  const measureCtx = document.createElement('canvas').getContext('2d');
+
+  // --- Step 1: Transform OCR words to CSS coordinates ---
+  const items = words
+    .filter(w => w.text && w.text.trim())
+    .map(w => ({
+      str: w.text,
+      left: w.bbox.x0 * scaleX,
+      top: w.bbox.y0 * scaleY,
+      width: (w.bbox.x1 - w.bbox.x0) * scaleX,
+      height: (w.bbox.y1 - w.bbox.y0) * scaleY,
+    }));
+
+  if (items.length === 0) return;
+
+  // --- Step 2: Sort and group into lines ---
+  items.sort((a, b) => a.top - b.top || a.left - b.left);
+
+  const lines = [];
+  let currentLine = [items[0]];
+  let lineTop = items[0].top;
+  let lineHeight = items[0].height;
+
+  for (let i = 1; i < items.length; i++) {
+    const item = items[i];
+    const threshold = lineHeight * 0.5;
+
+    if (Math.abs(item.top - lineTop) < threshold) {
+      currentLine.push(item);
+      if (item.height > lineHeight) lineHeight = item.height;
+    } else {
+      lines.push(currentLine);
+      currentLine = [item];
+      lineTop = item.top;
+      lineHeight = item.height;
+    }
+  }
+  lines.push(currentLine);
+
+  // --- Step 3: Build DOM with continuous flow ---
+  //
+  // Same strategy as native buildTextLayer: each line is a
+  // block-level <div class="text-line"> in normal document flow.
+  // Vertical positioning uses padding-top for the gap between lines.
+  //
+  // Each non-last span extends its width to the next word's start
+  // via scaleX(), so selection highlight is continuous with no gaps.
+  //
+  // Between spans, a TextNode(' ') ensures copy/paste produces
+  // "word1 word2" with proper spacing. The TextNode takes up layout
+  // space, which we compensate by reducing the next span's width
+  // by the space advance. width:fit-content prevents the selection
+  // from extending past the last word.
+  const fragment = document.createDocumentFragment();
+
+  // Measure inherited space width for TextNode compensation
+  const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
+  measureCtx.font = `${inheritedFontSize}px sans-serif`;
+  const spaceAdvance = measureCtx.measureText(' ').width;
+
+  let prevBottom = 0;
+
+  for (const line of lines) {
+    line.sort((a, b) => a.left - b.left);
+
+    const lineDiv = document.createElement('div');
+    lineDiv.className = 'text-line';
+    lineDiv.style.width = 'fit-content';
+
+    const lt = line[0].top;
+    const lh = Math.max(...line.map(it => it.height));
+    const fontSize = lh * 0.85;
+
+    const vGap = Math.max(0, lt - prevBottom);
+    lineDiv.style.paddingTop = vGap + 'px';
+    lineDiv.style.height = (lh + vGap) + 'px';
+
+    prevBottom = lt + lh;
+
+    for (let i = 0; i < line.length; i++) {
+      const item = line[i];
+      const isLast = i === line.length - 1;
+      const nextItem = isLast ? null : line[i + 1];
+
+      // Insert a real TextNode(' ') between words for copy/paste
+      if (i > 0) {
+        lineDiv.appendChild(document.createTextNode(' '));
+      }
+
+      const span = document.createElement('span');
+      span.textContent = item.str;
+      span.style.fontSize = fontSize + 'px';
+
+      // First span: indent from left edge via marginLeft
+      if (i === 0 && item.left > 0.5) {
+        span.style.marginLeft = item.left + 'px';
+      }
+
+      // Target width: for non-last words, extend to the start
+      // of the next word, minus the TextNode space advance.
+      // For the last word, use its own bbox width.
+      const targetWidth = isLast
+        ? item.width
+        : nextItem.left - item.left - spaceAdvance;
+
+      if (targetWidth > 0) {
+        measureCtx.font = `${fontSize}px sans-serif`;
+        const naturalWidth = measureCtx.measureText(item.str).width;
+
+        if (naturalWidth > 0) {
+          span.style.display = 'inline-block';
+          span.style.width = targetWidth + 'px';
+          span.style.transform = `scaleX(${targetWidth / naturalWidth})`;
+          span.style.transformOrigin = 'left top';
+        }
+      }
+
+      lineDiv.appendChild(span);
+    }
+
+    fragment.appendChild(lineDiv);
+  }
+
+  container.appendChild(fragment);
 }
 
 // ============================================================
@@ -356,16 +628,23 @@ async function renderPageIfNeeded(pageNum) {
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
 
-    // Render + get operator list + get text content in parallel
+    // Render + get operator list (+ text content for native PDFs)
     const renderCanvas = createOffscreenCanvas(w, h);
-    const [, opList, textContent] = await Promise.all([
+    const parallelTasks = [
       page.render({
         canvasContext: renderCanvas.getContext('2d'),
         viewport: scaledViewport,
       }).promise,
       page.getOperatorList(),
-      page.getTextContent(),
-    ]);
+    ];
+    // Skip getTextContent for scanned docs — it returns nothing useful
+    if (!isScannedDocument) {
+      parallelTasks.push(page.getTextContent());
+    }
+
+    const results = await Promise.all(parallelTasks);
+    const opList = results[1];
+    const textContent = isScannedDocument ? null : results[2];
 
     if (globalGeneration !== myGen) return;
 
@@ -373,8 +652,10 @@ async function renderPageIfNeeded(pageNum) {
     const isDark = detectAlreadyDark(renderCanvas);
     pageAlreadyDark.set(pageNum, isDark);
 
-    // --- Extract image regions ---
-    const regions = extractImageRegions(opList, scaledViewport.transform);
+    // --- Extract image regions (skip if scanned document) ---
+    const regions = isScannedDocument
+      ? []
+      : extractImageRegions(opList, scaledViewport.transform);
 
     // --- Paint main canvas ---
     slot.mainCanvas.width = w;
@@ -385,13 +666,21 @@ async function renderPageIfNeeded(pageNum) {
     // --- Paint overlay canvas ---
     slot.overlayCanvas.width = w;
     slot.overlayCanvas.height = h;
-    compositeImageRegions(slot.overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
+    if (regions.length > 0) {
+      compositeImageRegions(slot.overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
+    }
 
-    // --- Build text layer ---
-    buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
-
-    // Release temp canvas
-    renderCanvas.width = 0;
+    // --- Text layer ---
+    if (isScannedDocument) {
+      // OCR runs in background — text becomes selectable silently
+      const cssW = Math.floor(w / dpr);
+      const cssH = Math.floor(h / dpr);
+      ocrPage(renderCanvas, slot.textLayer, cssW, cssH, myGen);
+      // renderCanvas is kept alive for OCR; it will be GC'd after
+    } else {
+      buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
+      renderCanvas.width = 0; // release temp canvas
+    }
 
     slot.rendered = true;
     applyDarkModeToPage(pageNum);
@@ -537,7 +826,24 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   lines.push(currentLine);
 
   // --- Step 3: Build DOM with continuous flow ---
+  //
+  // Two problems at style boundaries (italic↔normal, bold, links):
+  //
+  // Scenario A — "pdfWidth eats the space": the previous item's
+  // pdfWidth includes the trailing space advance, so gap ≈ 0 and
+  // no TextNode is inserted. But the space IS in item.str (e.g.
+  // "I "). With white-space:pre on the span, the browser preserves
+  // that trailing space during copy/paste instead of collapsing it.
+  //
+  // Scenario B — neither item contains the space: gap > 0 but
+  // neither str ends/starts with a space. We insert a TextNode(' ')
+  // and compensate marginLeft by its layout width.
   const fragment = document.createDocumentFragment();
+
+  // Measure inherited space width for TextNode compensation
+  const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
+  measureCtx.font = `${inheritedFontSize}px sans-serif`;
+  const spaceAdvance = measureCtx.measureText(' ').width;
 
   let prevBottom = 0;
 
@@ -557,19 +863,39 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     prevBottom = lineTop + lineHeight;
 
     let cursor = 0;
+    let prevStr = '';
 
     for (let i = 0; i < line.length; i++) {
       const item = line[i];
       if (!item.str) continue;
+
+      const gap = item.left - cursor;
+      let adjustedGap = gap;
+
+      // Determine if a word boundary exists between prevStr and
+      // this item. Three cases:
+      //   1. prevStr ends with whitespace → space already in DOM
+      //      (white-space:pre preserves it). No TextNode needed.
+      //   2. item.str starts with whitespace → same, preserved.
+      //   3. Neither has whitespace but gap is significant →
+      //      insert a TextNode(' ') and compensate marginLeft.
+      if (cursor > 0) {
+        const prevEndsSpace = /\s$/.test(prevStr);
+        const currStartsSpace = /^\s/.test(item.str);
+
+        if (!prevEndsSpace && !currStartsSpace && gap > item.fontSize * 0.15) {
+          lineDiv.appendChild(document.createTextNode(' '));
+          adjustedGap = gap - spaceAdvance;
+        }
+      }
 
       const span = document.createElement('span');
       span.textContent = item.str;
       span.style.fontSize = item.fontSize + 'px';
 
       // Horizontal gap from previous span
-      const gap = item.left - cursor;
-      if (gap > 0.5) {
-        span.style.marginLeft = gap + 'px';
+      if (adjustedGap > 0.5) {
+        span.style.marginLeft = adjustedGap + 'px';
       }
 
       // Measure the natural width of this text in sans-serif,
@@ -598,6 +924,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
       lineDiv.appendChild(span);
       cursor = item.left + (item.pdfWidth || 0);
+      prevStr = item.str;
     }
 
     fragment.appendChild(lineDiv);
