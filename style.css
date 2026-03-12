@@ -1,5 +1,5 @@
 /* ============================================================
-   Smart Dark PDF - Styles
+   Smart Dark PDF - Styles (v0.3)
    ============================================================ */
 
 *,
@@ -160,68 +160,6 @@ body {
 }
 
 /* ============================================================
-   Viewport / Page
-   ============================================================ */
-
-#viewport {
-  flex: 1;
-  overflow: auto;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 24px;
-  position: relative;
-}
-
-#page-wrapper {
-  position: relative;
-  box-shadow: 0 2px 24px rgba(0, 0, 0, 0.4);
-  border-radius: 2px;
-  line-height: 0;
-  flex-shrink: 0;
-  transition: opacity 120ms ease;
-}
-
-#page-wrapper.loading {
-  opacity: 0.4;
-}
-
-#pdf-canvas {
-  display: block;
-  border-radius: 2px;
-}
-
-#overlay-canvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  pointer-events: none;
-  border-radius: 2px;
-}
-
-/* ============================================================
-   Dark Mode Filter
-   ============================================================ */
-
-#pdf-canvas.dark-active {
-  filter: invert(1) hue-rotate(180deg);
-}
-
-/* ============================================================
-   Loading Indicator
-   ============================================================ */
-
-#loading-indicator {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 14px;
-  color: var(--text-secondary);
-  pointer-events: none;
-}
-
-/* ============================================================
    Reader Layout
    ============================================================ */
 
@@ -229,6 +167,99 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+}
+
+/* ============================================================
+   Viewport (Continuous Scroll)
+   ============================================================ */
+
+#viewport {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 0;
+  position: relative;
+}
+
+/* ============================================================
+   Page Container
+   ============================================================ */
+
+.page-container {
+  position: relative;
+  box-shadow: 0 2px 24px rgba(0, 0, 0, 0.4);
+  border-radius: 2px;
+  line-height: 0;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+  margin-bottom: 8px;
+}
+
+.page-canvas {
+  display: block;
+  border-radius: 2px;
+}
+
+.page-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  border-radius: 2px;
+  display: none;
+}
+
+.page-overlay.overlay-visible {
+  display: block;
+}
+
+/* ============================================================
+   Dark Mode Filter
+   ============================================================ */
+
+.page-canvas.dark-active {
+  filter: invert(0.86) hue-rotate(180deg);
+}
+
+/* ============================================================
+   Text Layer
+   ============================================================ */
+
+.text-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  line-height: 1;
+}
+
+.text-layer span {
+  color: transparent;
+  white-space: nowrap;
+}
+
+.text-layer span::selection {
+  background: rgba(107, 138, 205, 0.3);
+}
+
+/* ============================================================
+   Page Number Label
+   ============================================================ */
+
+.page-label {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ============================================================

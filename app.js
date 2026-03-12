@@ -1,9 +1,13 @@
 // ============================================================
-// Smart Dark PDF Reader - v0.2
+// Smart Dark PDF Reader - v0.3
 //
-// Double buffering + page cache with pre-rendering.
-// No intermediate broken frames. Instant page transitions
-// when the next page is already cached.
+// New in v0.3:
+//   - Already-dark detection: pages with dark backgrounds
+//     skip inversion automatically
+//   - Text layer: selectable/copyable text overlay
+//   - Continuous scroll: all pages in a column with
+//     IntersectionObserver-based lazy rendering
+//   - Softer inversion: invert(0.86) instead of invert(1)
 //
 // Run with a local server:
 //   python3 -m http.server 8000
@@ -22,11 +26,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 const OPS = pdfjsLib.OPS;
 const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
 
-// How many pages to keep cached around the current page.
-// Buffer: 1 behind, 2 ahead = 4 total (including current).
-const CACHE_BEHIND = 1;
-const CACHE_AHEAD = 2;
-const CACHE_MAX_DISTANCE = 3;
+// How many pages around the visible area to pre-render
+const PRERENDER_MARGIN = 2;
+
+// Luminance threshold: pages with average background luminance
+// below this are considered "already dark" and won't be inverted.
+const DARK_LUMINANCE_THRESHOLD = 0.4;
 
 // ============================================================
 // Matrix Utilities
@@ -50,9 +55,6 @@ function transformPoint(matrix, x, y) {
   ];
 }
 
-// An image in PDF occupies the unit square [0,0]-[1,1].
-// The CTM scales/positions it in PDF user space.
-// The viewport transform converts to screen (backing store) pixels.
 function computeImageBounds(ctm, viewportTransform) {
   const final = multiplyMatrices(viewportTransform, ctm);
 
@@ -77,20 +79,26 @@ function computeImageBounds(ctm, viewportTransform) {
 // ============================================================
 
 let pdfDoc = null;
-let currentPageNum = 1;
 let currentScale = 0;
 
-// Monotonically increasing ID. Incremented on every navigation
-// or resize. Any async work tagged with a stale ID is discarded.
-let navigationId = 0;
+// Each page can be in one of these dark-mode states:
+//   'auto'  – use already-dark detection result
+//   'dark'  – force dark mode on (user override)
+//   'light' – force dark mode off (user override)
+// Default is 'auto' for all pages.
+const pageDarkOverride = new Map();
 
-// Tracks which pages have dark mode disabled by the user.
-const lightPages = new Set();
+// Cache of already-dark detection results per page.
+// true = page is already dark, skip inversion.
+const pageAlreadyDark = new Map();
 
-// Page cache: Map<pageNum, CacheEntry>
-// CacheEntry = { mainBitmap: ImageBitmap, overlayBitmap: ImageBitmap,
-//                scale: number, width: number, height: number }
-const pageCache = new Map();
+// Tracks which page containers exist in the DOM and their render state.
+// Map<pageNum, { container, mainCanvas, overlayCanvas, textLayer,
+//                rendered: boolean, rendering: boolean, renderGeneration }>
+const pageSlots = new Map();
+
+// Monotonically increasing, bumped on new PDF load or resize
+let globalGeneration = 0;
 
 // ============================================================
 // DOM References
@@ -98,11 +106,7 @@ const pageCache = new Map();
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
-const reader = document.getElementById('reader');
-const pdfCanvas = document.getElementById('pdf-canvas');
-const overlayCanvas = document.getElementById('overlay-canvas');
-const pdfCtx = pdfCanvas.getContext('2d');
-const overlayCtx = overlayCanvas.getContext('2d');
+const readerEl = document.getElementById('reader');
 const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
 const btnToggle = document.getElementById('btn-toggle');
@@ -110,8 +114,7 @@ const btnFile = document.getElementById('btn-file');
 const pageInfo = document.getElementById('page-info');
 const iconDark = document.getElementById('icon-dark');
 const iconLight = document.getElementById('icon-light');
-const loadingIndicator = document.getElementById('loading-indicator');
-const pageWrapper = document.getElementById('page-wrapper');
+const viewport = document.getElementById('viewport');
 
 // ============================================================
 // File Handling
@@ -134,19 +137,36 @@ function handleFile(file) {
 async function loadPDF(data) {
   try {
     if (pdfDoc) pdfDoc.destroy();
-    invalidateCache();
+    cleanup();
 
     pdfDoc = await pdfjsLib.getDocument({ data }).promise;
-    currentPageNum = 1;
-    lightPages.clear();
+    pageDarkOverride.clear();
+    pageAlreadyDark.clear();
+    globalGeneration++;
 
     dropZone.hidden = true;
-    reader.hidden = false;
+    readerEl.hidden = false;
 
-    await renderCurrentPage();
+    await buildPageSlots();
+    setupIntersectionObserver();
+    updateCurrentPageFromScroll();
   } catch (err) {
     console.error('Failed to load PDF:', err);
     alert('Could not load this PDF. It may be corrupted or password-protected.');
+  }
+}
+
+// ============================================================
+// Cleanup
+// ============================================================
+
+function cleanup() {
+  // Remove all page containers from viewport
+  viewport.innerHTML = '';
+  pageSlots.clear();
+  if (scrollObserver) {
+    scrollObserver.disconnect();
+    scrollObserver = null;
   }
 }
 
@@ -156,240 +176,312 @@ async function loadPDF(data) {
 
 function calculateScale(page) {
   const vp = page.getViewport({ scale: 1 });
-  const toolbarH = 48;
   const padding = 48;
+  const toolbarH = 48;
   const availW = window.innerWidth - padding;
   const availH = window.innerHeight - toolbarH - padding;
   return Math.min(availW / vp.width, availH / vp.height, 3);
 }
 
 // ============================================================
-// Page Cache Management
+// Continuous Scroll: Build Page Slots
+//
+// Creates a container for each page with placeholder dimensions.
+// The actual rendering happens lazily via IntersectionObserver.
 // ============================================================
 
-function invalidateCache() {
-  for (const entry of pageCache.values()) {
-    entry.mainBitmap.close();
-    entry.overlayBitmap.close();
+async function buildPageSlots() {
+  if (!pdfDoc) return;
+
+  viewport.innerHTML = '';
+  pageSlots.clear();
+
+  // We need the first page to determine scale
+  const firstPage = await pdfDoc.getPage(1);
+  const scale = calculateScale(firstPage);
+  currentScale = scale;
+  const dpr = window.devicePixelRatio || 1;
+
+  // Batch DOM insertion with DocumentFragment
+  const fragment = document.createDocumentFragment();
+
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const scaledViewport = page.getViewport({ scale: scale * dpr });
+
+    const cssW = Math.floor(scaledViewport.width / dpr);
+    const cssH = Math.floor(scaledViewport.height / dpr);
+
+    // Container
+    const container = document.createElement('div');
+    container.className = 'page-container';
+    container.style.width = cssW + 'px';
+    container.style.height = cssH + 'px';
+    container.dataset.pageNum = i;
+
+    // Main canvas
+    const mainCanvas = document.createElement('canvas');
+    mainCanvas.className = 'page-canvas';
+    mainCanvas.style.width = cssW + 'px';
+    mainCanvas.style.height = cssH + 'px';
+
+    // Overlay canvas
+    const overlayCanvas = document.createElement('canvas');
+    overlayCanvas.className = 'page-overlay';
+    overlayCanvas.style.width = cssW + 'px';
+    overlayCanvas.style.height = cssH + 'px';
+
+    // Text layer
+    const textLayer = document.createElement('div');
+    textLayer.className = 'text-layer';
+    textLayer.style.width = cssW + 'px';
+    textLayer.style.height = cssH + 'px';
+
+    // Page number label
+    const pageLabel = document.createElement('div');
+    pageLabel.className = 'page-label';
+    pageLabel.textContent = i;
+
+    container.appendChild(mainCanvas);
+    container.appendChild(overlayCanvas);
+    container.appendChild(textLayer);
+    container.appendChild(pageLabel);
+    fragment.appendChild(container);
+
+    pageSlots.set(i, {
+      container,
+      mainCanvas,
+      overlayCanvas,
+      textLayer,
+      rendered: false,
+      rendering: false,
+      renderGeneration: 0,
+    });
   }
-  pageCache.clear();
+
+  viewport.appendChild(fragment);
 }
 
-function evictDistantPages(centerPage) {
-  for (const [num, entry] of pageCache) {
-    if (Math.abs(num - centerPage) > CACHE_MAX_DISTANCE) {
-      entry.mainBitmap.close();
-      entry.overlayBitmap.close();
-      pageCache.delete(num);
+// ============================================================
+// IntersectionObserver: Lazy Rendering
+//
+// Observes each page container. When a page enters (or is near)
+// the viewport, we render it. Pages far from view are unloaded
+// to save memory.
+// ============================================================
+
+let scrollObserver = null;
+
+function setupIntersectionObserver() {
+  if (scrollObserver) scrollObserver.disconnect();
+
+  scrollObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const pageNum = parseInt(entry.target.dataset.pageNum, 10);
+        const slot = pageSlots.get(pageNum);
+        if (!slot) continue;
+
+        if (entry.isIntersecting) {
+          renderPageIfNeeded(pageNum);
+          // Pre-render adjacent pages
+          for (let offset = 1; offset <= PRERENDER_MARGIN; offset++) {
+            renderPageIfNeeded(pageNum + offset);
+            renderPageIfNeeded(pageNum - offset);
+          }
+        }
+      }
+      // Update current page indicator based on scroll
+      updateCurrentPageFromScroll();
+    },
+    {
+      root: viewport,
+      rootMargin: '200% 0px', // Start rendering well before visible
+      threshold: 0,
     }
+  );
+
+  for (const [, slot] of pageSlots) {
+    scrollObserver.observe(slot.container);
   }
 }
 
-function getCachedPage(pageNum, scale) {
-  const entry = pageCache.get(pageNum);
-  if (entry && entry.scale === scale) return entry;
-  return null;
-}
-
 // ============================================================
-// Offscreen Page Rendering
-//
-// Renders a page to temporary offscreen canvases, extracts
-// image regions, composites the overlay, and returns ImageBitmaps
-// ready for instant display.
-//
-// Key optimization: we render the page only ONCE. The same render
-// is used both for the main canvas bitmap and for extracting
-// original image pixels for the overlay.
+// Page Rendering
 // ============================================================
 
-function createCanvas(w, h) {
+function createOffscreenCanvas(w, h) {
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   return c;
 }
 
-async function renderPageOffscreen(page, cssScale) {
-  const dpr = window.devicePixelRatio || 1;
-  const viewport = page.getViewport({ scale: cssScale * dpr });
-  const w = Math.floor(viewport.width);
-  const h = Math.floor(viewport.height);
+async function renderPageIfNeeded(pageNum) {
+  if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
 
-  // Single render + operator list extraction in parallel
-  const renderCanvas = createCanvas(w, h);
-  const [, opList] = await Promise.all([
-    page.render({
-      canvasContext: renderCanvas.getContext('2d'),
-      viewport,
-    }).promise,
-    page.getOperatorList(),
-  ]);
+  const slot = pageSlots.get(pageNum);
+  if (!slot || slot.rendered || slot.rendering) return;
 
-  // Extract image positions from the operator list
-  const regions = extractImageRegions(opList, viewport.transform);
-
-  // Composite overlay: copy only image regions from the render
-  const overlayCanvas = createCanvas(w, h);
-  compositeImageRegions(overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
-
-  // Create immutable, GPU-friendly bitmaps for caching
-  const [mainBitmap, overlayBitmap] = await Promise.all([
-    createImageBitmap(renderCanvas),
-    createImageBitmap(overlayCanvas),
-  ]);
-
-  // Release temporary canvases immediately
-  renderCanvas.width = 0;
-  overlayCanvas.width = 0;
-
-  return { mainBitmap, overlayBitmap, scale: cssScale, width: w, height: h };
-}
-
-// ============================================================
-// Display: Paint cached bitmaps onto the visible canvases
-//
-// This is synchronous and instant - no intermediate frames.
-// The browser batches the canvas resize + drawImage into a
-// single repaint, so the user sees only the final result.
-// ============================================================
-
-function displayPage(entry) {
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = Math.floor(entry.width / dpr) + 'px';
-  const cssH = Math.floor(entry.height / dpr) + 'px';
-
-  // Size and fill the main canvas
-  pdfCanvas.width = entry.width;
-  pdfCanvas.height = entry.height;
-  pdfCanvas.style.width = cssW;
-  pdfCanvas.style.height = cssH;
-  pdfCtx.drawImage(entry.mainBitmap, 0, 0);
-
-  // Size and fill the overlay canvas
-  overlayCanvas.width = entry.width;
-  overlayCanvas.height = entry.height;
-  overlayCanvas.style.width = cssW;
-  overlayCanvas.style.height = cssH;
-  overlayCtx.drawImage(entry.overlayBitmap, 0, 0);
-
-  applyDarkModeState();
-}
-
-// ============================================================
-// Core Navigation Pipeline
-// ============================================================
-
-async function renderCurrentPage() {
-  if (!pdfDoc) return;
-
-  const myId = ++navigationId;
-  const pageNum = currentPageNum;
-
-  updateNavigationUI();
-
-  const page = await pdfDoc.getPage(pageNum);
-  if (navigationId !== myId) return;
-
-  const scale = calculateScale(page);
-  currentScale = scale;
-
-  // --- Fast path: page is already cached ---
-  const cached = getCachedPage(pageNum, scale);
-  if (cached) {
-    displayPage(cached);
-    evictDistantPages(pageNum);
-    schedulePreRender(pageNum, scale, myId);
-    return;
-  }
-
-  // --- Slow path: render offscreen, show loading ---
-  pageWrapper.classList.add('loading');
-  loadingIndicator.hidden = false;
+  slot.rendering = true;
+  const myGen = globalGeneration;
+  slot.renderGeneration = myGen;
 
   try {
-    const entry = await renderPageOffscreen(page, scale);
+    const page = await pdfDoc.getPage(pageNum);
+    if (globalGeneration !== myGen) return;
 
-    // Discard if the user navigated away during render
-    if (navigationId !== myId) {
-      entry.mainBitmap.close();
-      entry.overlayBitmap.close();
-      return;
-    }
+    const dpr = window.devicePixelRatio || 1;
+    const scaledViewport = page.getViewport({ scale: currentScale * dpr });
+    const w = Math.floor(scaledViewport.width);
+    const h = Math.floor(scaledViewport.height);
 
-    pageCache.set(pageNum, entry);
-    displayPage(entry);
+    // Render + get operator list + get text content in parallel
+    const renderCanvas = createOffscreenCanvas(w, h);
+    const [, opList, textContent] = await Promise.all([
+      page.render({
+        canvasContext: renderCanvas.getContext('2d'),
+        viewport: scaledViewport,
+      }).promise,
+      page.getOperatorList(),
+      page.getTextContent(),
+    ]);
+
+    if (globalGeneration !== myGen) return;
+
+    // --- Already-dark detection ---
+    const isDark = detectAlreadyDark(renderCanvas);
+    pageAlreadyDark.set(pageNum, isDark);
+
+    // --- Extract image regions ---
+    const regions = extractImageRegions(opList, scaledViewport.transform);
+
+    // --- Paint main canvas ---
+    slot.mainCanvas.width = w;
+    slot.mainCanvas.height = h;
+    const mainCtx = slot.mainCanvas.getContext('2d');
+    mainCtx.drawImage(renderCanvas, 0, 0);
+
+    // --- Paint overlay canvas ---
+    slot.overlayCanvas.width = w;
+    slot.overlayCanvas.height = h;
+    compositeImageRegions(slot.overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
+
+    // --- Build text layer ---
+    buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
+
+    // Release temp canvas
+    renderCanvas.width = 0;
+
+    slot.rendered = true;
+    applyDarkModeToPage(pageNum);
   } catch (err) {
-    if (navigationId !== myId) return;
-    console.error('Render failed:', err);
+    if (globalGeneration !== myGen) return;
+    console.error(`Render page ${pageNum} failed:`, err);
   } finally {
-    if (navigationId === myId) {
-      pageWrapper.classList.remove('loading');
-      loadingIndicator.hidden = true;
-      evictDistantPages(pageNum);
-      schedulePreRender(pageNum, scale, myId);
-    }
+    slot.rendering = false;
   }
 }
 
 // ============================================================
-// Background Pre-rendering
+// Already-Dark Detection
 //
-// After the current page is displayed, we silently pre-render
-// adjacent pages so future navigations are instant.
-// Pages are rendered sequentially (not parallel) to avoid
-// memory spikes from multiple simultaneous offscreen canvases.
-// The pre-render is cancelled if the user navigates away.
+// Samples corners and edges of the rendered page to estimate
+// background luminance. If the background is already dark,
+// inverting would make it light — which is not what we want.
 // ============================================================
 
-function schedulePreRender(centerPage, scale, myId) {
-  // Use requestIdleCallback if available, otherwise setTimeout
-  const schedule = window.requestIdleCallback || ((cb) => setTimeout(cb, 50));
-  schedule(() => preRenderAdjacent(centerPage, scale, myId));
+function detectAlreadyDark(canvas) {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // Read all pixel data once (avoids repeated GPU readbacks)
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  // Sample points biased toward edges/corners where background is visible
+  const samplePoints = [];
+  const margin = Math.max(5, Math.floor(Math.min(w, h) * 0.02));
+  const step = Math.max(1, Math.floor(Math.min(w, h) * 0.05));
+
+  // Corners
+  samplePoints.push(
+    [margin, margin], [w - margin, margin],
+    [margin, h - margin], [w - margin, h - margin],
+  );
+
+  // Edges
+  for (let x = margin; x < w - margin; x += step) {
+    samplePoints.push([x, margin], [x, h - margin]);
+  }
+  for (let y = margin; y < h - margin; y += step) {
+    samplePoints.push([margin, y], [w - margin, y]);
+  }
+
+  let totalLuminance = 0;
+  let count = 0;
+
+  for (const [sx, sy] of samplePoints) {
+    const idx = (sy * w + sx) * 4;
+    const luminance = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) / 255;
+    totalLuminance += luminance;
+    count++;
+  }
+
+  const avgLuminance = count > 0 ? totalLuminance / count : 1;
+  return avgLuminance < DARK_LUMINANCE_THRESHOLD;
 }
 
-async function preRenderAdjacent(centerPage, scale, myId) {
-  // Priority order: next page first, then +2, then previous
-  const offsets = [];
-  for (let i = 1; i <= CACHE_AHEAD; i++) offsets.push(i);
-  for (let i = 1; i <= CACHE_BEHIND; i++) offsets.push(-i);
+// ============================================================
+// Text Layer
+//
+// Builds a positioned text overlay using PDF.js text content.
+// Each text span is positioned absolutely to match the rendered
+// canvas, enabling text selection and copy.
+// ============================================================
 
-  for (const offset of offsets) {
-    // Bail if the user navigated away
-    if (navigationId !== myId) return;
+function buildTextLayer(container, textContent, viewport, dpr) {
+  container.innerHTML = '';
 
-    const num = centerPage + offset;
-    if (num < 1 || num > pdfDoc.numPages) continue;
+  for (const item of textContent.items) {
+    if (!item.str) continue;
 
-    // Skip if already cached at the current scale
-    if (getCachedPage(num, scale)) continue;
+    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
 
-    try {
-      const page = await pdfDoc.getPage(num);
-      if (navigationId !== myId) return;
+    // tx is a 6-element affine matrix [a, b, c, d, e, f]
+    // Font size is derived from the matrix scale
+    const fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
+    const fontSize = fontHeight / dpr;
 
-      const entry = await renderPageOffscreen(page, scale);
-      if (navigationId !== myId) {
-        entry.mainBitmap.close();
-        entry.overlayBitmap.close();
-        return;
-      }
+    const span = document.createElement('span');
+    span.textContent = item.str;
+    span.style.position = 'absolute';
+    span.style.left = (tx[4] / dpr) + 'px';
+    span.style.top = (tx[5] / dpr - fontSize) + 'px';
+    span.style.fontSize = fontSize + 'px';
+    span.style.fontFamily = 'sans-serif';
 
-      pageCache.set(num, entry);
-    } catch (err) {
-      // Pre-render failures are non-critical
-      if (navigationId !== myId) return;
-      console.warn(`Pre-render page ${num} failed:`, err);
+    // Handle rotation if present
+    if (tx[1] !== 0 || tx[2] !== 0) {
+      const angle = Math.atan2(tx[1], tx[0]);
+      span.style.transform = `rotate(${angle}rad)`;
+      span.style.transformOrigin = '0 100%';
     }
+
+    // Match width by stretching
+    if (item.width > 0) {
+      const scaledWidth = item.width * viewport.scale / dpr;
+      span.style.width = scaledWidth + 'px';
+      // Use letter-spacing to stretch text to match PDF glyph positions
+    }
+
+    container.appendChild(span);
   }
 }
 
 // ============================================================
 // Image Region Extraction
-//
-// Walks the PDF operator list, tracks the Current Transformation
-// Matrix (CTM) stack, and records the screen-space bounding box
-// of every raster image encountered.
 // ============================================================
 
 function extractImageRegions(opList, viewportTransform) {
@@ -405,8 +497,6 @@ function extractImageRegions(opList, viewportTransform) {
     const args = argsArray[i];
 
     switch (op) {
-      // --- CTM Stack Management ---
-
       case OPS.save:
         ctmStack.push([...ctm]);
         break;
@@ -419,7 +509,6 @@ function extractImageRegions(opList, viewportTransform) {
         ctm = multiplyMatrices(ctm, args);
         break;
 
-      // Form XObjects push their own transform context
       case OPS.paintFormXObjectBegin:
         ctmStack.push([...ctm]);
         if (args[0]) {
@@ -430,8 +519,6 @@ function extractImageRegions(opList, viewportTransform) {
       case OPS.paintFormXObjectEnd:
         ctm = ctmStack.pop() || [...IDENTITY_MATRIX];
         break;
-
-      // --- Raster Images ---
 
       case OPS.paintImageXObject:
       case OPS.paintInlineImageXObject:
@@ -451,7 +538,6 @@ function extractImageRegions(opList, viewportTransform) {
       }
 
       // Image masks (83, 84, 89, 90) are 1-bit stencils, NOT photos.
-      // They get inverted along with the rest of the page content.
     }
   }
 
@@ -477,27 +563,92 @@ function compositeImageRegions(ctx, sourceCanvas, regions, canvasW, canvasH) {
 }
 
 // ============================================================
-// Dark Mode Toggle (per-page)
+// Dark Mode Logic
+//
+// Each page resolves its dark mode state through:
+// 1. User override (if set) — 'dark' or 'light'
+// 2. Already-dark detection — if page is dark, skip inversion
+// 3. Default — apply dark mode
 // ============================================================
 
-function applyDarkModeState() {
-  const isDark = !lightPages.has(currentPageNum);
+function shouldApplyDark(pageNum) {
+  const override = pageDarkOverride.get(pageNum);
+  if (override === 'dark') return true;
+  if (override === 'light') return false;
 
-  pdfCanvas.classList.toggle('dark-active', isDark);
-  overlayCanvas.hidden = !isDark;
+  // Auto mode: don't invert if already dark
+  if (pageAlreadyDark.get(pageNum)) return false;
 
-  iconDark.hidden = !isDark;
-  iconLight.hidden = isDark;
-  btnToggle.classList.toggle('toggle-active', isDark);
+  return true; // Default: apply dark mode
+}
+
+function applyDarkModeToPage(pageNum) {
+  const slot = pageSlots.get(pageNum);
+  if (!slot || !slot.rendered) return;
+
+  const dark = shouldApplyDark(pageNum);
+  slot.mainCanvas.classList.toggle('dark-active', dark);
+  slot.overlayCanvas.classList.toggle('overlay-visible', dark);
+}
+
+function applyDarkModeToAllPages() {
+  for (const [pageNum] of pageSlots) {
+    applyDarkModeToPage(pageNum);
+  }
+}
+
+// ============================================================
+// Current Page Tracking (from scroll position)
+// ============================================================
+
+let currentVisiblePage = 1;
+
+function updateCurrentPageFromScroll() {
+  if (!pdfDoc) return;
+
+  const viewportRect = viewport.getBoundingClientRect();
+  const viewportCenter = viewportRect.top + viewportRect.height / 2;
+  let closestPage = 1;
+  let closestDist = Infinity;
+
+  for (const [pageNum, slot] of pageSlots) {
+    const rect = slot.container.getBoundingClientRect();
+    const pageCenter = rect.top + rect.height / 2;
+    const dist = Math.abs(pageCenter - viewportCenter);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closestPage = pageNum;
+    }
+  }
+
+  currentVisiblePage = closestPage;
+  updateNavigationUI();
+  updateToggleButton();
+}
+
+// ============================================================
+// Toggle Button State
+// ============================================================
+
+function updateToggleButton() {
+  const dark = shouldApplyDark(currentVisiblePage);
+  iconDark.hidden = !dark;
+  iconLight.hidden = dark;
+  btnToggle.classList.toggle('toggle-active', dark);
 }
 
 function toggleDarkMode() {
-  if (lightPages.has(currentPageNum)) {
-    lightPages.delete(currentPageNum);
+  const pageNum = currentVisiblePage;
+  const currentlyDark = shouldApplyDark(pageNum);
+
+  if (currentlyDark) {
+    pageDarkOverride.set(pageNum, 'light');
   } else {
-    lightPages.add(currentPageNum);
+    pageDarkOverride.set(pageNum, 'dark');
   }
-  applyDarkModeState();
+
+  applyDarkModeToPage(pageNum);
+  updateToggleButton();
 }
 
 // ============================================================
@@ -506,17 +657,18 @@ function toggleDarkMode() {
 
 function updateNavigationUI() {
   if (!pdfDoc) return;
-  pageInfo.textContent = `${currentPageNum} / ${pdfDoc.numPages}`;
-  btnPrev.disabled = currentPageNum <= 1;
-  btnNext.disabled = currentPageNum >= pdfDoc.numPages;
+  pageInfo.textContent = `${currentVisiblePage} / ${pdfDoc.numPages}`;
+  btnPrev.disabled = currentVisiblePage <= 1;
+  btnNext.disabled = currentVisiblePage >= pdfDoc.numPages;
 }
 
-async function goToPage(num) {
+function scrollToPage(pageNum) {
   if (!pdfDoc) return;
-  const clamped = Math.max(1, Math.min(num, pdfDoc.numPages));
-  if (clamped === currentPageNum) return;
-  currentPageNum = clamped;
-  await renderCurrentPage();
+  const clamped = Math.max(1, Math.min(pageNum, pdfDoc.numPages));
+  const slot = pageSlots.get(clamped);
+  if (!slot) return;
+
+  slot.container.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // ============================================================
@@ -524,7 +676,6 @@ async function goToPage(num) {
 // ============================================================
 
 // --- Drop Zone ---
-
 dropZone.addEventListener('click', () => fileInput.click());
 
 dropZone.addEventListener('dragover', (e) => {
@@ -548,37 +699,52 @@ fileInput.addEventListener('change', () => {
 });
 
 // --- Toolbar ---
-
-btnPrev.addEventListener('click', () => goToPage(currentPageNum - 1));
-btnNext.addEventListener('click', () => goToPage(currentPageNum + 1));
+btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1));
+btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1));
 btnToggle.addEventListener('click', toggleDarkMode);
 btnFile.addEventListener('click', () => fileInput.click());
 
 // --- Keyboard ---
-
 document.addEventListener('keydown', (e) => {
   if (!pdfDoc) return;
-  if (e.key === 'ArrowLeft') goToPage(currentPageNum - 1);
-  else if (e.key === 'ArrowRight') goToPage(currentPageNum + 1);
+  if (e.key === 'ArrowLeft') scrollToPage(currentVisiblePage - 1);
+  else if (e.key === 'ArrowRight') scrollToPage(currentVisiblePage + 1);
   else if (e.key === 'd') toggleDarkMode();
 });
 
-// --- Resize: invalidate cache since scale changes ---
+// --- Scroll: update current page indicator (throttled) ---
+let scrollRAF = 0;
+viewport.addEventListener('scroll', () => {
+  if (!pdfDoc) return;
+  if (scrollRAF) return;
+  scrollRAF = requestAnimationFrame(() => {
+    scrollRAF = 0;
+    updateCurrentPageFromScroll();
+  });
+}, { passive: true });
 
+// --- Resize: rebuild all pages at new scale ---
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
+  resizeTimer = setTimeout(async () => {
     if (!pdfDoc) return;
-    invalidateCache();
-    renderCurrentPage();
+    const pageToRestore = currentVisiblePage;
+    globalGeneration++;
+    await buildPageSlots();
+    setupIntersectionObserver();
+    // Restore scroll position to the same page
+    const slot = pageSlots.get(pageToRestore);
+    if (slot) {
+      slot.container.scrollIntoView({ block: 'start' });
+    }
+    updateCurrentPageFromScroll();
   }, 200);
 });
 
 // --- Allow dropping a new file onto the reader too ---
-
-reader.addEventListener('dragover', (e) => e.preventDefault());
-reader.addEventListener('drop', (e) => {
+readerEl.addEventListener('dragover', (e) => e.preventDefault());
+readerEl.addEventListener('drop', (e) => {
   e.preventDefault();
   handleFile(e.dataTransfer.files[0]);
 });
