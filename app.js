@@ -479,6 +479,9 @@ function detectAlreadyDark(canvas) {
 function buildTextLayer(container, textContent, viewport, dpr) {
   container.innerHTML = '';
 
+  // Shared canvas for measuring text widths without DOM reflows
+  const measureCtx = document.createElement('canvas').getContext('2d');
+
   // --- Step 1: Transform all items to screen coordinates ---
   const items = [];
   for (const item of textContent.items) {
@@ -488,25 +491,20 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     const fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
     const fontSize = fontHeight / dpr;
 
-    // Skip items with degenerate size
     if (fontSize < 1) continue;
 
     const left = tx[4] / dpr;
-    // tx[5] is the baseline Y in canvas pixels. BASELINE_RATIO
-    // (measured at runtime) tells us where the browser places the
-    // baseline within a line-height:1 box, so we can align precisely.
     const top = tx[5] / dpr - fontSize * BASELINE_RATIO;
-    const width = item.width > 0 ? (item.width * viewport.scale / dpr) : 0;
+    const pdfWidth = item.width > 0 ? (item.width * viewport.scale / dpr) : 0;
 
     items.push({
       str: item.str || '',
       left,
       top,
       fontSize,
-      width,
+      pdfWidth,
       height: fontSize,
       hasEOL: !!item.hasEOL,
-      // For rotation detection
       tx1: tx[1],
       tx2: tx[2],
     });
@@ -515,8 +513,6 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   if (items.length === 0) return;
 
   // --- Step 2: Group into lines by Y coordinate ---
-  // Items within half a font-height of each other are on the same line.
-  // Sort by top first, then group.
   items.sort((a, b) => a.top - b.top || a.left - b.left);
 
   const lines = [];
@@ -529,12 +525,9 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     const threshold = lineHeight * 0.5;
 
     if (Math.abs(item.top - lineTop) < threshold) {
-      // Same line
       currentLine.push(item);
-      // Update line height to max
       if (item.height > lineHeight) lineHeight = item.height;
     } else {
-      // New line
       lines.push(currentLine);
       currentLine = [item];
       lineTop = item.top;
@@ -544,19 +537,11 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   lines.push(currentLine);
 
   // --- Step 3: Build DOM with continuous flow ---
-  //
-  // Key insight: for seamless selection across lines, the DOM
-  // must be in normal document flow — not position:absolute.
-  // We use padding-top on each line-div to push it to its
-  // correct Y position relative to the previous line's bottom.
-  // This gives the browser a continuous selectable surface.
   const fragment = document.createDocumentFragment();
-  const pageWidth = viewport.width / dpr;
 
-  let prevBottom = 0; // bottom edge of the previous line (in CSS px)
+  let prevBottom = 0;
 
   for (const line of lines) {
-    // Sort items within the line left-to-right
     line.sort((a, b) => a.left - b.left);
 
     const lineDiv = document.createElement('div');
@@ -565,15 +550,13 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     const lineTop = line[0].top;
     const lineHeight = Math.max(...line.map(it => it.height));
 
-    // Vertical gap from previous line → padding-top
     const vGap = Math.max(0, lineTop - prevBottom);
     lineDiv.style.paddingTop = vGap + 'px';
     lineDiv.style.height = (lineHeight + vGap) + 'px';
-    lineDiv.style.width = pageWidth + 'px';
 
     prevBottom = lineTop + lineHeight;
 
-    let cursor = 0; // horizontal position tracker
+    let cursor = 0;
 
     for (let i = 0; i < line.length; i++) {
       const item = line[i];
@@ -583,19 +566,30 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       span.textContent = item.str;
       span.style.fontSize = item.fontSize + 'px';
 
-      // Horizontal gap from the previous span (or line start)
+      // Horizontal gap from previous span
       const gap = item.left - cursor;
       if (gap > 0.5) {
-        span.style.paddingLeft = gap + 'px';
+        span.style.marginLeft = gap + 'px';
       }
 
-      // Stretch span to match PDF glyph width
-      if (item.width > 0) {
-        span.style.width = (item.width + Math.max(0, gap)) + 'px';
-        span.style.display = 'inline-block';
+      // Measure the natural width of this text in sans-serif,
+      // then scale horizontally to match the PDF's exact width.
+      // This handles bold, condensed, monospace, and any other
+      // font whose glyph widths differ from sans-serif.
+      if (item.pdfWidth > 0) {
+        measureCtx.font = `${item.fontSize}px sans-serif`;
+        const naturalWidth = measureCtx.measureText(item.str).width;
+
+        if (naturalWidth > 0) {
+          const scaleX = item.pdfWidth / naturalWidth;
+          span.style.display = 'inline-block';
+          span.style.width = item.pdfWidth + 'px';
+          span.style.transform = `scaleX(${scaleX})`;
+          span.style.transformOrigin = 'left top';
+        }
       }
 
-      // Handle rotation
+      // Handle rotation (overrides scaleX if present)
       if (item.tx1 !== 0 || item.tx2 !== 0) {
         const angle = Math.atan2(item.tx1, Math.sqrt(item.tx2 * item.tx2 + (item.fontSize * dpr) * (item.fontSize * dpr)));
         span.style.transform = `rotate(${angle}rad)`;
@@ -603,17 +597,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       }
 
       lineDiv.appendChild(span);
-      cursor = item.left + (item.width || 0);
-    }
-
-    // Fill remaining width so dragging past end-of-line stays in flow
-    const remaining = pageWidth - cursor;
-    if (remaining > 1) {
-      const filler = document.createElement('span');
-      filler.className = 'text-filler';
-      filler.textContent = '\u00A0';
-      filler.style.width = remaining + 'px';
-      lineDiv.appendChild(filler);
+      cursor = item.left + (item.pdfWidth || 0);
     }
 
     fragment.appendChild(lineDiv);

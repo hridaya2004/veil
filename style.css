@@ -252,13 +252,7 @@ body {
   box-sizing: border-box;
 }
 
-.text-filler {
-  display: inline-block;
-  vertical-align: top;
-}
-
 .text-layer span::selection,
-.text-filler::selection,
 .text-line::selection {
   background: rgba(107, 138, 205, 0.3);
 }
