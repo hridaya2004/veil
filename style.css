@@ -179,6 +179,11 @@ body {
   border-radius: 2px;
   line-height: 0;
   flex-shrink: 0;
+  transition: opacity 120ms ease;
+}
+
+#page-wrapper.loading {
+  opacity: 0.4;
 }
 
 #pdf-canvas {
