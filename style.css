@@ -111,7 +111,7 @@ body {
 
 .toolbar-left,
 .toolbar-right {
-  min-width: 60px;
+  min-width: 80px;
 }
 
 .toolbar-right {
@@ -271,6 +271,49 @@ body {
   color: var(--text-secondary);
   opacity: 0.5;
   user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   Export Progress
+   ============================================================ */
+
+#export-progress {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  z-index: 50;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+.export-progress-bar {
+  width: 200px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.export-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 200ms ease;
+}
+
+.export-progress-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 

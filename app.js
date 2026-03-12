@@ -128,6 +128,13 @@ let isScannedDocument = false;
 let tesseractWorker = null;
 let tesseractLoading = false;
 
+// pdf-lib module — loaded lazily for export.
+let pdfLibModule = null;
+
+// Export state
+let exporting = false;
+let originalFileName = 'document';
+
 // ============================================================
 // DOM References
 // ============================================================
@@ -143,6 +150,10 @@ const pageInfo = document.getElementById('page-info');
 const iconDark = document.getElementById('icon-dark');
 const iconLight = document.getElementById('icon-light');
 const viewport = document.getElementById('viewport');
+const btnExport = document.getElementById('btn-export');
+const exportProgressEl = document.getElementById('export-progress');
+const exportProgressFill = document.querySelector('.export-progress-fill');
+const exportProgressText = document.querySelector('.export-progress-text');
 
 // ============================================================
 // File Handling
@@ -150,6 +161,7 @@ const viewport = document.getElementById('viewport');
 
 function handleFile(file) {
   if (!file || file.type !== 'application/pdf') return;
+  originalFileName = file.name.replace(/\.pdf$/i, '');
 
   const fr = new FileReader();
   fr.onload = async (e) => {
@@ -1125,6 +1137,240 @@ function scrollToPage(pageNum) {
 }
 
 // ============================================================
+// Export Dark PDF
+//
+// Renders each page with dark mode applied, composites original
+// images on top, and assembles a new PDF using pdf-lib.
+// An invisible text layer (opacity: 0) is embedded for
+// selectability and search. For scanned docs, OCR runs on each
+// page during export.
+//
+// Pages are processed sequentially to keep memory bounded:
+// only one page's canvases are alive at any time.
+// ============================================================
+
+async function ensurePdfLib() {
+  if (pdfLibModule) return pdfLibModule;
+  pdfLibModule = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js');
+  return pdfLibModule;
+}
+
+function showExportProgress(current, total) {
+  exportProgressEl.hidden = false;
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  exportProgressFill.style.width = pct + '%';
+  exportProgressText.textContent = `${current} / ${total}`;
+}
+
+function hideExportProgress() {
+  exportProgressEl.hidden = true;
+  exportProgressFill.style.width = '0%';
+}
+
+async function exportDarkPdf() {
+  if (!pdfDoc || exporting) return;
+
+  exporting = true;
+  btnExport.disabled = true;
+
+  try {
+    const { PDFDocument, StandardFonts } = await ensurePdfLib();
+
+    const outPdf = await PDFDocument.create();
+    const font = await outPdf.embedFont(StandardFonts.Helvetica);
+    const totalPages = pdfDoc.numPages;
+    const exportDpr = 2;
+
+    showExportProgress(0, totalPages);
+
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      const page = await pdfDoc.getPage(pageNum);
+      const origVp = page.getViewport({ scale: 1 });
+      const renderVp = page.getViewport({ scale: currentScale * exportDpr });
+      const w = Math.floor(renderVp.width);
+      const h = Math.floor(renderVp.height);
+
+      // --- Render + get operator list in parallel ---
+      const renderCanvas = createOffscreenCanvas(w, h);
+      const tasks = [
+        page.render({
+          canvasContext: renderCanvas.getContext('2d'),
+          viewport: renderVp,
+        }).promise,
+        page.getOperatorList(),
+      ];
+      if (!isScannedDocument) {
+        tasks.push(page.getTextContent());
+      }
+
+      const results = await Promise.all(tasks);
+      const opList = results[1];
+      const textContent = isScannedDocument ? null : results[2];
+
+      // --- Determine dark mode for this page ---
+      const isDarkBg = detectAlreadyDark(renderCanvas);
+      const override = pageDarkOverride.get(pageNum);
+      let applyDark;
+      if (override === 'dark') applyDark = true;
+      else if (override === 'light') applyDark = false;
+      else applyDark = !isDarkBg;
+
+      // --- Compose final image ---
+      const finalCanvas = createOffscreenCanvas(w, h);
+      const ctx = finalCanvas.getContext('2d');
+
+      if (applyDark) {
+        // Apply the same inversion as the CSS filter
+        ctx.filter = 'invert(0.86) hue-rotate(180deg)';
+        ctx.drawImage(renderCanvas, 0, 0);
+        ctx.filter = 'none';
+
+        // Restore original images (skip for scanned docs)
+        if (!isScannedDocument) {
+          const regions = extractImageRegions(opList, renderVp.transform);
+          if (regions.length > 0) {
+            compositeImageRegions(ctx, renderCanvas, regions, w, h);
+          }
+        }
+      } else {
+        ctx.drawImage(renderCanvas, 0, 0);
+      }
+
+      // --- Convert to JPEG ---
+      const jpegBlob = await new Promise(r =>
+        finalCanvas.toBlob(r, 'image/jpeg', 0.85)
+      );
+      const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
+
+      // --- Add page to output PDF ---
+      const jpegImage = await outPdf.embedJpg(jpegBytes);
+      const outPage = outPdf.addPage([origVp.width, origVp.height]);
+      outPage.drawImage(jpegImage, {
+        x: 0,
+        y: 0,
+        width: origVp.width,
+        height: origVp.height,
+      });
+
+      // --- Invisible text layer ---
+      //
+      // Each text item is drawn in Helvetica at a fontSize adjusted
+      // so the string's width matches the original PDF width. This
+      // is the PDF-space equivalent of CSS scaleX(): Helvetica has
+      // different glyph widths than the original font, so without
+      // adjustment the selection would extend past the visible text.
+      //
+      // adjustedSize = baseFontSize * (targetWidth / helveticaWidth)
+      //
+      // The height distortion is invisible (opacity: 0 text).
+      if (textContent) {
+        // Native PDF: use original text coordinates
+        for (const item of textContent.items) {
+          if (!item.str || !item.str.trim()) continue;
+          const tx = item.transform;
+          const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
+          if (baseFontSize < 1) continue;
+
+          // Adjust fontSize so Helvetica width matches PDF width
+          let drawSize = baseFontSize;
+          if (item.width > 0) {
+            const naturalWidth = font.widthOfTextAtSize(item.str, baseFontSize);
+            if (naturalWidth > 0) {
+              drawSize = baseFontSize * (item.width / naturalWidth);
+            }
+          }
+
+          try {
+            outPage.drawText(item.str, {
+              x: tx[4],
+              y: tx[5],
+              size: drawSize,
+              font,
+              opacity: 0,
+            });
+          } catch (_) {
+            // Skip characters not in Helvetica encoding
+          }
+        }
+      } else if (isScannedDocument) {
+        // Scanned PDF: run OCR for text layer
+        const worker = await ensureTesseractWorker();
+        if (worker) {
+          // Use the original (non-inverted) render for OCR
+          const ocrBlob = await new Promise(r =>
+            renderCanvas.toBlob(r, 'image/png')
+          );
+          const { data } = await worker.recognize(ocrBlob);
+
+          if (data.words) {
+            const sx = origVp.width / w;
+            const sy = origVp.height / h;
+
+            for (const word of data.words) {
+              if (!word.text || !word.text.trim()) continue;
+              const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
+              if (baseFontSize < 1) continue;
+
+              // Adjust fontSize so Helvetica width matches OCR bbox width
+              const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
+              let drawSize = baseFontSize;
+              if (targetWidth > 0) {
+                const naturalWidth = font.widthOfTextAtSize(word.text, baseFontSize);
+                if (naturalWidth > 0) {
+                  drawSize = baseFontSize * (targetWidth / naturalWidth);
+                }
+              }
+
+              try {
+                outPage.drawText(word.text, {
+                  x: word.bbox.x0 * sx,
+                  y: origVp.height - word.bbox.y1 * sy,
+                  size: drawSize,
+                  font,
+                  opacity: 0,
+                });
+              } catch (_) {
+                // Skip characters not in Helvetica encoding
+              }
+            }
+          }
+        }
+      }
+
+      // --- Release memory ---
+      renderCanvas.width = 0;
+      finalCanvas.width = 0;
+
+      showExportProgress(pageNum, totalPages);
+
+      // Yield to UI thread for progress bar update
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    // --- Save and trigger download ---
+    const pdfBytes = await outPdf.save();
+    hideExportProgress();
+
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${originalFileName}-dark.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+  } catch (err) {
+    console.error('Export failed:', err);
+    hideExportProgress();
+  } finally {
+    exporting = false;
+    btnExport.disabled = false;
+  }
+}
+
+// ============================================================
 // Event Listeners
 // ============================================================
 
@@ -1155,6 +1401,7 @@ fileInput.addEventListener('change', () => {
 btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1));
 btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1));
 btnToggle.addEventListener('click', toggleDarkMode);
+btnExport.addEventListener('click', exportDarkPdf);
 btnFile.addEventListener('click', () => fileInput.click());
 
 // --- Keyboard ---
