@@ -328,7 +328,7 @@ async function ensureTesseractWorker() {
   }
 }
 
-async function ocrPage(canvas, textLayerDiv, scaledViewport, origViewport, dpr, myGen) {
+async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
   const worker = await ensureTesseractWorker();
   if (!worker || globalGeneration !== myGen) return;
 
@@ -336,14 +336,11 @@ async function ocrPage(canvas, textLayerDiv, scaledViewport, origViewport, dpr, 
     const { data } = await worker.recognize(canvas);
     if (globalGeneration !== myGen) return;
 
-    // Release the OCR canvas immediately — no longer needed
-    canvas.width = 0;
-
-    // Build the text layer via PDF round-trip using the exact
-    // viewport transforms from the original page.
-    await buildOcrTextLayerViaRoundTrip(
-      textLayerDiv, data, scaledViewport, origViewport, dpr, myGen
+    buildOcrTextLayerDirect(
+      textLayerDiv, data, canvas.width, canvas.height, cssWidth, cssHeight
     );
+
+    canvas.width = 0;
   } catch (err) {
     if (globalGeneration !== myGen) return;
     console.warn('OCR failed for page:', err);
@@ -351,119 +348,130 @@ async function ocrPage(canvas, textLayerDiv, scaledViewport, origViewport, dpr, 
 }
 
 /**
- * Builds an OCR text layer by round-tripping through PDF.js.
+ * Builds an OCR text layer with flat absolute positioning.
  *
- * The process:
- *   1. pdf-lib creates a single-page PDF with OCR text as invisible Helvetica
- *   2. PDF.js loads it and extracts textContent (with precise font metrics)
- *   3. buildTextLayer renders the text layer using the native builder
+ * Each word becomes an absolutely-positioned span at the exact
+ * coordinates Tesseract reports, converted from canvas pixels to
+ * CSS pixels. No round-trip PDF, no flow layout, no prevBottom.
  *
- * This gives OCR text the exact same selection quality as native PDFs
- * because the coordinates come from PDF.js's own text extraction, which
- * produces transform matrices that match the canvas rendering pixel-perfectly.
- *
- * Cost: ~50-100ms per page (negligible vs 2-5s OCR time).
+ * Key design decisions (informed by 12 failed attempts):
+ *   - Absolute positioning: eliminates the Phantom Clamp Theorem
+ *     (cumulative errors from flow layout paddingTop)
+ *   - line-height: 1 on spans: prevents selection highlight from
+ *     expanding beyond the text (the fix for Attempt #1's failure)
+ *   - Per-LINE fontSize: all words on the same line share the same
+ *     fontSize, preventing PDF.js-style sorting fractures
+ *   - Tesseract line.baseline for Y positioning: more accurate than
+ *     bbox.y1 (which includes descenders and varies per word)
+ *   - No round-trip: eliminates two-source matrix mismatch entirely
+ *   - Trailing space in textContent: preserves word spacing in copy/paste
  */
-async function buildOcrTextLayerViaRoundTrip(
-  container, ocrData, scaledViewport, origViewport, dpr, myGen
-) {
-  const pdfLib = await ensurePdfLib();
-  if (globalGeneration !== myGen) return;
+function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, cssH) {
+  container.innerHTML = '';
 
-  const { PDFDocument, StandardFonts } = pdfLib;
+  const scaleX = cssW / canvasW;
+  const scaleY = cssH / canvasH;
 
-  // Page dimensions derived from the ACTUAL canvas dimensions.
-  // NOT from origViewport (which causes a viewport size mismatch
-  // because Math.floor on canvas dims means the effective page size
-  // is slightly smaller than origViewport).
-  //
-  // With these dimensions, tempViewport at the same scale produces
-  // EXACTLY canvasW × canvasH — pixel-perfect match with the canvas.
-  const canvasW = Math.floor(scaledViewport.width);
-  const canvasH = Math.floor(scaledViewport.height);
-  const scale = currentScale * dpr;
-  const pageWidthPt = canvasW / scale;
-  const pageHeightPt = canvasH / scale;
-
-  // Simple scale factors: canvas pixels → PDF points
-  const sx = pageWidthPt / canvasW;
-  const sy = pageHeightPt / canvasH;
-
-  const tempPdf = await PDFDocument.create();
-  const font = await tempPdf.embedFont(StandardFonts.Helvetica);
-  const page = tempPdf.addPage([pageWidthPt, pageHeightPt]);
-
-  // Collect and sanitize OCR words
+  // Use Tesseract's line structure for grouping and baseline
   const ocrLines = ocrData.lines || [];
   const flatWords = ocrData.words || [];
-  const rawWords = ocrLines.length > 0
-    ? ocrLines.flatMap(line => line.words || [])
-    : flatWords;
 
-  const words = sanitizeOcrWords(rawWords, OCR_CONFIDENCE_THRESHOLD);
+  // If no line structure, fall back to flat words
+  const linesToProcess = ocrLines.length > 0
+    ? ocrLines
+    : [{ words: flatWords, baseline: null }];
 
-  for (const word of words) {
-    const wordText = normalizeLigatures(word.text);
-    const bboxH = word.bbox.y1 - word.bbox.y0;
+  const fragment = document.createDocumentFragment();
+  const measureCtx = document.createElement('canvas').getContext('2d');
 
-    const xPt = word.bbox.x0 * sx;
-    const yPt = pageHeightPt - word.bbox.y1 * sy;
+  for (const line of linesToProcess) {
+    const words = (line.words || [])
+      .filter(w => w.text && w.text.trim() && w.confidence >= OCR_CONFIDENCE_THRESHOLD);
 
-    // Font size from bbox height. NO width-matching.
-    //
-    // Width-matching (drawSize = baseFontSize * targetW / naturalW)
-    // distorts the fontSize per-word. When PDF.js reads back the text,
-    // buildTextLayer computes: top = tx[5]/dpr - fontSize * BASELINE_RATIO
-    // The distorted fontSize produces a wrong "top" for each word,
-    // and the error is different per word → lines don't align.
-    //
-    // Without width-matching, fontSize faithfully represents the text
-    // height. buildTextLayer's scaleX handles the horizontal fit
-    // (item.width from PDF.js font metrics vs measured naturalWidth).
-    const drawSize = bboxH * sy * 0.85;
-    if (drawSize < 1) continue;
+    if (words.length === 0) continue;
 
-    try {
-      page.drawText(wordText, {
-        x: xPt,
-        y: yPt,
-        size: drawSize,
-        font,
-        opacity: 0,
-      });
-    } catch (_) {
-      // Skip characters not encodable in Helvetica (WinAnsi)
+    // Compute per-line fontSize from the MEDIAN word bbox height.
+    // Using median (not individual word height) prevents per-word
+    // fontSize variation that would cause vertical jitter.
+    const wordHeights = words.map(w => (w.bbox.y1 - w.bbox.y0) * scaleY);
+    wordHeights.sort((a, b) => a - b);
+    const medianHeight = wordHeights[Math.floor(wordHeights.length / 2)];
+    const fontSize = medianHeight * 0.85;
+
+    if (fontSize < 1) continue;
+
+    // Determine the baseline Y position for this line.
+    // Tesseract's line.baseline provides the polynomial baseline
+    // (y = p1*x + p0) which is far more accurate than bbox.y1.
+    // For horizontal text, baseline.y0 ≈ baseline.y1 ≈ the Y
+    // where letter bodies rest (above descenders).
+    let baselineY;
+    if (line.baseline && line.baseline.y0 != null) {
+      // Use Tesseract's computed baseline (average of endpoints)
+      baselineY = ((line.baseline.y0 + line.baseline.y1) / 2) * scaleY;
+    } else {
+      // Fallback: estimate baseline from median bbox
+      // Baseline sits at approximately bbox.y0 + 78% of bbox height
+      const medianY0 = words.reduce((s, w) => s + w.bbox.y0, 0) / words.length;
+      const medianBboxH = medianHeight / scaleY * scaleY; // in CSS pixels
+      baselineY = (medianY0 * scaleY) + medianBboxH * 0.78;
+    }
+
+    // Position: top = baseline - fontSize (text renders downward from top)
+    // This places the top of the text at one fontSize above the baseline,
+    // which is where the ascender line sits.
+    const lineTop = baselineY - fontSize;
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      const wordText = normalizeLigatures(word.text);
+      const isLast = i === words.length - 1;
+
+      const span = document.createElement('span');
+      // Trailing space for copy/paste word separation.
+      // white-space: pre preserves it. Last word: no trailing space.
+      span.textContent = isLast ? wordText : wordText + ' ';
+
+      const left = word.bbox.x0 * scaleX;
+      const width = (word.bbox.x1 - word.bbox.x0) * scaleX;
+
+      span.style.position = 'absolute';
+      span.style.left = left + 'px';
+      span.style.top = lineTop + 'px';
+      span.style.fontSize = fontSize + 'px';
+      span.style.lineHeight = '1';
+
+      // Scale the span horizontally to match the OCR bbox width.
+      // Measure the natural text width at this fontSize, then scaleX
+      // to stretch/compress to match the bbox.
+      if (width > 0) {
+        measureCtx.font = `${fontSize}px sans-serif`;
+        const naturalWidth = measureCtx.measureText(span.textContent).width;
+        if (naturalWidth > 0) {
+          span.style.display = 'inline-block';
+          span.style.transformOrigin = '0% 0%';
+          span.style.transform = `scaleX(${width / naturalWidth})`;
+        }
+      }
+
+      fragment.appendChild(span);
     }
   }
 
-  // --- Step 2: Load the in-memory PDF with PDF.js ---
-  const tempPdfBytes = await tempPdf.save();
-  if (globalGeneration !== myGen) return;
-
-  const tempDoc = await pdfjsLib.getDocument({ data: tempPdfBytes }).promise;
-  if (globalGeneration !== myGen) {
-    tempDoc.destroy();
-    return;
-  }
-
-  try {
-    const tempPage = await tempDoc.getPage(1);
-    const tempViewport = tempPage.getViewport({ scale });
-    const textContent = await tempPage.getTextContent();
-
-    if (globalGeneration !== myGen) return;
-
-    buildTextLayer(container, textContent, tempViewport, dpr);
-  } finally {
-    tempDoc.destroy();
-  }
+  container.appendChild(fragment);
 }
 
-// buildOcrTextLayer has been removed (Fase 26).
-// OCR text now flows through buildOcrTextLayerViaRoundTrip() which
-// creates an in-memory PDF with pdf-lib, loads it with PDF.js, and
-// passes the native textContent to buildTextLayer(). This produces
-// selection behavior identical to native PDFs.
+/*
+ * buildOcrTextLayerViaRoundTrip has been removed (Fase 31).
+ * OCR text now uses buildOcrTextLayerDirect() — flat absolute
+ * positioning directly from Tesseract coordinates, no round-trip.
+ */
+
+// Previous OCR text layer approaches (Fase 26-30) have been removed:
+// - buildOcrTextLayer (Fase 8-21): manual OCR DOM builder
+// - convertOcrToTextContent (Fase 26): arithmetic conversion to native format
+// - buildOcrTextLayerViaRoundTrip (Fase 27-30): pdf-lib → PDF.js round-trip
+// All replaced by buildOcrTextLayerDirect (Fase 31): flat absolute positioning.
 
 // ============================================================
 // Cleanup
@@ -736,10 +744,9 @@ async function renderPageIfNeeded(pageNum) {
     // --- Text layer ---
     if (isScannedDocument) {
       // OCR runs in background — text becomes selectable silently
-      // Pass the original page viewport (scale=1) and the scaled viewport
-      // so the round-trip can use the exact coordinate system.
-      const origVp = page.getViewport({ scale: 1 });
-      ocrPage(renderCanvas, slot.textLayer, scaledViewport, origVp, dpr, myGen);
+      const cssW = Math.floor(w / dpr);
+      const cssH = Math.floor(h / dpr);
+      ocrPage(renderCanvas, slot.textLayer, cssW, cssH, myGen);
       // renderCanvas is kept alive for OCR; it will be GC'd after
     } else {
       buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
@@ -802,120 +809,6 @@ function detectAlreadyDark(canvas) {
 // any point to any other point produces a clean, continuous
 // selection — like on iOS.
 // ============================================================
-
-/**
- * Builds a sectioned text layer for OCR content.
- *
- * Splits textContent items into sections based on vertical gaps.
- * Each section gets its own absolutely-positioned wrapper div with
- * an independent flow layout inside. This prevents prevBottom
- * poisoning from cascading across sections.
- *
- * The section detection threshold is based on the median gap
- * between consecutive items, multiplied by OCR_GAP_OUTLIER_FACTOR.
- */
-function buildSectionedTextLayer(container, textContent, viewport, dpr) {
-  container.innerHTML = '';
-
-  if (!textContent.items || textContent.items.length === 0) return;
-
-  // Compute screen-space top for each item
-  const measured = textContent.items
-    .map((item, idx) => {
-      if (!item.str && !item.hasEOL) return null;
-      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-      const fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-      const fontSize = fontHeight / dpr;
-      if (fontSize < 1) return null;
-      const top = tx[5] / dpr - fontSize * BASELINE_RATIO;
-      return { idx, top, height: fontSize, item };
-    })
-    .filter(Boolean);
-
-  if (measured.length === 0) return;
-
-  // Sort by Y for section detection
-  measured.sort((a, b) => a.top - b.top);
-
-  // Compute gaps between consecutive items
-  const gaps = [];
-  for (let i = 1; i < measured.length; i++) {
-    const gap = measured[i].top - (measured[i - 1].top + measured[i - 1].height);
-    gaps.push(Math.max(0, gap));
-  }
-
-  // Median gap and section threshold
-  const sortedGaps = [...gaps].sort((a, b) => a - b);
-  const medianGap = sortedGaps.length > 0
-    ? sortedGaps[Math.floor(sortedGaps.length / 2)]
-    : 0;
-  const sectionThreshold = Math.max(50, medianGap * OCR_GAP_OUTLIER_FACTOR);
-
-  // Split into sections
-  const sections = [[]];
-  sections[0].push(measured[0]);
-
-  for (let i = 1; i < measured.length; i++) {
-    const gap = measured[i].top - (measured[i - 1].top + measured[i - 1].height);
-    if (gap > sectionThreshold) {
-      sections.push([]); // start new section
-    }
-    sections[sections.length - 1].push(measured[i]);
-  }
-
-  // Build each section as an independent flow layout
-  for (const section of sections) {
-    if (section.length === 0) continue;
-
-    // Section wrapper: absolutely positioned at the section's Y
-    const sectionTop = section[0].top;
-    const wrapper = document.createElement('div');
-    wrapper.style.position = 'absolute';
-    wrapper.style.top = sectionTop + 'px';
-    wrapper.style.left = '0';
-    wrapper.style.width = '100%';
-
-    // Adjust items' transforms so Y is relative to section top.
-    // This makes buildTextLayer's flow start from the top of the wrapper.
-    const adjustedItems = section.map(m => {
-      const item = m.item;
-      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-      const fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-      const fontSize = fontHeight / dpr;
-
-      // Compute the original top and shift it relative to sectionTop
-      const originalTop = tx[5] / dpr - fontSize * BASELINE_RATIO;
-      const relativeTop = originalTop - sectionTop;
-
-      // Reconstruct the transform with adjusted Y.
-      // tx[5]/dpr - fontSize * BASELINE_RATIO should equal relativeTop
-      // → tx[5] = (relativeTop + fontSize * BASELINE_RATIO) * dpr
-      const newTx5 = (relativeTop + fontSize * BASELINE_RATIO) * dpr;
-
-      // Reverse the viewport transform to get the new item.transform[5].
-      // For the full matrix multiply:
-      //   tx[5] = vp[1]*it[4] + vp[3]*it[5] + vp[5]
-      // Solving for it[5]:
-      //   it[5] = (newTx5 - vp[5] - vp[1]*it[4]) / vp[3]
-      const vp = viewport.transform;
-      const newItemY = (newTx5 - vp[5] - vp[1] * item.transform[4]) / vp[3];
-
-      return {
-        ...item,
-        transform: [
-          item.transform[0], item.transform[1],
-          item.transform[2], item.transform[3],
-          item.transform[4], newItemY,
-        ],
-      };
-    });
-
-    // Build text layer inside the wrapper using the native builder
-    buildTextLayer(wrapper, { items: adjustedItems }, viewport, dpr);
-
-    container.appendChild(wrapper);
-  }
-}
 
 function buildTextLayer(container, textContent, viewport, dpr) {
   container.innerHTML = '';
