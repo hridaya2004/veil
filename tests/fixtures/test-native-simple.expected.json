@@ -1,0 +1,155 @@
+{
+  "pageCount": 1,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "isScanned": false,
+      "isAlreadyDark": false,
+      "lines": [
+        {
+          "y": 720,
+          "words": [
+            {
+              "text": "Hello World",
+              "x": 72,
+              "width": 129.984,
+              "fontSize": 24
+            }
+          ]
+        },
+        {
+          "y": 680,
+          "words": [
+            {
+              "text": "The",
+              "x": 72,
+              "y": 680,
+              "width": 20.676000000000002,
+              "fontSize": 12
+            },
+            {
+              "text": "quick",
+              "x": 96.012,
+              "y": 680,
+              "width": 27.768,
+              "fontSize": 12
+            },
+            {
+              "text": "brown",
+              "x": 127.116,
+              "y": 680,
+              "width": 32.496,
+              "fontSize": 12
+            },
+            {
+              "text": "fox",
+              "x": 162.948,
+              "y": 680,
+              "width": 15.288,
+              "fontSize": 12
+            },
+            {
+              "text": "jumps",
+              "x": 181.572,
+              "y": 680,
+              "width": 32.004,
+              "fontSize": 12
+            },
+            {
+              "text": "over",
+              "x": 216.912,
+              "y": 680,
+              "width": 22.86,
+              "fontSize": 12
+            },
+            {
+              "text": "the",
+              "x": 243.108,
+              "y": 680,
+              "width": 16.68,
+              "fontSize": 12
+            },
+            {
+              "text": "lazy",
+              "x": 263.124,
+              "y": 680,
+              "width": 21.336000000000002,
+              "fontSize": 12
+            },
+            {
+              "text": "dog.",
+              "x": 287.79600000000005,
+              "y": 680,
+              "width": 23.352,
+              "fontSize": 12
+            }
+          ]
+        },
+        {
+          "y": 660,
+          "words": [
+            {
+              "text": "This",
+              "x": 72,
+              "y": 660,
+              "width": 22.668,
+              "fontSize": 12
+            },
+            {
+              "text": "is",
+              "x": 98.00399999999999,
+              "y": 660,
+              "width": 8.664,
+              "fontSize": 12
+            },
+            {
+              "text": "the",
+              "x": 110.00399999999999,
+              "y": 660,
+              "width": 16.68,
+              "fontSize": 12
+            },
+            {
+              "text": "second",
+              "x": 130.01999999999998,
+              "y": 660,
+              "width": 38.688,
+              "fontSize": 12
+            },
+            {
+              "text": "line",
+              "x": 172.04399999999998,
+              "y": 660,
+              "width": 18.672,
+              "fontSize": 12
+            },
+            {
+              "text": "of",
+              "x": 194.052,
+              "y": 660,
+              "width": 10.008000000000001,
+              "fontSize": 12
+            },
+            {
+              "text": "text.",
+              "x": 207.396,
+              "y": 660,
+              "width": 22.32,
+              "fontSize": 12
+            }
+          ]
+        }
+      ],
+      "images": [
+        {
+          "x": 300,
+          "y": 400,
+          "width": 150,
+          "height": 150
+        }
+      ],
+      "fullText": "Hello World The quick brown fox jumps over the lazy dog. This is the second line of text."
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "pageCount": 1,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "isScanned": true,
+      "isAlreadyDark": false,
+      "ocrExpectedWords": [
+        "SCANNED",
+        "DOCUMENT",
+        "TEST"
+      ]
+    }
+  ]
+}

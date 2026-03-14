@@ -1,0 +1,17 @@
+{
+  "pageCount": 1,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "isScanned": false,
+      "isAlreadyDark": false,
+      "expectedCopyPaste": {
+        "line1": "I hate talking",
+        "line2": "If Steal Like an Artist was good",
+        "line3": "Normal text here."
+      },
+      "fullText": "I hate talking If Steal Like an Artist was good Normal text here."
+    }
+  ]
+}

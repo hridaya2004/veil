@@ -16,6 +16,24 @@
 
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
 
+import {
+  IDENTITY_MATRIX,
+  DARK_LUMINANCE_THRESHOLD,
+  SCAN_IMAGE_COVERAGE_THRESHOLD,
+  SCAN_TEXT_CHAR_THRESHOLD,
+  multiplyMatrices,
+  transformPoint,
+  computeImageBounds,
+  extractImageRegions as _extractImageRegions,
+  compositeImageRegions,
+  detectAlreadyDark as _detectAlreadyDark,
+  shouldApplyDark as _shouldApplyDark,
+  groupItemsIntoLines,
+  shouldInsertSpace,
+  calculateScale as _calculateScale,
+  isScannedPattern,
+} from './core.js';
+
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs';
 
@@ -24,14 +42,21 @@ pdfjsLib.GlobalWorkerOptions.workerSrc =
 // ============================================================
 
 const OPS = pdfjsLib.OPS;
-const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
+
+// OPS map for core.extractImageRegions (decouples core from pdfjsLib)
+const OPS_MAP = {
+  save: OPS.save,
+  restore: OPS.restore,
+  transform: OPS.transform,
+  paintFormXObjectBegin: OPS.paintFormXObjectBegin,
+  paintFormXObjectEnd: OPS.paintFormXObjectEnd,
+  paintImageXObject: OPS.paintImageXObject,
+  paintInlineImageXObject: OPS.paintInlineImageXObject,
+  paintImageXObjectRepeat: OPS.paintImageXObjectRepeat,
+};
 
 // How many pages around the visible area to pre-render
 const PRERENDER_MARGIN = 2;
-
-// Luminance threshold: pages with average background luminance
-// below this are considered "already dark" and won't be inverted.
-const DARK_LUMINANCE_THRESHOLD = 0.4;
 
 // Baseline offset ratio: measured at runtime via canvas.measureText().
 // Tells us exactly where the browser places the baseline within
@@ -53,46 +78,9 @@ const BASELINE_RATIO = (() => {
   return 0.85; // safe fallback
 })();
 
-// ============================================================
-// Matrix Utilities
-// ============================================================
-
-function multiplyMatrices(m1, m2) {
-  return [
-    m1[0] * m2[0] + m1[2] * m2[1],
-    m1[1] * m2[0] + m1[3] * m2[1],
-    m1[0] * m2[2] + m1[2] * m2[3],
-    m1[1] * m2[2] + m1[3] * m2[3],
-    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
-    m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
-  ];
-}
-
-function transformPoint(matrix, x, y) {
-  return [
-    matrix[0] * x + matrix[2] * y + matrix[4],
-    matrix[1] * x + matrix[3] * y + matrix[5],
-  ];
-}
-
-function computeImageBounds(ctm, viewportTransform) {
-  const final = multiplyMatrices(viewportTransform, ctm);
-
-  const c0 = transformPoint(final, 0, 0);
-  const c1 = transformPoint(final, 1, 0);
-  const c2 = transformPoint(final, 1, 1);
-  const c3 = transformPoint(final, 0, 1);
-
-  const xs = [c0[0], c1[0], c2[0], c3[0]];
-  const ys = [c0[1], c1[1], c2[1], c3[1]];
-
-  return {
-    x: Math.floor(Math.min(...xs)),
-    y: Math.floor(Math.min(...ys)),
-    width: Math.ceil(Math.max(...xs)) - Math.floor(Math.min(...xs)),
-    height: Math.ceil(Math.max(...ys)) - Math.floor(Math.min(...ys)),
-  };
-}
+// Matrix utilities, image region extraction, dark detection,
+// text layer helpers, and other pure functions are in core.js.
+// Imported above — see the import block at the top of this file.
 
 // ============================================================
 // State
@@ -220,9 +208,6 @@ async function loadPDF(data) {
 // because the "image" IS the text content.
 // ============================================================
 
-const SCAN_IMAGE_COVERAGE_THRESHOLD = 0.85;
-const SCAN_TEXT_CHAR_THRESHOLD = 50;
-
 async function detectScannedDocument() {
   if (!pdfDoc || pdfDoc.numPages === 0) return false;
 
@@ -235,8 +220,8 @@ async function detectScannedDocument() {
   if (numPages >= 6) sampleIndices.add(Math.floor(numPages * 0.5));
   if (numPages >= 8) sampleIndices.add(Math.floor(numPages * 0.75));
 
-  // Need at least 2 samples for confidence (or all pages if <2)
   const samplesToCheck = [...sampleIndices];
+  const pageSamples = [];
 
   for (const pageNum of samplesToCheck) {
     const page = await pdfDoc.getPage(pageNum);
@@ -248,32 +233,27 @@ async function detectScannedDocument() {
       page.getTextContent(),
     ]);
 
-    // Count text characters
     let charCount = 0;
     for (const item of textContent.items) {
       if (item.str) charCount += item.str.length;
     }
 
-    // If this page has substantial text, it's not a scanned document
-    if (charCount >= SCAN_TEXT_CHAR_THRESHOLD) return false;
-
-    // Check image coverage at scale 1 (PDF user space)
     const regions = extractImageRegions(opList, vp.transform);
 
-    // Find the largest image's coverage ratio
     let maxCoverage = 0;
     for (const r of regions) {
       const coverage = (r.width * r.height) / pageArea;
       if (coverage > maxCoverage) maxCoverage = coverage;
     }
 
-    // If this page doesn't have a dominant full-page image, not scanned
-    if (maxCoverage < SCAN_IMAGE_COVERAGE_THRESHOLD) return false;
+    pageSamples.push({ charCount, maxImageCoverage: maxCoverage });
   }
 
-  // ALL sampled pages matched the scanned pattern
-  console.log(`Scanned document detected (${samplesToCheck.length} pages sampled)`);
-  return true;
+  const result = isScannedPattern(pageSamples);
+  if (result) {
+    console.log(`Scanned document detected (${samplesToCheck.length} pages sampled)`);
+  }
+  return result;
 }
 
 // ============================================================
@@ -356,29 +336,8 @@ function buildOcrTextLayer(container, words, canvasW, canvasH, cssW, cssH) {
 
   if (items.length === 0) return;
 
-  // --- Step 2: Sort and group into lines ---
-  items.sort((a, b) => a.top - b.top || a.left - b.left);
-
-  const lines = [];
-  let currentLine = [items[0]];
-  let lineTop = items[0].top;
-  let lineHeight = items[0].height;
-
-  for (let i = 1; i < items.length; i++) {
-    const item = items[i];
-    const threshold = lineHeight * 0.5;
-
-    if (Math.abs(item.top - lineTop) < threshold) {
-      currentLine.push(item);
-      if (item.height > lineHeight) lineHeight = item.height;
-    } else {
-      lines.push(currentLine);
-      currentLine = [item];
-      lineTop = item.top;
-      lineHeight = item.height;
-    }
-  }
-  lines.push(currentLine);
+  // --- Step 2: Group into lines (uses core.groupItemsIntoLines) ---
+  const lines = groupItemsIntoLines(items);
 
   // --- Step 3: Build DOM with continuous flow ---
   //
@@ -487,11 +446,7 @@ function cleanup() {
 
 function calculateScale(page) {
   const vp = page.getViewport({ scale: 1 });
-  const padding = 48;
-  const toolbarH = 48;
-  const availW = window.innerWidth - padding;
-  const availH = window.innerHeight - toolbarH - padding;
-  return Math.min(availW / vp.width, availH / vp.height, 3);
+  return _calculateScale(vp.width, vp.height, window.innerWidth, window.innerHeight);
 }
 
 // ============================================================
@@ -730,43 +685,9 @@ async function renderPageIfNeeded(pageNum) {
 function detectAlreadyDark(canvas) {
   const w = canvas.width;
   const h = canvas.height;
-
-  // Read all pixel data once (avoids repeated GPU readbacks)
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const imageData = ctx.getImageData(0, 0, w, h);
-  const data = imageData.data;
-
-  // Sample points biased toward edges/corners where background is visible
-  const samplePoints = [];
-  const margin = Math.max(5, Math.floor(Math.min(w, h) * 0.02));
-  const step = Math.max(1, Math.floor(Math.min(w, h) * 0.05));
-
-  // Corners
-  samplePoints.push(
-    [margin, margin], [w - margin, margin],
-    [margin, h - margin], [w - margin, h - margin],
-  );
-
-  // Edges
-  for (let x = margin; x < w - margin; x += step) {
-    samplePoints.push([x, margin], [x, h - margin]);
-  }
-  for (let y = margin; y < h - margin; y += step) {
-    samplePoints.push([margin, y], [w - margin, y]);
-  }
-
-  let totalLuminance = 0;
-  let count = 0;
-
-  for (const [sx, sy] of samplePoints) {
-    const idx = (sy * w + sx) * 4;
-    const luminance = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) / 255;
-    totalLuminance += luminance;
-    count++;
-  }
-
-  const avgLuminance = count > 0 ? totalLuminance / count : 1;
-  return avgLuminance < DARK_LUMINANCE_THRESHOLD;
+  return _detectAlreadyDark(imageData.data, w, h);
 }
 
 // ============================================================
@@ -828,43 +749,10 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
   if (items.length === 0) return;
 
-  // --- Step 2: Group into lines by Y coordinate ---
-  items.sort((a, b) => a.top - b.top || a.left - b.left);
-
-  const lines = [];
-  let currentLine = [items[0]];
-  let lineTop = items[0].top;
-  let lineHeight = items[0].height;
-
-  for (let i = 1; i < items.length; i++) {
-    const item = items[i];
-    const threshold = lineHeight * 0.5;
-
-    if (Math.abs(item.top - lineTop) < threshold) {
-      currentLine.push(item);
-      if (item.height > lineHeight) lineHeight = item.height;
-    } else {
-      lines.push(currentLine);
-      currentLine = [item];
-      lineTop = item.top;
-      lineHeight = item.height;
-    }
-  }
-  lines.push(currentLine);
+  // --- Step 2: Group into lines (uses core.groupItemsIntoLines) ---
+  const lines = groupItemsIntoLines(items);
 
   // --- Step 3: Build DOM with continuous flow ---
-  //
-  // Two problems at style boundaries (italic↔normal, bold, links):
-  //
-  // Scenario A — "pdfWidth eats the space": the previous item's
-  // pdfWidth includes the trailing space advance, so gap ≈ 0 and
-  // no TextNode is inserted. But the space IS in item.str (e.g.
-  // "I "). With white-space:pre on the span, the browser preserves
-  // that trailing space during copy/paste instead of collapsing it.
-  //
-  // Scenario B — neither item contains the space: gap > 0 but
-  // neither str ends/starts with a space. We insert a TextNode(' ')
-  // and compensate marginLeft by its layout width.
   const fragment = document.createDocumentFragment();
 
   // Measure inherited space width for TextNode compensation
@@ -880,14 +768,14 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
 
-    const lineTop = line[0].top;
-    const lineHeight = Math.max(...line.map(it => it.height));
+    const lt = line[0].top;
+    const lh = Math.max(...line.map(it => it.height));
 
-    const vGap = Math.max(0, lineTop - prevBottom);
+    const vGap = Math.max(0, lt - prevBottom);
     lineDiv.style.paddingTop = vGap + 'px';
-    lineDiv.style.height = (lineHeight + vGap) + 'px';
+    lineDiv.style.height = (lh + vGap) + 'px';
 
-    prevBottom = lineTop + lineHeight;
+    prevBottom = lt + lh;
 
     let cursor = 0;
     let prevStr = '';
@@ -899,36 +787,25 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       const gap = item.left - cursor;
       let adjustedGap = gap;
 
-      // Determine if a word boundary exists between prevStr and
-      // this item. Three cases:
-      //   1. prevStr ends with whitespace → space already in DOM
-      //      (white-space:pre preserves it). No TextNode needed.
-      //   2. item.str starts with whitespace → same, preserved.
-      //   3. Neither has whitespace but gap is significant →
-      //      insert a TextNode(' ') and compensate marginLeft.
+      // Determine word boundary (uses core.shouldInsertSpace)
       if (cursor > 0) {
-        const prevEndsSpace = /\s$/.test(prevStr);
-        const currStartsSpace = /^\s/.test(item.str);
-
-        if (!prevEndsSpace && !currStartsSpace && gap > item.fontSize * 0.15) {
+        const result = shouldInsertSpace(
+          prevStr, item.str, gap, item.fontSize, spaceAdvance
+        );
+        if (result.insertSpace) {
           lineDiv.appendChild(document.createTextNode(' '));
-          adjustedGap = gap - spaceAdvance;
         }
+        adjustedGap = result.adjustedGap;
       }
 
       const span = document.createElement('span');
       span.textContent = item.str;
       span.style.fontSize = item.fontSize + 'px';
 
-      // Horizontal gap from previous span
       if (adjustedGap > 0.5) {
         span.style.marginLeft = adjustedGap + 'px';
       }
 
-      // Measure the natural width of this text in sans-serif,
-      // then scale horizontally to match the PDF's exact width.
-      // This handles bold, condensed, monospace, and any other
-      // font whose glyph widths differ from sans-serif.
       if (item.pdfWidth > 0) {
         measureCtx.font = `${item.fontSize}px sans-serif`;
         const naturalWidth = measureCtx.measureText(item.str).width;
@@ -942,7 +819,6 @@ function buildTextLayer(container, textContent, viewport, dpr) {
         }
       }
 
-      // Handle rotation (overrides scaleX if present)
       if (item.tx1 !== 0 || item.tx2 !== 0) {
         const angle = Math.atan2(item.tx1, Math.sqrt(item.tx2 * item.tx2 + (item.fontSize * dpr) * (item.fontSize * dpr)));
         span.style.transform = `rotate(${angle}rad)`;
@@ -1050,87 +926,12 @@ async function resolveInternalLink(dest) {
   }
 }
 
-// ============================================================
-// Image Region Extraction
-// ============================================================
-
+// extractImageRegions: thin wrapper that passes OPS_MAP to core
 function extractImageRegions(opList, viewportTransform) {
-  const regions = [];
-  const ctmStack = [];
-  let ctm = [...IDENTITY_MATRIX];
-
-  const fnArray = opList.fnArray;
-  const argsArray = opList.argsArray;
-
-  for (let i = 0; i < fnArray.length; i++) {
-    const op = fnArray[i];
-    const args = argsArray[i];
-
-    switch (op) {
-      case OPS.save:
-        ctmStack.push([...ctm]);
-        break;
-
-      case OPS.restore:
-        ctm = ctmStack.pop() || [...IDENTITY_MATRIX];
-        break;
-
-      case OPS.transform:
-        ctm = multiplyMatrices(ctm, args);
-        break;
-
-      case OPS.paintFormXObjectBegin:
-        ctmStack.push([...ctm]);
-        if (args[0]) {
-          ctm = multiplyMatrices(ctm, args[0]);
-        }
-        break;
-
-      case OPS.paintFormXObjectEnd:
-        ctm = ctmStack.pop() || [...IDENTITY_MATRIX];
-        break;
-
-      case OPS.paintImageXObject:
-      case OPS.paintInlineImageXObject:
-        regions.push(computeImageBounds(ctm, viewportTransform));
-        break;
-
-      case OPS.paintImageXObjectRepeat: {
-        if (args.length > 3) {
-          for (let j = 3; j < args.length; j += 2) {
-            const repeatCtm = multiplyMatrices(ctm, [1, 0, 0, 1, args[j], args[j + 1]]);
-            regions.push(computeImageBounds(repeatCtm, viewportTransform));
-          }
-        } else {
-          regions.push(computeImageBounds(ctm, viewportTransform));
-        }
-        break;
-      }
-
-      // Image masks (83, 84, 89, 90) are 1-bit stencils, NOT photos.
-    }
-  }
-
-  return regions;
+  return _extractImageRegions(opList, viewportTransform, OPS_MAP);
 }
 
-// ============================================================
-// Overlay Composition
-// ============================================================
-
-function compositeImageRegions(ctx, sourceCanvas, regions, canvasW, canvasH) {
-  for (const r of regions) {
-    const sx = Math.max(0, r.x);
-    const sy = Math.max(0, r.y);
-    const sx2 = Math.min(canvasW, r.x + r.width);
-    const sy2 = Math.min(canvasH, r.y + r.height);
-    const sw = sx2 - sx;
-    const sh = sy2 - sy;
-
-    if (sw <= 0 || sh <= 0) continue;
-    ctx.drawImage(sourceCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
-  }
-}
+// compositeImageRegions: imported from core.js
 
 // ============================================================
 // Dark Mode Logic
@@ -1142,14 +943,7 @@ function compositeImageRegions(ctx, sourceCanvas, regions, canvasW, canvasH) {
 // ============================================================
 
 function shouldApplyDark(pageNum) {
-  const override = pageDarkOverride.get(pageNum);
-  if (override === 'dark') return true;
-  if (override === 'light') return false;
-
-  // Auto mode: don't invert if already dark
-  if (pageAlreadyDark.get(pageNum)) return false;
-
-  return true; // Default: apply dark mode
+  return _shouldApplyDark(pageNum, pageDarkOverride, pageAlreadyDark);
 }
 
 function applyDarkModeToPage(pageNum) {
@@ -1753,3 +1547,6 @@ readerEl.addEventListener('drop', (e) => {
   e.preventDefault();
   handleFile(e.dataTransfer.files[0]);
 });
+
+// Signal that the app module has fully initialized (used by e2e tests)
+document.documentElement.dataset.appReady = 'true';
