@@ -152,6 +152,29 @@ const btnExport = document.getElementById('btn-export');
 const exportProgressEl = document.getElementById('export-progress');
 const exportProgressFill = document.querySelector('.export-progress-fill');
 const exportProgressText = document.querySelector('.export-progress-text');
+const errorBanner = document.getElementById('error-banner');
+const errorMessage = document.getElementById('error-message');
+const errorDismiss = document.getElementById('error-dismiss');
+
+// ============================================================
+// Error Display
+// ============================================================
+
+let errorTimeout = null;
+
+function showError(msg, duration = 8000) {
+  errorMessage.textContent = msg;
+  errorBanner.hidden = false;
+  if (errorTimeout) clearTimeout(errorTimeout);
+  if (duration > 0) {
+    errorTimeout = setTimeout(() => { errorBanner.hidden = true; }, duration);
+  }
+}
+
+errorDismiss.addEventListener('click', () => {
+  errorBanner.hidden = true;
+  if (errorTimeout) clearTimeout(errorTimeout);
+});
 
 // ============================================================
 // File Handling
@@ -194,7 +217,13 @@ async function loadPDF(data) {
     updateCurrentPageFromScroll();
   } catch (err) {
     console.error('Failed to load PDF:', err);
-    alert('Could not load this PDF. It may be corrupted or password-protected.');
+    if (err?.name === 'PasswordException') {
+      showError('This PDF is password-protected. Please unlock it first.');
+    } else if (err?.name === 'InvalidPDFException') {
+      showError('This file does not appear to be a valid PDF.');
+    } else {
+      showError('Could not load this PDF. The file may be corrupted.');
+    }
   }
 }
 
@@ -405,7 +434,7 @@ function buildOcrTextLayer(container, ocrData, canvasW, canvasH, cssW, cssH) {
     // Rotate the line div to match oblique text in the scan.
     // Tesseract provides baseline endpoints (x0,y0 → x1,y1) per line.
     // The angle is computed from these two points and applied as a
-    // CSS rotation around the left edge of the line.
+    // CSS rotation around the left baseline edge of the line.
     const bl = entry.baseline;
     if (bl && bl.x0 != null && bl.x1 != null && bl.y0 != null && bl.y1 != null) {
       const dx = (bl.x1 - bl.x0) * scaleX;
@@ -414,7 +443,7 @@ function buildOcrTextLayer(container, ocrData, canvasW, canvasH, cssW, cssH) {
         const angle = Math.atan2(dy, dx);
         // Only apply rotation for non-trivial angles (> ~0.3 degrees)
         if (Math.abs(angle) > 0.005) {
-          lineDiv.style.transformOrigin = 'left center';
+          lineDiv.style.transformOrigin = 'left bottom';
           lineDiv.style.transform = `rotate(${angle}rad)`;
         }
       }
@@ -443,28 +472,38 @@ function buildOcrTextLayer(container, ocrData, canvasW, canvasH, cssW, cssH) {
         span.style.marginLeft = item.left + 'px';
       }
 
-      // Measure spaceAdvance at this word's actual fontSize
+      // Set the span's layout width to match the OCR target.
+      //
+      // The OCR text is invisible (color: transparent) — we don't
+      // need character-level visual alignment with the scan. We only
+      // need the selection highlight to cover the correct area.
+      //
+      // Therefore: set width ONLY, no scaleX. This gives:
+      //   - Correct selection highlight width (= OCR bbox width)
+      //   - No explosion (no scaleX multiplier on top of width)
+      //   - Copy/paste works (TextNodes between spans in flow)
+      //
+      // This is fundamentally different from the native text layer
+      // which needs scaleX because the text IS visible there (for
+      // cursor positioning between characters). Here, precision
+      // within a word doesn't matter — only the bounding area.
       measureCtx.font = `${fontSize}px sans-serif`;
-      const spaceAdvance = measureCtx.measureText(' ').width;
 
-      // Measure natural width of this word in sans-serif at fontSize
-      const naturalWidth = measureCtx.measureText(item.str).width;
-
-      if (!isLast && naturalWidth > 0) {
-        // Non-last words: extend to the start of the next word
-        // so the selection highlight is continuous with no gaps.
-        const targetWidth = nextItem.left - item.left - spaceAdvance;
-
-        if (targetWidth > 0) {
-          span.style.display = 'inline-block';
-          span.style.width = targetWidth + 'px';
-          span.style.transform = `scaleX(${targetWidth / naturalWidth})`;
-          span.style.transformOrigin = 'left top';
-        }
+      let targetWidth;
+      if (!isLast) {
+        // Non-last: extend to the next word's start for continuous highlight
+        const spaceAdvance = measureCtx.measureText(' ').width;
+        targetWidth = nextItem.left - item.left - spaceAdvance;
+      } else {
+        // Last: use own bbox width
+        targetWidth = item.width;
       }
-      // Last word: no width/scaleX — use natural text width.
-      // This prevents the line from extending beyond its content
-      // (OCR bbox widths for isolated characters can be wildly off).
+
+      if (targetWidth > 0) {
+        span.style.display = 'inline-block';
+        span.style.width = targetWidth + 'px';
+        span.style.overflow = 'hidden';
+      }
 
       lineDiv.appendChild(span);
     }
@@ -486,6 +525,10 @@ function cleanup() {
   if (scrollObserver) {
     scrollObserver.disconnect();
     scrollObserver = null;
+  }
+  if (evictionObserver) {
+    evictionObserver.disconnect();
+    evictionObserver = null;
   }
 }
 
@@ -586,10 +629,18 @@ async function buildPageSlots() {
 // ============================================================
 
 let scrollObserver = null;
+let evictionObserver = null;
+
+// How far from the viewport (in %) a page must be before its
+// canvas memory is released. Must be larger than the render
+// margin (200%) so pages are re-rendered before becoming visible.
+const EVICTION_MARGIN = '600%';
 
 function setupIntersectionObserver() {
   if (scrollObserver) scrollObserver.disconnect();
+  if (evictionObserver) evictionObserver.disconnect();
 
+  // --- Render observer: triggers rendering for nearby pages ---
   scrollObserver = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
@@ -616,8 +667,46 @@ function setupIntersectionObserver() {
     }
   );
 
+  // --- Eviction observer: releases memory for distant pages ---
+  // Uses a wider margin than the render observer, so pages get
+  // re-rendered (by the render observer) before they become visible.
+  // When a page leaves this wide margin, its canvases are zeroed
+  // and its text layer is cleared — freeing GPU and DOM memory.
+  evictionObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) continue; // still nearby, keep it
+
+        const pageNum = parseInt(entry.target.dataset.pageNum, 10);
+        const slot = pageSlots.get(pageNum);
+        if (!slot || !slot.rendered) continue;
+
+        // Release canvas memory
+        slot.mainCanvas.width = 0;
+        slot.mainCanvas.height = 0;
+        slot.overlayCanvas.width = 0;
+        slot.overlayCanvas.height = 0;
+        slot.overlayCanvas.classList.remove('overlay-visible');
+
+        // Clear text layer and link annotations
+        slot.textLayer.innerHTML = '';
+        slot.container.querySelectorAll('.link-annot').forEach(el => el.remove());
+
+        // Mark as unrendered so the render observer will redo it
+        slot.rendered = false;
+        slot.rendering = false;
+      }
+    },
+    {
+      root: viewport,
+      rootMargin: EVICTION_MARGIN + ' 0px',
+      threshold: 0,
+    }
+  );
+
   for (const [, slot] of pageSlots) {
     scrollObserver.observe(slot.container);
+    evictionObserver.observe(slot.container);
   }
 }
 
@@ -1199,19 +1288,8 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
           continue;
         }
 
-        // --- DIAGNOSTIC LOGS ---
-        console.log('[LinkExport] explicitDest raw:', JSON.stringify(explicitDest, (k, v) => {
-          if (v && typeof v === 'object' && 'num' in v) return `{Ref num:${v.num} gen:${v.gen}}`;
-          return v;
-        }));
-        for (let d = 0; d < explicitDest.length; d++) {
-          const v = explicitDest[d];
-          console.log(`  [${d}] type=${typeof v}, constructor=${v?.constructor?.name}, value=`, v);
-        }
-
         try {
           const pageIndex = await pdfDoc.getPageIndex(explicitDest[0]);
-          console.log('[LinkExport] Resolved page index:', pageIndex);
 
           if (pageIndex >= outPdf.getPageCount()) {
             console.warn('[LinkExport] Page index out of range:', pageIndex, '>=', outPdf.getPageCount());
@@ -1219,7 +1297,6 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
           }
 
           const targetPageRef = outPdf.getPage(pageIndex).ref;
-          console.log('[LinkExport] Target page ref:', targetPageRef?.toString());
 
           // Build dest array: [pageRef, /FitType, ...params]
           // Use context.obj() for individual values, assemble manually.
@@ -1254,13 +1331,8 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
             }
           }
 
-          console.log('[LinkExport] destValues built:', destValues.length, 'items');
-
-          // Create the dest array via context.obj — it handles
-          // arrays of mixed PDF objects correctly.
           const destArray = context.obj(destValues);
           annotDict.set(PDFName.of('Dest'), destArray);
-          console.log('[LinkExport] Dest array set successfully');
         } catch (e) {
           console.warn('[LinkExport] Failed to build dest array:', e);
           continue;
@@ -1278,7 +1350,6 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
         const newAnnots = context.obj([annotRef]);
         pageDict.set(PDFName.of('Annots'), newAnnots);
       }
-      console.log('[LinkExport] Annotation attached:', url ? `URL: ${url}` : 'Internal link');
     } catch (e) {
       console.warn('[LinkExport] Annotation failed:', e);
     }
@@ -1516,6 +1587,7 @@ async function exportDarkPdf() {
   } catch (err) {
     console.error('Export failed:', err);
     hideExportProgress();
+    showError('Export failed. Please try again.');
   } finally {
     exporting = false;
     btnExport.disabled = false;
