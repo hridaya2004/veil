@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { groupItemsIntoLines, shouldInsertSpace } from '../../core.js';
+import { groupItemsIntoLines, shouldInsertSpace, mergePunctuation } from '../../core.js';
 
 // ============================================================
 // Simulate the DOM-building logic from buildTextLayer
@@ -31,8 +31,9 @@ function buildTextLayerDOM(container, items) {
 
   let prevBottom = 0;
 
-  for (const line of lines) {
-    line.sort((a, b) => a.left - b.left);
+  for (const rawLine of lines) {
+    rawLine.sort((a, b) => a.left - b.left);
+    const line = mergePunctuation(rawLine);
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
@@ -90,46 +91,97 @@ function buildTextLayerDOM(container, items) {
 
 /**
  * Minimal simulation of buildOcrTextLayer DOM construction.
+ * Accepts either Tesseract-style ocrData (with lines[].words[])
+ * or a flat words array for backward compatibility with tests.
  */
-function buildOcrTextLayerDOM(container, words) {
+function buildOcrTextLayerDOM(container, input) {
   container.innerHTML = '';
-  if (!words || words.length === 0) return;
+  if (!input) return;
 
-  const items = words
-    .filter(w => w.text && w.text.trim())
-    .map(w => ({
-      str: w.text,
-      left: w.bbox.x0,
-      top: w.bbox.y0,
-      width: w.bbox.x1 - w.bbox.x0,
-      height: w.bbox.y1 - w.bbox.y0,
-    }));
+  // Support both formats: ocrData.lines or flat words array
+  let linesToRender;
+  if (Array.isArray(input)) {
+    // Flat words array (backward compat for tests)
+    const items = input
+      .filter(w => w.text && w.text.trim())
+      .map(w => ({
+        str: w.text,
+        left: w.bbox.x0,
+        top: w.bbox.y0,
+        width: w.bbox.x1 - w.bbox.x0,
+        height: w.bbox.y1 - w.bbox.y0,
+      }));
+    if (items.length === 0) return;
+    const grouped = groupItemsIntoLines(items);
+    grouped.forEach(line => line.sort((a, b) => a.left - b.left));
+    linesToRender = grouped;
+  } else {
+    // ocrData object with lines
+    const ocrLines = input.lines || [];
+    const flatWords = input.words || [];
+    if (ocrLines.length === 0 && flatWords.length === 0) return;
 
-  if (items.length === 0) return;
+    linesToRender = ocrLines.length > 0
+      ? ocrLines.map(line => {
+          const words = (line.words || [])
+            .filter(w => w.text && w.text.trim())
+            .map(w => ({
+              str: w.text,
+              left: w.bbox.x0,
+              top: w.bbox.y0,
+              width: w.bbox.x1 - w.bbox.x0,
+              height: w.bbox.y1 - w.bbox.y0,
+            }));
+          words.sort((a, b) => a.left - b.left);
+          return { words, baseline: line.baseline || null };
+        }).filter(entry => entry.words.length > 0)
+      : (() => {
+          const items = flatWords
+            .filter(w => w.text && w.text.trim())
+            .map(w => ({
+              str: w.text,
+              left: w.bbox.x0,
+              top: w.bbox.y0,
+              width: w.bbox.x1 - w.bbox.x0,
+              height: w.bbox.y1 - w.bbox.y0,
+            }));
+          if (items.length === 0) return [];
+          const grouped = groupItemsIntoLines(items);
+          return grouped.map(line => {
+            line.sort((a, b) => a.left - b.left);
+            return { words: line, baseline: null };
+          });
+        })();
+  }
 
-  const lines = groupItemsIntoLines(items);
-  const spaceAdvance = 4;
+  if (linesToRender.length === 0) return;
+
+  // Normalize to { words, baseline } entries
+  const entries = linesToRender.map(line =>
+    Array.isArray(line) ? { words: line, baseline: null } : line
+  );
+  entries.sort((a, b) => a.words[0].top - b.words[0].top);
 
   let prevBottom = 0;
 
-  for (const line of lines) {
-    line.sort((a, b) => a.left - b.left);
+  for (const entry of entries) {
+    const line = mergePunctuation(entry.words);
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
-    lineDiv.style.width = 'fit-content';
 
     const lt = line[0].top;
     const lh = Math.max(...line.map(it => it.height));
-    const fontSize = lh * 0.85;
 
-    const vGap = Math.max(0, lt - prevBottom);
-    lineDiv.style.paddingTop = vGap + 'px';
-    lineDiv.style.height = (lh + vGap) + 'px';
+    const correction = lt - prevBottom;
+    lineDiv.style.marginTop = correction + 'px';
+    lineDiv.style.height = lh + 'px';
+    lineDiv.style.width = 'fit-content';
     prevBottom = lt + lh;
 
     for (let i = 0; i < line.length; i++) {
       const item = line[i];
+      const fontSize = item.height * 0.75;
 
       if (i > 0) {
         lineDiv.appendChild(document.createTextNode(' '));
@@ -355,5 +407,60 @@ describe('buildOcrTextLayerDOM (OCR text layer structure)', () => {
     const lineDivs = container.querySelectorAll('.text-line');
     expect(lineDivs[0].textContent).toBe('Line one');
     expect(lineDivs[1].textContent).toBe('Line two');
+  });
+});
+
+describe('Punctuation merging in text layer DOM', () => {
+  let container;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    container.className = 'text-layer';
+  });
+
+  it('native: trailing period merges into previous word span', () => {
+    const items = [
+      { str: 'Hello', left: 50, top: 100, height: 12, fontSize: 12, pdfWidth: 30 },
+      { str: '.', left: 80, top: 100, height: 12, fontSize: 12, pdfWidth: 4 },
+    ];
+    buildTextLayerDOM(container, items);
+    const spans = container.querySelectorAll('span');
+    expect(spans).toHaveLength(1);
+    expect(spans[0].textContent).toBe('Hello.');
+  });
+
+  it('native: non-punctuation items stay separate', () => {
+    const items = [
+      { str: 'Hello', left: 50, top: 100, height: 12, fontSize: 12, pdfWidth: 30 },
+      { str: 'World', left: 85, top: 100, height: 12, fontSize: 12, pdfWidth: 30 },
+    ];
+    buildTextLayerDOM(container, items);
+    const spans = container.querySelectorAll('span');
+    expect(spans).toHaveLength(2);
+  });
+
+  it('OCR: trailing period merges into previous word', () => {
+    const words = [
+      { text: 'Hello', bbox: { x0: 50, y0: 100, x1: 80, y1: 115 } },
+      { text: '.', bbox: { x0: 80, y0: 100, x1: 84, y1: 115 } },
+    ];
+    buildOcrTextLayerDOM(container, words);
+    const spans = container.querySelectorAll('span');
+    expect(spans).toHaveLength(1);
+    expect(spans[0].textContent).toBe('Hello.');
+  });
+
+  it('native: sentence with comma and period', () => {
+    const items = [
+      { str: 'yes', left: 50, top: 100, height: 12, fontSize: 12, pdfWidth: 20 },
+      { str: ',', left: 70, top: 100, height: 12, fontSize: 12, pdfWidth: 4 },
+      { str: 'ok', left: 80, top: 100, height: 12, fontSize: 12, pdfWidth: 15 },
+      { str: '.', left: 95, top: 100, height: 12, fontSize: 12, pdfWidth: 4 },
+    ];
+    buildTextLayerDOM(container, items);
+    const spans = container.querySelectorAll('span');
+    expect(spans).toHaveLength(2);
+    expect(spans[0].textContent).toBe('yes,');
+    expect(spans[1].textContent).toBe('ok.');
   });
 });

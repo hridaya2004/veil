@@ -21,6 +21,7 @@ import {
   DARK_LUMINANCE_THRESHOLD,
   SCAN_IMAGE_COVERAGE_THRESHOLD,
   SCAN_TEXT_CHAR_THRESHOLD,
+  OCR_CONFIDENCE_THRESHOLD,
   multiplyMatrices,
   transformPoint,
   computeImageBounds,
@@ -28,6 +29,8 @@ import {
   compositeImageRegions,
   detectAlreadyDark as _detectAlreadyDark,
   shouldApplyDark as _shouldApplyDark,
+  normalizeLigatures,
+  mergePunctuation,
   groupItemsIntoLines,
   shouldInsertSpace,
   calculateScale as _calculateScale,
@@ -298,14 +301,11 @@ async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
   if (!worker || globalGeneration !== myGen) return;
 
   try {
-    // Convert canvas to blob for Tesseract (more reliable than passing canvas directly)
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    // Pass canvas directly to Tesseract (avoids lossy blob conversion)
+    const { data } = await worker.recognize(canvas);
     if (globalGeneration !== myGen) return;
 
-    const { data } = await worker.recognize(blob);
-    if (globalGeneration !== myGen) return;
-
-    buildOcrTextLayer(textLayerDiv, data.words, canvas.width, canvas.height, cssWidth, cssHeight);
+    buildOcrTextLayer(textLayerDiv, data, canvas.width, canvas.height, cssWidth, cssHeight);
 
     // Release the canvas now that OCR is done
     canvas.width = 0;
@@ -315,69 +315,110 @@ async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
   }
 }
 
-function buildOcrTextLayer(container, words, canvasW, canvasH, cssW, cssH) {
+function buildOcrTextLayer(container, ocrData, canvasW, canvasH, cssW, cssH) {
   container.innerHTML = '';
-  if (!words || words.length === 0) return;
+
+  // Use Tesseract's own line grouping (data.lines[].words[])
+  // which is more accurate than our manual Y-clustering.
+  // Fall back to flat words array for backward compatibility.
+  const ocrLines = ocrData.lines || [];
+  const flatWords = ocrData.words || [];
+
+  if (ocrLines.length === 0 && flatWords.length === 0) return;
 
   const scaleX = cssW / canvasW;
   const scaleY = cssH / canvasH;
   const measureCtx = document.createElement('canvas').getContext('2d');
-
-  // --- Step 1: Transform OCR words to CSS coordinates ---
-  const items = words
-    .filter(w => w.text && w.text.trim())
-    .map(w => ({
-      str: w.text,
-      left: w.bbox.x0 * scaleX,
-      top: w.bbox.y0 * scaleY,
-      width: (w.bbox.x1 - w.bbox.x0) * scaleX,
-      height: (w.bbox.y1 - w.bbox.y0) * scaleY,
-    }));
-
-  if (items.length === 0) return;
-
-  // --- Step 2: Group into lines (uses core.groupItemsIntoLines) ---
-  const lines = groupItemsIntoLines(items);
-
-  // --- Step 3: Build DOM with continuous flow ---
-  //
-  // Same strategy as native buildTextLayer: each line is a
-  // block-level <div class="text-line"> in normal document flow.
-  // Vertical positioning uses padding-top for the gap between lines.
-  //
-  // Each non-last span extends its width to the next word's start
-  // via scaleX(), so selection highlight is continuous with no gaps.
-  //
-  // Between spans, a TextNode(' ') ensures copy/paste produces
-  // "word1 word2" with proper spacing. The TextNode takes up layout
-  // space, which we compensate by reducing the next span's width
-  // by the space advance. width:fit-content prevents the selection
-  // from extending past the last word.
   const fragment = document.createDocumentFragment();
 
-  // Measure inherited space width for TextNode compensation
-  const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
-  measureCtx.font = `${inheritedFontSize}px sans-serif`;
-  const spaceAdvance = measureCtx.measureText(' ').width;
+  // Build lines from Tesseract's line structure, or fall back to flat grouping.
+  // Words below OCR_CONFIDENCE_THRESHOLD are discarded — these are typically
+  // garbage from stamps, logos, scribbled signatures, and other non-text
+  // elements that Tesseract tries (and fails) to recognize.
+  //
+  // Each entry in linesToRender is { words: [...], baseline: {...}|null }
+  // where baseline carries Tesseract's line baseline endpoints for rotation.
+  const linesToRender = ocrLines.length > 0
+    ? ocrLines.map(line => {
+        const words = (line.words || [])
+          .filter(w => w.text && w.text.trim() && (w.confidence >= OCR_CONFIDENCE_THRESHOLD))
+          .map(w => ({
+            str: normalizeLigatures(w.text),
+            left: w.bbox.x0 * scaleX,
+            top: w.bbox.y0 * scaleY,
+            width: (w.bbox.x1 - w.bbox.x0) * scaleX,
+            height: (w.bbox.y1 - w.bbox.y0) * scaleY,
+          }));
+        words.sort((a, b) => a.left - b.left);
+        // Preserve baseline data for rotation (Tesseract provides x0,y0 → x1,y1)
+        const bl = line.baseline;
+        return { words, baseline: bl || null };
+      }).filter(entry => entry.words.length > 0)
+    : (() => {
+        // Fallback: manual grouping from flat words array (no baseline data)
+        const items = flatWords
+          .filter(w => w.text && w.text.trim() && (w.confidence >= OCR_CONFIDENCE_THRESHOLD))
+          .map(w => ({
+            str: normalizeLigatures(w.text),
+            left: w.bbox.x0 * scaleX,
+            top: w.bbox.y0 * scaleY,
+            width: (w.bbox.x1 - w.bbox.x0) * scaleX,
+            height: (w.bbox.y1 - w.bbox.y0) * scaleY,
+          }));
+        if (items.length === 0) return [];
+        const grouped = groupItemsIntoLines(items);
+        return grouped.map(line => {
+          line.sort((a, b) => a.left - b.left);
+          return { words: line, baseline: null };
+        });
+      })();
+
+  if (linesToRender.length === 0) return;
+
+  // Sort lines by vertical position for correct DOM order (selection continuity)
+  linesToRender.sort((a, b) => a.words[0].top - b.words[0].top);
 
   let prevBottom = 0;
 
-  for (const line of lines) {
-    line.sort((a, b) => a.left - b.left);
+  for (const entry of linesToRender) {
+    const line = mergePunctuation(entry.words);
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
-    lineDiv.style.width = 'fit-content';
 
     const lt = line[0].top;
     const lh = Math.max(...line.map(it => it.height));
-    const fontSize = lh * 0.85;
 
-    const vGap = Math.max(0, lt - prevBottom);
-    lineDiv.style.paddingTop = vGap + 'px';
-    lineDiv.style.height = (lh + vGap) + 'px';
-
+    // Flow layout with corrective margin-top.
+    // Unlike padding-top (which clamps at 0 and accumulates errors),
+    // margin-top can be negative — pulling the element up when the
+    // previous line's bottom overshoots this line's top.
+    // This keeps divs in normal document flow (smooth selection across
+    // lines, no right-edge extension, no double-height gaps) while
+    // placing each line at its exact OCR coordinate.
+    const correction = lt - prevBottom;
+    lineDiv.style.marginTop = correction + 'px';
+    lineDiv.style.height = lh + 'px';
+    lineDiv.style.width = 'fit-content';
     prevBottom = lt + lh;
+
+    // Rotate the line div to match oblique text in the scan.
+    // Tesseract provides baseline endpoints (x0,y0 → x1,y1) per line.
+    // The angle is computed from these two points and applied as a
+    // CSS rotation around the left edge of the line.
+    const bl = entry.baseline;
+    if (bl && bl.x0 != null && bl.x1 != null && bl.y0 != null && bl.y1 != null) {
+      const dx = (bl.x1 - bl.x0) * scaleX;
+      const dy = (bl.y1 - bl.y0) * scaleY;
+      if (dx > 0) {
+        const angle = Math.atan2(dy, dx);
+        // Only apply rotation for non-trivial angles (> ~0.3 degrees)
+        if (Math.abs(angle) > 0.005) {
+          lineDiv.style.transformOrigin = 'left center';
+          lineDiv.style.transform = `rotate(${angle}rad)`;
+        }
+      }
+    }
 
     for (let i = 0; i < line.length; i++) {
       const item = line[i];
@@ -391,6 +432,10 @@ function buildOcrTextLayer(container, words, canvasW, canvasH, cssW, cssH) {
 
       const span = document.createElement('span');
       span.textContent = item.str;
+
+      // Per-word fontSize from its own bbox height.
+      // Factor 0.75 compensates for Tesseract bbox padding around glyphs.
+      const fontSize = item.height * 0.75;
       span.style.fontSize = fontSize + 'px';
 
       // First span: indent from left edge via marginLeft
@@ -398,24 +443,28 @@ function buildOcrTextLayer(container, words, canvasW, canvasH, cssW, cssH) {
         span.style.marginLeft = item.left + 'px';
       }
 
-      // Target width: for non-last words, extend to the start
-      // of the next word, minus the TextNode space advance.
-      // For the last word, use its own bbox width.
-      const targetWidth = isLast
-        ? item.width
-        : nextItem.left - item.left - spaceAdvance;
+      // Measure spaceAdvance at this word's actual fontSize
+      measureCtx.font = `${fontSize}px sans-serif`;
+      const spaceAdvance = measureCtx.measureText(' ').width;
 
-      if (targetWidth > 0) {
-        measureCtx.font = `${fontSize}px sans-serif`;
-        const naturalWidth = measureCtx.measureText(item.str).width;
+      // Measure natural width of this word in sans-serif at fontSize
+      const naturalWidth = measureCtx.measureText(item.str).width;
 
-        if (naturalWidth > 0) {
+      if (!isLast && naturalWidth > 0) {
+        // Non-last words: extend to the start of the next word
+        // so the selection highlight is continuous with no gaps.
+        const targetWidth = nextItem.left - item.left - spaceAdvance;
+
+        if (targetWidth > 0) {
           span.style.display = 'inline-block';
           span.style.width = targetWidth + 'px';
           span.style.transform = `scaleX(${targetWidth / naturalWidth})`;
           span.style.transformOrigin = 'left top';
         }
       }
+      // Last word: no width/scaleX — use natural text width.
+      // This prevents the line from extending beyond its content
+      // (OCR bbox widths for isolated characters can be wildly off).
 
       lineDiv.appendChild(span);
     }
@@ -735,7 +784,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
     const pdfWidth = item.width > 0 ? (item.width * viewport.scale / dpr) : 0;
 
     items.push({
-      str: item.str || '',
+      str: normalizeLigatures(item.str || ''),
       left,
       top,
       fontSize,
@@ -762,8 +811,9 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
   let prevBottom = 0;
 
-  for (const line of lines) {
-    line.sort((a, b) => a.left - b.left);
+  for (const rawLine of lines) {
+    rawLine.sort((a, b) => a.left - b.left);
+    const line = mergePunctuation(rawLine);
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
@@ -1354,6 +1404,7 @@ async function exportDarkPdf() {
         // Native PDF: use original text coordinates
         for (const item of textContent.items) {
           if (!item.str || !item.str.trim()) continue;
+          const itemText = normalizeLigatures(item.str);
           const tx = item.transform;
           const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
           if (baseFontSize < 1) continue;
@@ -1362,13 +1413,13 @@ async function exportDarkPdf() {
             // Adjust fontSize so font width matches PDF width
             let drawSize = baseFontSize;
             if (item.width > 0) {
-              const naturalWidth = font.widthOfTextAtSize(item.str, baseFontSize);
+              const naturalWidth = font.widthOfTextAtSize(itemText, baseFontSize);
               if (naturalWidth > 0) {
                 drawSize = baseFontSize * (item.width / naturalWidth);
               }
             }
 
-            outPage.drawText(item.str, {
+            outPage.drawText(itemText, {
               x: tx[4],
               y: tx[5],
               size: drawSize,
@@ -1395,6 +1446,8 @@ async function exportDarkPdf() {
 
             for (const word of data.words) {
               if (!word.text || !word.text.trim()) continue;
+              if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
+              const wordText = normalizeLigatures(word.text);
               const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
               if (baseFontSize < 1) continue;
 
@@ -1403,13 +1456,13 @@ async function exportDarkPdf() {
                 const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
                 let drawSize = baseFontSize;
                 if (targetWidth > 0) {
-                  const naturalWidth = font.widthOfTextAtSize(word.text, baseFontSize);
+                  const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
                   if (naturalWidth > 0) {
                     drawSize = baseFontSize * (targetWidth / naturalWidth);
                   }
                 }
 
-                outPage.drawText(word.text, {
+                outPage.drawText(wordText, {
                   x: word.bbox.x0 * sx,
                   y: origVp.height - word.bbox.y1 * sy,
                   size: drawSize,

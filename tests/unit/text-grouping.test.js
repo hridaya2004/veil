@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   groupItemsIntoLines,
   shouldInsertSpace,
+  mergePunctuation,
   calculateScale,
   shouldApplyDark,
   isScannedPattern,
+  normalizeLigatures,
+  OCR_CONFIDENCE_THRESHOLD,
 } from '../../core.js';
 
 // ============================================================
@@ -281,5 +284,237 @@ describe('isScannedPattern', () => {
 
   it('threshold: coverage = 0.85 (at threshold) → true', () => {
     expect(isScannedPattern([{ charCount: 0, maxImageCoverage: 0.85 }])).toBe(true);
+  });
+});
+
+// ============================================================
+// mergePunctuation
+// ============================================================
+
+describe('mergePunctuation', () => {
+  it('merges trailing period into previous word', () => {
+    const line = [
+      { str: 'Hello', left: 50, width: 30, pdfWidth: 30 },
+      { str: '.', left: 80, width: 4, pdfWidth: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('Hello.');
+    expect(result[0].width).toBe(34); // 80 + 4 - 50
+    expect(result[0].pdfWidth).toBe(34);
+  });
+
+  it('merges trailing exclamation mark', () => {
+    const line = [
+      { str: 'Wow', left: 50, width: 25 },
+      { str: '!', left: 75, width: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('Wow!');
+  });
+
+  it('merges trailing question mark', () => {
+    const line = [
+      { str: 'Really', left: 50, width: 40 },
+      { str: '?', left: 90, width: 5 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('Really?');
+  });
+
+  it('merges multiple consecutive punctuation (e.g. "...")', () => {
+    const line = [
+      { str: 'Wait', left: 50, width: 30 },
+      { str: '...', left: 80, width: 10 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('Wait...');
+  });
+
+  it('does NOT merge punctuation at position 0 (start of line)', () => {
+    const line = [
+      { str: '.', left: 50, width: 4 },
+      { str: 'Hello', left: 60, width: 30 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(2);
+    expect(result[0].str).toBe('.');
+    expect(result[1].str).toBe('Hello');
+  });
+
+  it('does NOT merge items with real text content', () => {
+    const line = [
+      { str: 'Hello', left: 50, width: 30 },
+      { str: 'World', left: 85, width: 30 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(2);
+    expect(result[0].str).toBe('Hello');
+    expect(result[1].str).toBe('World');
+  });
+
+  it('returns copy of single-item line unchanged', () => {
+    const line = [{ str: 'Hello', left: 50, width: 30 }];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('Hello');
+    expect(result[0]).not.toBe(line[0]); // should be a copy
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(mergePunctuation([])).toEqual([]);
+  });
+
+  it('handles closing parenthesis and bracket', () => {
+    const line = [
+      { str: 'end', left: 50, width: 20 },
+      { str: ')', left: 70, width: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('end)');
+  });
+
+  it('handles closing quote marks', () => {
+    const line = [
+      { str: 'said', left: 50, width: 25 },
+      { str: '"', left: 75, width: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(1);
+    expect(result[0].str).toBe('said"');
+  });
+
+  it('merges comma and semicolon', () => {
+    const line = [
+      { str: 'item', left: 50, width: 25 },
+      { str: ',', left: 75, width: 4 },
+      { str: 'next', left: 85, width: 25 },
+      { str: ';', left: 110, width: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result).toHaveLength(2);
+    expect(result[0].str).toBe('item,');
+    expect(result[1].str).toBe('next;');
+  });
+
+  it('does not mutate original array', () => {
+    const line = [
+      { str: 'Hello', left: 50, width: 30, pdfWidth: 30 },
+      { str: '.', left: 80, width: 4, pdfWidth: 4 },
+    ];
+    const originalStr = line[0].str;
+    mergePunctuation(line);
+    expect(line[0].str).toBe(originalStr);
+    expect(line).toHaveLength(2);
+  });
+
+  it('preserves pdfWidth when present', () => {
+    const line = [
+      { str: 'word', left: 50, width: 30, pdfWidth: 30 },
+      { str: '.', left: 80, width: 4, pdfWidth: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect(result[0].pdfWidth).toBe(34);
+  });
+
+  it('does not add pdfWidth when not present in original', () => {
+    const line = [
+      { str: 'word', left: 50, width: 30 },
+      { str: '.', left: 80, width: 4 },
+    ];
+    const result = mergePunctuation(line);
+    expect('pdfWidth' in result[0]).toBe(false);
+  });
+});
+
+// ============================================================
+// normalizeLigatures
+// ============================================================
+
+describe('normalizeLigatures', () => {
+  it('decomposes fi ligature (U+FB01) to f + i', () => {
+    expect(normalizeLigatures('\uFB01')).toBe('fi');
+  });
+
+  it('decomposes fl ligature (U+FB02) to f + l', () => {
+    expect(normalizeLigatures('\uFB02')).toBe('fl');
+  });
+
+  it('decomposes ff ligature (U+FB00) to f + f', () => {
+    expect(normalizeLigatures('\uFB00')).toBe('ff');
+  });
+
+  it('decomposes ffi ligature (U+FB03) to f + f + i', () => {
+    expect(normalizeLigatures('\uFB03')).toBe('ffi');
+  });
+
+  it('decomposes ffl ligature (U+FB04) to f + f + l', () => {
+    expect(normalizeLigatures('\uFB04')).toBe('ffl');
+  });
+
+  it('decomposes ligature within a word: e\uFB03cient → efficient', () => {
+    expect(normalizeLigatures('e\uFB03cient')).toBe('efficient');
+  });
+
+  it('decomposes multiple ligatures in one string', () => {
+    expect(normalizeLigatures('\uFB01re\uFB02y')).toBe('firefly');
+  });
+
+  it('leaves plain ASCII text unchanged', () => {
+    expect(normalizeLigatures('Hello World')).toBe('Hello World');
+  });
+
+  it('leaves already-decomposed text unchanged', () => {
+    expect(normalizeLigatures('efficient firefly')).toBe('efficient firefly');
+  });
+
+  it('handles empty string', () => {
+    expect(normalizeLigatures('')).toBe('');
+  });
+
+  it('handles null/undefined gracefully', () => {
+    expect(normalizeLigatures(null)).toBe(null);
+    expect(normalizeLigatures(undefined)).toBe(undefined);
+  });
+});
+
+// ============================================================
+// OCR_CONFIDENCE_THRESHOLD
+// ============================================================
+
+describe('OCR_CONFIDENCE_THRESHOLD', () => {
+  it('is set to 45', () => {
+    expect(OCR_CONFIDENCE_THRESHOLD).toBe(45);
+  });
+
+  it('filters low-confidence words correctly (simulation)', () => {
+    // Simulate Tesseract output with mixed confidence
+    const words = [
+      { text: 'Frattura', confidence: 92, bbox: { x0: 50, y0: 100, x1: 150, y1: 115 } },
+      { text: 'JR', confidence: 12, bbox: { x0: 200, y0: 100, x1: 220, y1: 115 } },
+      { text: 'omero', confidence: 88, bbox: { x0: 160, y0: 100, x1: 230, y1: 115 } },
+      { text: 'EE', confidence: 8, bbox: { x0: 240, y0: 100, x1: 260, y1: 115 } },
+      { text: 'Rk', confidence: 15, bbox: { x0: 270, y0: 100, x1: 285, y1: 115 } },
+      { text: 'destro', confidence: 91, bbox: { x0: 240, y0: 100, x1: 300, y1: 115 } },
+    ];
+
+    const filtered = words.filter(w => w.confidence >= OCR_CONFIDENCE_THRESHOLD);
+    expect(filtered).toHaveLength(3);
+    expect(filtered.map(w => w.text)).toEqual(['Frattura', 'omero', 'destro']);
+  });
+
+  it('keeps words at exactly the threshold', () => {
+    const words = [
+      { text: 'borderline', confidence: 45, bbox: { x0: 0, y0: 0, x1: 100, y1: 15 } },
+      { text: 'garbage', confidence: 44, bbox: { x0: 0, y0: 0, x1: 100, y1: 15 } },
+    ];
+
+    const filtered = words.filter(w => w.confidence >= OCR_CONFIDENCE_THRESHOLD);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].text).toBe('borderline');
   });
 });

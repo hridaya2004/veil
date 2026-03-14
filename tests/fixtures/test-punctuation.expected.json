@@ -1,0 +1,15 @@
+{
+  "pageCount": 1,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "isScanned": false,
+      "isAlreadyDark": false,
+      "expectedCopyPaste": {
+        "line1": "Hello World.",
+        "line2": "Yes, indeed!"
+      }
+    }
+  ]
+}

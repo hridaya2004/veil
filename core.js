@@ -14,6 +14,7 @@ export const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
 export const DARK_LUMINANCE_THRESHOLD = 0.4;
 export const SCAN_IMAGE_COVERAGE_THRESHOLD = 0.85;
 export const SCAN_TEXT_CHAR_THRESHOLD = 50;
+export const OCR_CONFIDENCE_THRESHOLD = 45;
 
 // ============================================================
 // Matrix Utilities
@@ -180,6 +181,86 @@ export function shouldApplyDark(pageNum, pageDarkOverride, pageAlreadyDark) {
   if (override === 'light') return false;
   if (pageAlreadyDark.get(pageNum)) return false;
   return true;
+}
+
+// ============================================================
+// Text Normalization
+// ============================================================
+
+/**
+ * Normalizes a string using NFKD (Compatibility Decomposition) to
+ * decompose typographic ligatures into their constituent characters.
+ *
+ * Examples:  ﬁ (U+FB01) → fi,  ﬂ (U+FB02) → fl,  ﬀ (U+FB00) → ff
+ *
+ * This is safe for all text — strings without ligatures pass through
+ * unchanged. NFKD also decomposes other compatibility characters
+ * (e.g. superscripts, fractions) which improves copy/paste fidelity.
+ */
+export function normalizeLigatures(str) {
+  if (!str) return str;
+  return str.normalize('NFKD');
+}
+
+// ============================================================
+// Punctuation Merging
+// ============================================================
+
+/**
+ * Merges trailing punctuation items into the preceding word.
+ *
+ * In many PDFs, punctuation marks (., !, ?, ;, :, etc.) are
+ * emitted as separate text items with tiny bounding boxes (3-4px).
+ * This makes them nearly impossible to select with the mouse.
+ *
+ * This function scans a line (array of items sorted left-to-right)
+ * and merges any item that consists solely of trailing punctuation
+ * into the previous item, extending its width to cover both.
+ *
+ * Items at position 0 (line start) are never merged — punctuation
+ * at the start of a line is unusual and may be intentional (e.g.
+ * bullet points, opening quotes).
+ *
+ * Each item must have at least: { str, left, width }
+ * Items may also have: { pdfWidth } (used in native text layer)
+ *
+ * Returns a new array (does not mutate the input).
+ */
+const TRAILING_PUNCT_RE = /^[.!?,;:)\]}"'»›\u2019\u201D]+$/;
+
+export function mergePunctuation(line) {
+  if (line.length <= 1) return line.map(item => ({ ...item }));
+
+  const merged = [];
+
+  for (let i = 0; i < line.length; i++) {
+    const item = line[i];
+
+    // Check if this item is purely trailing punctuation and
+    // there is a preceding item to merge into
+    if (i > 0 && item.str && TRAILING_PUNCT_RE.test(item.str)) {
+      const prev = merged[merged.length - 1];
+      if (prev) {
+        // Extend the previous item to cover this punctuation
+        const newWidth = (item.left + item.width) - prev.left;
+        const newItem = {
+          ...prev,
+          str: prev.str + item.str,
+          width: newWidth,
+        };
+        // Also update pdfWidth if present (native text layer)
+        if ('pdfWidth' in prev) {
+          newItem.pdfWidth = newWidth;
+        }
+        merged[merged.length - 1] = newItem;
+        continue;
+      }
+    }
+
+    merged.push({ ...item });
+  }
+
+  return merged;
 }
 
 // ============================================================

@@ -78,3 +78,109 @@ test.describe('OCR text layer with real content', () => {
     expect(text).toContain('World');
   });
 });
+
+test.describe('OCR text layer with real scanned PDF', () => {
+
+  test('real scanned PDF produces OCR text layer with spans inside page bounds', async ({ page }) => {
+    await page.goto('/');
+    await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
+    // Wait for OCR to complete on the first page
+    await waitForOcrTextLayer(page, 1);
+
+    // Verify spans exist and are positioned within page container bounds
+    const result = await page.evaluate(() => {
+      const container = document.querySelector('.page-container[data-page-num="1"]');
+      if (!container) return { error: 'no container' };
+      const containerRect = container.getBoundingClientRect();
+
+      const spans = container.querySelectorAll('.text-layer span');
+      if (spans.length === 0) return { error: 'no spans' };
+
+      let insideCount = 0;
+      let outsideCount = 0;
+      const totalSpans = spans.length;
+
+      for (const span of spans) {
+        const rect = span.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+
+        // Check if span center is within the page container (with generous margin)
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const margin = 20; // px tolerance
+
+        if (
+          centerX >= containerRect.left - margin &&
+          centerX <= containerRect.right + margin &&
+          centerY >= containerRect.top - margin &&
+          centerY <= containerRect.bottom + margin
+        ) {
+          insideCount++;
+        } else {
+          outsideCount++;
+        }
+      }
+
+      return { totalSpans, insideCount, outsideCount };
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.totalSpans).toBeGreaterThan(5); // Real medical doc should have many words
+    // At least 85% of spans should be within page bounds.
+    // OCR bounding boxes on real scans have inherent imprecision,
+    // especially near page edges. 85% is a strong result for
+    // a medical document scan with small fonts and variable quality.
+    const insideRatio = result.insideCount / result.totalSpans;
+    expect(insideRatio).toBeGreaterThan(0.85);
+  });
+
+  test('real scanned PDF OCR text is selectable', async ({ page }) => {
+    await page.goto('/');
+    await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
+    await waitForOcrTextLayer(page, 1);
+
+    // Select all text in the text layer and verify it's not empty
+    const selectedText = await page.evaluate(() => {
+      const textLayer = document.querySelector('.page-container[data-page-num="1"] .text-layer');
+      if (!textLayer) return null;
+
+      const range = document.createRange();
+      range.selectNodeContents(textLayer);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      return sel.toString();
+    });
+
+    expect(selectedText).not.toBeNull();
+    expect(selectedText.length).toBeGreaterThan(10); // Should have meaningful text
+  });
+
+  test('confidence filter removes garbage from stamps/logos', async ({ page }) => {
+    await page.goto('/');
+    await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
+    await waitForOcrTextLayer(page, 1);
+
+    const result = await page.evaluate(() => {
+      const textLayer = document.querySelector('.page-container[data-page-num="1"] .text-layer');
+      if (!textLayer) return null;
+
+      const text = textLayer.textContent;
+      const spans = textLayer.querySelectorAll('span');
+
+      return { text, spanCount: spans.length };
+    });
+
+    expect(result).not.toBeNull();
+    // Text layer should have content (OCR ran successfully)
+    expect(result.spanCount).toBeGreaterThan(0);
+
+    // Garbage sequences from stamps/logos should be filtered out
+    // by the confidence threshold. These were identified in the
+    // Apple vs Veil comparison as low-confidence artifacts.
+    expect(result.text).not.toMatch(/JR\s+a\s+i\s+EE/);
+    expect(result.text).not.toMatch(/Rk\s+RS\s+ea\s+Sr/);
+    expect(result.text).not.toMatch(/Gras\s+Gola\s+Saute/);
+  });
+});

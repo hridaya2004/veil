@@ -412,11 +412,153 @@ function createScannedPagePNG() {
 // Main
 // ============================================================
 
+// ============================================================
+// 5. test-ligatures.pdf
+//
+// Tests ligature normalization. Contains text with actual
+// Unicode ligature codepoints (U+FB00-FB04) that should be
+// decomposed by normalizeLigatures() before display.
+//
+// Uses Helvetica which supports these codepoints in its
+// WinAnsi encoding range — but we write the raw Unicode
+// characters that pdf-lib will embed as-is.
+// ============================================================
+
+async function generateLigatures() {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([612, 792]);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = 14;
+  const y = 700;
+
+  // Write text with actual Unicode ligature codepoints.
+  // These are the characters that some PDF producers emit:
+  //   U+FB01 = fi, U+FB02 = fl, U+FB00 = ff, U+FB03 = ffi, U+FB04 = ffl
+  //
+  // We write each word separately so we can verify per-word extraction.
+  const words = [
+    'e\uFB03cient',     // efficient (with ffi ligature)
+    '\uFB01re\uFB02y',  // firefly (with fi + fl ligatures)
+    'sta\uFB00',        // staff (with ff ligature)
+    'ba\uFB04ed',       // baffled (with ffl ligature)
+  ];
+
+  let x = 72;
+  const spaceWidth = font.widthOfTextAtSize(' ', size);
+  const wordPositions = [];
+
+  for (const word of words) {
+    try {
+      const w = font.widthOfTextAtSize(word, size);
+      page.drawText(word, { x, y, size, font, color: rgb(0, 0, 0) });
+      wordPositions.push({ text: word, x, y, width: w });
+      x += w + spaceWidth;
+    } catch (_) {
+      // Some ligature codepoints may not be in WinAnsi — skip gracefully
+      // and write decomposed version instead
+      const decomposed = word.normalize('NFKD');
+      const w = font.widthOfTextAtSize(decomposed, size);
+      page.drawText(decomposed, { x, y, size, font, color: rgb(0, 0, 0) });
+      wordPositions.push({ text: decomposed, x, y, width: w });
+      x += w + spaceWidth;
+    }
+  }
+
+  const pdfBytes = await pdf.save();
+  writeFileSync(join(__dirname, 'test-ligatures.pdf'), pdfBytes);
+
+  const expected = {
+    pageCount: 1,
+    pages: [{
+      width: 612,
+      height: 792,
+      isScanned: false,
+      isAlreadyDark: false,
+      // After normalization, the text should read as plain ASCII:
+      expectedNormalizedWords: ['efficient', 'firefly', 'staff', 'baffled'],
+    }],
+  };
+
+  writeFileSync(join(__dirname, 'test-ligatures.expected.json'), JSON.stringify(expected, null, 2));
+  console.log('Generated test-ligatures.pdf');
+}
+
+// ============================================================
+// 6. test-punctuation.pdf
+//
+// Tests punctuation merging. Contains sentences where the
+// period/comma is drawn as a separate text item (a common
+// pattern in many PDF producers).
+// ============================================================
+
+async function generatePunctuation() {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([612, 792]);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = 14;
+
+  // Line 1: "Hello World." — period is a separate drawText call
+  let x = 72;
+  const y1 = 700;
+  const spW = font.widthOfTextAtSize(' ', size);
+
+  const helloW = font.widthOfTextAtSize('Hello', size);
+  page.drawText('Hello', { x, y: y1, size, font, color: rgb(0, 0, 0) });
+  x += helloW + spW;
+
+  const worldW = font.widthOfTextAtSize('World', size);
+  page.drawText('World', { x, y: y1, size, font, color: rgb(0, 0, 0) });
+  x += worldW;
+
+  // Period as separate item (no space before it)
+  page.drawText('.', { x, y: y1, size, font, color: rgb(0, 0, 0) });
+
+  // Line 2: "Yes, indeed!" — comma and exclamation separate
+  x = 72;
+  const y2 = 670;
+
+  const yesW = font.widthOfTextAtSize('Yes', size);
+  page.drawText('Yes', { x, y: y2, size, font, color: rgb(0, 0, 0) });
+  x += yesW;
+
+  const commaW = font.widthOfTextAtSize(',', size);
+  page.drawText(',', { x, y: y2, size, font, color: rgb(0, 0, 0) });
+  x += commaW + spW;
+
+  const indeedW = font.widthOfTextAtSize('indeed', size);
+  page.drawText('indeed', { x, y: y2, size, font, color: rgb(0, 0, 0) });
+  x += indeedW;
+
+  page.drawText('!', { x, y: y2, size, font, color: rgb(0, 0, 0) });
+
+  const pdfBytes = await pdf.save();
+  writeFileSync(join(__dirname, 'test-punctuation.pdf'), pdfBytes);
+
+  const expected = {
+    pageCount: 1,
+    pages: [{
+      width: 612,
+      height: 792,
+      isScanned: false,
+      isAlreadyDark: false,
+      expectedCopyPaste: {
+        line1: 'Hello World.',
+        line2: 'Yes, indeed!',
+      },
+    }],
+  };
+
+  writeFileSync(join(__dirname, 'test-punctuation.expected.json'), JSON.stringify(expected, null, 2));
+  console.log('Generated test-punctuation.pdf');
+}
+
 async function main() {
   await generateNativeSimple();
   await generateNativeStyles();
   await generateScanned();
   await generateAlreadyDark();
+  await generateLigatures();
+  await generatePunctuation();
   console.log('\nAll fixtures generated in', __dirname);
 }
 

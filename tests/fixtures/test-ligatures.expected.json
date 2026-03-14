@@ -1,0 +1,17 @@
+{
+  "pageCount": 1,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "isScanned": false,
+      "isAlreadyDark": false,
+      "expectedNormalizedWords": [
+        "efficient",
+        "firefly",
+        "staff",
+        "baffled"
+      ]
+    }
+  ]
+}
