@@ -382,14 +382,23 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
   const fragment = document.createDocumentFragment();
   const measureCtx = document.createElement('canvas').getContext('2d');
 
-  // Flow layout with text-line divs, like the native builder.
-  // BUT with two critical differences that prevent Phantom Clamp:
-  //   1. Per-LINE fontSize (median) → uniform height, no variation
-  //   2. Direct Tesseract baseline → no round-trip, no PDF.js sorting
+  // Two-cursor flow layout (Antigravity's "independent cursors" pattern).
   //
-  // prevBottom works correctly here because fontSize is uniform
-  // within each line → prevBottom advances consistently.
-  let prevBottom = 0;
+  // The dilemma: the div's height determines both the selection
+  // highlight size AND the flow advancement. These need different
+  // values — fontSize for the highlight, medianHeight for the flow.
+  //
+  // Solution: two independent tracking variables:
+  //   - actualDomBottom: where the div's box physically ends in the
+  //     DOM (fontSize). Used to calculate marginTop for the next div.
+  //   - logicalReservedBottom: where the line's "reserved space" ends
+  //     (medianHeight). Used to prevent overlap with the next line.
+  //
+  // marginTop bridges the gap between actualDomBottom (small, tight
+  // around text) and the target position. Since margins are NOT
+  // highlighted during selection, the gap stays invisible.
+  let actualDomBottom = 0;
+  let logicalReservedBottom = 0;
 
   for (const line of linesToProcess) {
     const words = (line.words || [])
@@ -422,14 +431,25 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
     // --- Flow layout line div ---
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
+    lineDiv.style.fontSize = fontSize + 'px';
 
-    const vGap = Math.max(0, lineTop - prevBottom);
-    // marginTop instead of paddingTop: margins are NOT highlighted
-    // during text selection, so the gaps between lines stay invisible.
-    // paddingTop would be highlighted as a tall blue rectangle.
-    lineDiv.style.marginTop = vGap + 'px';
-    lineDiv.style.height = medianHeight + 'px';
-    prevBottom = lineTop + medianHeight;
+    // Target position: respect the logical reserved space of the
+    // previous line (prevents overlap), but don't go above lineTop.
+    const targetTop = Math.max(logicalReservedBottom, lineTop);
+
+    // marginTop: physical distance from the previous div's DOM bottom
+    // to where this div should start. margin is NOT highlighted
+    // during selection, so the gap between lines stays invisible.
+    const margin = targetTop - actualDomBottom;
+    lineDiv.style.marginTop = margin + 'px';
+
+    // height = fontSize ONLY — the div wraps tightly around the text.
+    // No "zoccolo" (extra space below text that gets highlighted).
+    lineDiv.style.height = fontSize + 'px';
+
+    // Update both cursors for the next line:
+    actualDomBottom = targetTop + fontSize;       // where the DOM box ends
+    logicalReservedBottom = targetTop + medianHeight; // where the reserved space ends
 
     measureCtx.font = `${fontSize}px sans-serif`;
     const spaceAdvance = measureCtx.measureText(' ').width;
