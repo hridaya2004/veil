@@ -15,6 +15,184 @@ export const DARK_LUMINANCE_THRESHOLD = 0.4;
 export const SCAN_IMAGE_COVERAGE_THRESHOLD = 0.85;
 export const SCAN_TEXT_CHAR_THRESHOLD = 50;
 export const OCR_CONFIDENCE_THRESHOLD = 45;
+export const OCR_HEIGHT_CLAMP_FACTOR = 3;
+export const OCR_GAP_OUTLIER_FACTOR = 5;
+
+// ============================================================
+// OCR TextContent Filtering
+// ============================================================
+
+/**
+ * Filters textContent items to remove those that would poison the
+ * flow layout in buildTextLayer.
+ *
+ * The problem ("Phantom Clamp Theorem"): in a flow layout with
+ * paddingTop = max(0, lt - prevBottom), the total DOM advancement
+ * for any item is always `y1_scaled` regardless of its height.
+ * Clamping heights is mathematically futile — it just redistributes
+ * between padding and content, but the sum is invariant.
+ *
+ * The only effective fix: REMOVE items whose Y positions would
+ * create unreasonable gaps in the flow. An item is considered a
+ * flow-breaker if the gap it would create is > OCR_GAP_OUTLIER_FACTOR
+ * times the median gap of the page.
+ *
+ * This is a geometric filter (not textual): it doesn't look at
+ * word content, only at vertical positioning relative to neighbors.
+ *
+ * @param {Array} items - textContent.items from PDF.js (each with
+ *   .transform [a,b,c,d,e,f], .str, .width)
+ * @param {Function} transformFn - pdfjsLib.Util.transform
+ * @param {Array} viewportTransform - viewport.transform matrix
+ * @param {number} dpr - device pixel ratio
+ * @returns {Object} filtered { items: [...] }
+ */
+export function filterFlowBreakingItems(items, transformFn, viewportTransform, dpr) {
+  if (items.length <= 2) return { items: [...items] };
+
+  // Compute screen-space top and height for each item
+  const measured = items.map((item, idx) => {
+    const tx = transformFn(viewportTransform, item.transform);
+    const fontHeight = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
+    const fontSize = fontHeight / dpr;
+    const top = tx[5] / dpr;
+    return { idx, top, height: fontSize, item };
+  });
+
+  // Sort by Y (top) for flow simulation
+  measured.sort((a, b) => a.top - b.top);
+
+  // Compute gaps between consecutive items
+  const gaps = [];
+  for (let i = 1; i < measured.length; i++) {
+    const gap = measured[i].top - (measured[i - 1].top + measured[i - 1].height);
+    gaps.push(Math.max(0, gap));
+  }
+
+  if (gaps.length === 0) return { items: [...items] };
+
+  // Compute median gap (robust to outliers)
+  const sortedGaps = [...gaps].sort((a, b) => a - b);
+  const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
+
+  // Threshold: gaps larger than this are considered flow-breakers
+  // Use at least 50px as minimum threshold to avoid filtering
+  // normal paragraph spacing in documents with tight line spacing
+  const maxGap = Math.max(50, medianGap * OCR_GAP_OUTLIER_FACTOR);
+
+  // Simulate flow layout and identify items that create toxic gaps.
+  // An item is a flow-breaker if it creates a gap > maxGap AND
+  // the NEXT item after it would also create a large gap (meaning
+  // the item is isolated — not part of a text block).
+  const keepIndices = new Set();
+
+  // First pass: identify items that create large gaps
+  const gapBefore = new Array(measured.length).fill(0);
+  const gapAfter = new Array(measured.length).fill(0);
+
+  for (let i = 0; i < measured.length; i++) {
+    if (i > 0) {
+      gapBefore[i] = Math.max(0, measured[i].top - (measured[i - 1].top + measured[i - 1].height));
+    }
+    if (i < measured.length - 1) {
+      gapAfter[i] = Math.max(0, measured[i + 1].top - (measured[i].top + measured[i].height));
+    }
+  }
+
+  for (let i = 0; i < measured.length; i++) {
+    // Keep the item unless it's an isolated outlier:
+    // large gap BEFORE it AND large gap AFTER it
+    // (meaning it's not part of any text block).
+    //
+    // First and last items are always kept — they're likely
+    // headers, footers, or page numbers (large gap on only one side).
+    // Only middle items can be identified as isolated.
+    if (i === 0 || i === measured.length - 1) {
+      keepIndices.add(measured[i].idx);
+      continue;
+    }
+
+    const isIsolated = gapBefore[i] > maxGap && gapAfter[i] > maxGap;
+
+    if (isIsolated) {
+      continue;
+    }
+    keepIndices.add(measured[i].idx);
+  }
+
+  // If we'd filter too aggressively (>50% removed), keep everything
+  if (keepIndices.size < items.length * 0.5) {
+    return { items: [...items] };
+  }
+
+  return { items: items.filter((_, idx) => keepIndices.has(idx)) };
+}
+
+// ============================================================
+// OCR Word Sanitization
+// ============================================================
+
+/**
+ * Sanitizes OCR word bounding boxes to prevent "prevBottom poisoning"
+ * in flow-based text layer layout.
+ *
+ * The problem: Tesseract sometimes returns bounding boxes with
+ * abnormally tall heights (e.g. a `|` classified as 400px tall).
+ * In a flow layout that uses paddingTop = max(0, lineTop - prevBottom),
+ * a single tall item advances prevBottom far ahead, causing all
+ * subsequent lines to collapse with zero padding or accumulate
+ * massive offsets. The error cascades through the entire page.
+ *
+ * The fix: clamp bounding box heights to OCR_HEIGHT_CLAMP_FACTOR
+ * times the median height of all words on the page. This is:
+ *   - Geometric (not textual): doesn't look at word content
+ *   - Median-based: robust to outliers
+ *   - Conservative: clamps heights, never removes words
+ *   - Safe for edge cases: page numbers, footnotes, headers
+ *     all have normal bbox heights — only anomalous items are affected
+ *
+ * Also sorts words by Y coordinate for correct top-to-bottom flow.
+ *
+ * @param {Array} words - Tesseract word objects with .bbox, .text, .confidence
+ * @param {number} confidenceThreshold - minimum confidence to keep
+ * @returns {Array} sanitized words (new array, does not mutate input)
+ */
+export function sanitizeOcrWords(words, confidenceThreshold) {
+  // Filter by confidence and validity
+  const valid = words.filter(w =>
+    w.text && w.text.trim() &&
+    w.confidence >= confidenceThreshold &&
+    (w.bbox.y1 - w.bbox.y0) >= 2 &&
+    (w.bbox.x1 - w.bbox.x0) >= 2
+  );
+
+  if (valid.length === 0) return [];
+
+  // Compute median bbox height (robust to outliers)
+  const heights = valid.map(w => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)];
+  const maxHeight = medianHeight * OCR_HEIGHT_CLAMP_FACTOR;
+
+  // Clamp anomalous heights and sort by Y
+  const sanitized = valid.map(w => {
+    const bboxH = w.bbox.y1 - w.bbox.y0;
+    if (bboxH <= maxHeight) return w;
+
+    // Clamp: keep the top of the bbox, shrink the bottom
+    return {
+      ...w,
+      bbox: {
+        ...w.bbox,
+        y1: w.bbox.y0 + maxHeight,
+      },
+    };
+  });
+
+  // Sort by Y coordinate for correct top-to-bottom flow order
+  sanitized.sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+
+  return sanitized;
+}
 
 // ============================================================
 // Matrix Utilities
