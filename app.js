@@ -372,11 +372,9 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
   const scaleX = cssW / canvasW;
   const scaleY = cssH / canvasH;
 
-  // Use Tesseract's line structure for grouping and baseline
   const ocrLines = ocrData.lines || [];
   const flatWords = ocrData.words || [];
 
-  // If no line structure, fall back to flat words
   const linesToProcess = ocrLines.length > 0
     ? ocrLines
     : [{ words: flatWords, baseline: null }];
@@ -384,15 +382,25 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
   const fragment = document.createDocumentFragment();
   const measureCtx = document.createElement('canvas').getContext('2d');
 
+  // Flow layout with text-line divs, like the native builder.
+  // BUT with two critical differences that prevent Phantom Clamp:
+  //   1. Per-LINE fontSize (median) → uniform height, no variation
+  //   2. Direct Tesseract baseline → no round-trip, no PDF.js sorting
+  //
+  // prevBottom works correctly here because fontSize is uniform
+  // within each line → prevBottom advances consistently.
+  let prevBottom = 0;
+
   for (const line of linesToProcess) {
     const words = (line.words || [])
       .filter(w => w.text && w.text.trim() && w.confidence >= OCR_CONFIDENCE_THRESHOLD);
 
     if (words.length === 0) continue;
 
-    // Compute per-line fontSize from the MEDIAN word bbox height.
-    // Using median (not individual word height) prevents per-word
-    // fontSize variation that would cause vertical jitter.
+    // Sort words left-to-right
+    words.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+
+    // --- Per-line fontSize from MEDIAN bbox height ---
     const wordHeights = words.map(w => (w.bbox.y1 - w.bbox.y0) * scaleY);
     wordHeights.sort((a, b) => a - b);
     const medianHeight = wordHeights[Math.floor(wordHeights.length / 2)];
@@ -400,62 +408,67 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
 
     if (fontSize < 1) continue;
 
-    // Determine the baseline Y position for this line.
-    // Tesseract's line.baseline provides the polynomial baseline
-    // (y = p1*x + p0) which is far more accurate than bbox.y1.
-    // For horizontal text, baseline.y0 ≈ baseline.y1 ≈ the Y
-    // where letter bodies rest (above descenders).
+    // --- Baseline Y from Tesseract ---
     let baselineY;
     if (line.baseline && line.baseline.y0 != null) {
-      // Use Tesseract's computed baseline (average of endpoints)
       baselineY = ((line.baseline.y0 + line.baseline.y1) / 2) * scaleY;
     } else {
-      // Fallback: estimate baseline from median bbox
-      // Baseline sits at approximately bbox.y0 + 78% of bbox height
       const medianY0 = words.reduce((s, w) => s + w.bbox.y0, 0) / words.length;
-      const medianBboxH = medianHeight / scaleY * scaleY; // in CSS pixels
-      baselineY = (medianY0 * scaleY) + medianBboxH * 0.78;
+      baselineY = (medianY0 * scaleY) + medianHeight * 0.78;
     }
 
-    // Position: top = baseline - fontSize (text renders downward from top)
-    // This places the top of the text at one fontSize above the baseline,
-    // which is where the ascender line sits.
     const lineTop = baselineY - fontSize;
+
+    // --- Flow layout line div ---
+    const lineDiv = document.createElement('div');
+    lineDiv.className = 'text-line';
+
+    const vGap = Math.max(0, lineTop - prevBottom);
+    // marginTop instead of paddingTop: margins are NOT highlighted
+    // during text selection, so the gaps between lines stay invisible.
+    // paddingTop would be highlighted as a tall blue rectangle.
+    lineDiv.style.marginTop = vGap + 'px';
+    lineDiv.style.height = medianHeight + 'px';
+    prevBottom = lineTop + medianHeight;
+
+    measureCtx.font = `${fontSize}px sans-serif`;
+    const spaceAdvance = measureCtx.measureText(' ').width;
 
     for (let i = 0; i < words.length; i++) {
       const word = words[i];
       const wordText = normalizeLigatures(word.text);
-      const isLast = i === words.length - 1;
+
+      // TextNode space between words for copy/paste
+      if (i > 0) {
+        lineDiv.appendChild(document.createTextNode(' '));
+      }
 
       const span = document.createElement('span');
-      // Trailing space for copy/paste word separation.
-      // white-space: pre preserves it. Last word: no trailing space.
-      span.textContent = isLast ? wordText : wordText + ' ';
-
-      const left = word.bbox.x0 * scaleX;
-      const width = (word.bbox.x1 - word.bbox.x0) * scaleX;
-
-      span.style.position = 'absolute';
-      span.style.left = left + 'px';
-      span.style.top = lineTop + 'px';
+      span.textContent = wordText;
       span.style.fontSize = fontSize + 'px';
-      span.style.lineHeight = '1';
 
-      // Scale the span horizontally to match the OCR bbox width.
-      // Measure the natural text width at this fontSize, then scaleX
-      // to stretch/compress to match the bbox.
-      if (width > 0) {
-        measureCtx.font = `${fontSize}px sans-serif`;
-        const naturalWidth = measureCtx.measureText(span.textContent).width;
+      // First word: indent with marginLeft
+      const wordLeft = word.bbox.x0 * scaleX;
+      if (i === 0 && wordLeft > 0.5) {
+        span.style.marginLeft = wordLeft + 'px';
+      }
+
+      // Width: scaleX to match OCR bbox
+      const wordWidth = (word.bbox.x1 - word.bbox.x0) * scaleX;
+      if (wordWidth > 0) {
+        const naturalWidth = measureCtx.measureText(wordText).width;
         if (naturalWidth > 0) {
           span.style.display = 'inline-block';
-          span.style.transformOrigin = '0% 0%';
-          span.style.transform = `scaleX(${width / naturalWidth})`;
+          span.style.width = wordWidth + 'px';
+          span.style.transform = `scaleX(${wordWidth / naturalWidth})`;
+          span.style.transformOrigin = 'left top';
         }
       }
 
-      fragment.appendChild(span);
+      lineDiv.appendChild(span);
     }
+
+    fragment.appendChild(lineDiv);
   }
 
   container.appendChild(fragment);
