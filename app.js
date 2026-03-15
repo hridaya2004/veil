@@ -64,6 +64,16 @@ const OPS_MAP = {
 // How many pages around the visible area to pre-render
 const PRERENDER_MARGIN = 2;
 
+// Minimum PDF.js render scale for Tesseract OCR.
+// PDF standard is 72 points/inch. At scale 3, a page is rendered
+// at 72 * 3 = 216 DPI — above Tesseract's minimum threshold (~200 DPI).
+// Below this, OCR quality degrades sharply: confidence drops, words are
+// garbled or missed entirely. When the display canvas (currentScale * dpr)
+// is below this threshold, we render a separate higher-res canvas just
+// for Tesseract. The coordinate conversion in buildOcrTextLayerDirect
+// handles the difference automatically via scaleX/scaleY.
+const OCR_MIN_SCALE = 3;
+
 // Baseline offset ratio: measured at runtime via canvas.measureText().
 // Tells us exactly where the browser places the baseline within
 // a line-box of height = font-size. This varies by OS/font.
@@ -779,8 +789,34 @@ async function renderPageIfNeeded(pageNum) {
       // OCR runs in background — text becomes selectable silently
       const cssW = Math.floor(w / dpr);
       const cssH = Math.floor(h / dpr);
-      ocrPage(renderCanvas, slot.textLayer, cssW, cssH, myGen);
-      // renderCanvas is kept alive for OCR; it will be GC'd after
+
+      const effectiveScale = currentScale * dpr;
+      if (effectiveScale >= OCR_MIN_SCALE) {
+        // Display canvas already has enough resolution for Tesseract
+        ocrPage(renderCanvas, slot.textLayer, cssW, cssH, myGen);
+      } else {
+        // Display canvas is too low-res for good OCR (< 216 DPI).
+        // Render a separate higher-resolution canvas for Tesseract.
+        // The display canvas data has already been copied to mainCanvas
+        // and overlayCanvas above, so we can release it immediately.
+        renderCanvas.width = 0;
+
+        const ocrViewport = page.getViewport({ scale: OCR_MIN_SCALE });
+        const ocrCanvas = createOffscreenCanvas(
+          Math.floor(ocrViewport.width),
+          Math.floor(ocrViewport.height)
+        );
+        page.render({
+          canvasContext: ocrCanvas.getContext('2d'),
+          viewport: ocrViewport,
+        }).promise.then(() => {
+          if (globalGeneration === myGen) {
+            ocrPage(ocrCanvas, slot.textLayer, cssW, cssH, myGen);
+          } else {
+            ocrCanvas.width = 0;
+          }
+        });
+      }
     } else {
       buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
       renderCanvas.width = 0; // release temp canvas
@@ -1494,18 +1530,40 @@ async function exportDarkPdf() {
           }
         }
       } else if (isScannedDocument) {
-        // Scanned PDF: run OCR for text layer
+        // Scanned PDF: run OCR for text layer.
+        // If the export canvas is below OCR_MIN_SCALE, render a
+        // separate higher-res canvas to feed Tesseract for better
+        // recognition quality (see OCR_MIN_SCALE comment above).
         const worker = await ensureTesseractWorker();
         if (worker) {
-          // Use the original (non-inverted) render for OCR
+          const exportScale = currentScale * exportDpr;
+          let ocrCanvas = renderCanvas;
+          let ocrW = w;
+          let ocrH = h;
+
+          if (exportScale < OCR_MIN_SCALE) {
+            const ocrVp = page.getViewport({ scale: OCR_MIN_SCALE });
+            ocrW = Math.floor(ocrVp.width);
+            ocrH = Math.floor(ocrVp.height);
+            ocrCanvas = createOffscreenCanvas(ocrW, ocrH);
+            await page.render({
+              canvasContext: ocrCanvas.getContext('2d'),
+              viewport: ocrVp,
+            }).promise;
+          }
+
           const ocrBlob = await new Promise(r =>
-            renderCanvas.toBlob(r, 'image/png')
+            ocrCanvas.toBlob(r, 'image/png')
           );
           const { data } = await worker.recognize(ocrBlob);
 
+          // Release the separate OCR canvas if we created one
+          if (ocrCanvas !== renderCanvas) ocrCanvas.width = 0;
+
           if (data.words) {
-            const sx = origVp.width / w;
-            const sy = origVp.height / h;
+            // Map OCR pixel coordinates back to PDF points
+            const sx = origVp.width / ocrW;
+            const sy = origVp.height / ocrH;
 
             for (const word of data.words) {
               if (!word.text || !word.text.trim()) continue;
