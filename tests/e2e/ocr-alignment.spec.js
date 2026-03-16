@@ -93,7 +93,7 @@ test.describe('OCR text layer with real scanned PDF', () => {
       if (!container) return { error: 'no container' };
       const containerRect = container.getBoundingClientRect();
 
-      const spans = container.querySelectorAll('.text-layer span');
+      const spans = container.querySelectorAll('.text-layer span:not([data-gap])');
       if (spans.length === 0) return { error: 'no spans' };
 
       let insideCount = 0;

@@ -255,8 +255,33 @@ body {
 
 .text-layer span::selection,
 .text-layer br::selection,
-.text-line::selection {
+.text-line::selection,
+.ocr-image-region span::selection {
   background: rgba(107, 138, 205, 0.3);
+}
+
+/* Vertical OCR layer: separate from .text-layer so selections
+   in one don't bleed into the other. Same position/size as
+   .text-layer, stacked on top. */
+.vertical-ocr-layer {
+  pointer-events: none;
+}
+
+.vertical-ocr-layer .ocr-image-region-rotated {
+  pointer-events: none;
+}
+
+.vertical-ocr-layer .ocr-image-region-rotated span {
+  /* Vertical spans are inert — they don't intercept clicks or
+     selection drags. This prevents them from interfering with
+     horizontal text selection in the layer below. The vertical
+     text IS still in the DOM and gets included in broad selections
+     (Cmd+A, or dragging from outside the image into native text). */
+  pointer-events: none;
+}
+
+.ocr-image-region {
+  pointer-events: auto;
 }
 
 /* ============================================================

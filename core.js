@@ -19,6 +19,64 @@ export const OCR_HEIGHT_CLAMP_FACTOR = 3;
 export const OCR_GAP_OUTLIER_FACTOR = 5;
 
 // ============================================================
+// OCR Artifact Detection
+//
+// Tesseract interprets non-text elements in scanned documents
+// (borders, lines, stamps, logos) as text characters. These
+// "artifact words" are composed entirely of symbols/punctuation
+// with no letters or digits. Examples: "|", "\", "{|", "————".
+//
+// This filter removes them from the text layer without touching
+// real content. Safe for all document types (code, math, research)
+// because any word with at least one letter or digit passes through.
+//
+// Two rules:
+//   1. Sequences of 2+ line/border characters (dash, pipe, etc.)
+//      are always artifacts: "————", "_—", "||", "=/="
+//   2. Single characters from the "never standalone" set are
+//      artifacts: "|", "\", "€", "©", etc.
+//
+// NOT filtered: "-" (bullet point), "—" (em dash), ".", ":", ";"
+// (legitimate punctuation that may appear as standalone words).
+//
+// References:
+//   - github.com/tesseract-ocr/tesseract/issues/3597 (I → | confusion)
+//   - github.com/tesseract-ocr/tesseract/issues/1465 (extra char insertion)
+//   - tesseract-ocr.github.io/tessdoc/ImproveQuality.html (border artifacts)
+// ============================================================
+
+// Characters that form border/line artifacts when in sequences of 2+
+const OCR_LINE_CHARS_RE = /^[-—–_|\\\/=~]+$/;
+
+// Single characters that are never standalone words in any document.
+// Excludes: - (bullet), — (em dash), . : ; , ! ? (punctuation)
+const OCR_NEVER_STANDALONE_RE = /^[|\\{}[\]©®™€£¥¢°§¶†‡•~^*_=<>\/]+$/;
+
+/**
+ * Returns true if the word is an OCR artifact (non-text noise from
+ * borders, lines, stamps, or logos in the scanned document).
+ *
+ * A word with at least one letter or digit in ANY script (Latin,
+ * Cyrillic, CJK, Arabic, etc.) is always considered real content.
+ */
+export function isOcrArtifact(text) {
+  if (!text) return true;
+  const t = text.trim();
+  if (!t) return true;
+
+  // Any letter or digit in any script → real content, keep it
+  if (/[\p{L}\p{N}]/u.test(t)) return false;
+
+  // Sequences of 2+ line/border characters → artifact
+  if (t.length >= 2 && OCR_LINE_CHARS_RE.test(t)) return true;
+
+  // Single characters from the "never standalone" set → artifact
+  if (OCR_NEVER_STANDALONE_RE.test(t)) return true;
+
+  return false;
+}
+
+// ============================================================
 // OCR TextContent Filtering
 // ============================================================
 
@@ -524,11 +582,200 @@ export function calculateScale(pageWidth, pageHeight, windowWidth, windowHeight,
 }
 
 // ============================================================
+// Navigator Language Mapping
+//
+// Maps the user's OS language (from navigator.languages) to a
+// Tesseract language code. This lets us create the OCR worker
+// with the right language from the start — no scout pass needed.
+// ============================================================
+
+const BCP47_TO_TESSERACT = {
+  it: 'ita', fr: 'fra', de: 'deu', es: 'spa', pt: 'por',
+  ru: 'rus', ja: 'jpn', zh: 'chi_sim', ko: 'kor', ar: 'ara',
+  nl: 'nld', pl: 'pol', sv: 'swe', da: 'dan', no: 'nor',
+  fi: 'fin', cs: 'ces', ro: 'ron', hu: 'hun', el: 'ell',
+  tr: 'tur', uk: 'ukr', hi: 'hin', th: 'tha', vi: 'vie',
+};
+
+/**
+ * Returns the Tesseract language code for the user's primary
+ * non-English language, or null if the user's system is English-only.
+ *
+ * Reads navigator.languages (the OS language preferences) and maps
+ * the first non-English entry to a Tesseract code. This is privacy-
+ * respecting — the user explicitly configured these languages in
+ * their OS settings.
+ *
+ * Examples:
+ *   ['it-IT', 'en-US'] → 'ita'
+ *   ['en-US']           → null
+ *   ['de-DE', 'en-GB']  → 'deu'
+ */
+export function getNavigatorLanguage() {
+  const langs = (typeof navigator !== 'undefined' && navigator.languages)
+    ? navigator.languages
+    : [];
+
+  for (const lang of langs) {
+    const code = lang.split('-')[0].toLowerCase();
+    if (code === 'en') continue;
+    if (BCP47_TO_TESSERACT[code]) return BCP47_TO_TESSERACT[code];
+  }
+
+  return null;
+}
+
+// ============================================================
 // Scanned Document Detection (logic only)
 //
 // Given arrays of { charCount, maxImageCoverage } from sampled
 // pages, returns true if ALL pages match the scanned pattern.
 // ============================================================
+
+// ============================================================
+// OCR Language Detection
+//
+// Detects the language of OCR'd text using character frequency
+// and common function-word patterns. Designed to work with
+// Tesseract's English-only scout pass: the LSTM engine recognizes
+// individual characters (including accents) even without the
+// correct language model, so accented characters and short
+// function words are reliable signals.
+//
+// Returns a Tesseract language code: 'eng', 'ita', 'fra', etc.
+// Returns 'eng' when confidence is too low to switch (safe default).
+// ============================================================
+
+const LANG_PROFILES = [
+  {
+    code: 'ita',
+    // Accented characters distinctive to Italian (è, à, ù, ò, ì — NOT é which is shared with French)
+    chars: /[èàùòì]/g,
+    charWeight: 3,
+    // Common Italian function words — includes very short words (e, al, si)
+    // that are distinctively Italian as standalone tokens
+    words: /\b(il|la|di|che|per|una|del|con|dei|gli|nel|dal|alla|dalla|nella|delle|sono|della|questo|questa|anche|come|dopo|ogni|prima|stato|tutti|essere|al|si|lo|le|un|suo|sua|nei)\b/gi,
+    wordWeight: 2,
+    // Standalone "e" (= "and" in Italian) is very common and distinctive.
+    // Separate pattern because \be\b is too aggressive in the main regex.
+    extraWords: /\b[eè]\b/gi,
+    extraWeight: 2,
+  },
+  {
+    code: 'fra',
+    // Only highly distinctive French chars (not é which appears in loanwords)
+    chars: /[êëçœîôûæ]/g,
+    charWeight: 3,
+    // é gets lower weight — it appears in English loanwords (café, résumé)
+    sharedChars: /[é]/g,
+    sharedCharWeight: 1,
+    words: /\b(le|la|de|les|des|une|est|que|dans|pour|sur|avec|sont|cette|mais|nous|vous|tout|elle|leur|peut|fait|bien|plus|qui|pas)\b/gi,
+    wordWeight: 2,
+  },
+  {
+    code: 'deu',
+    chars: /[üöäß]/g,
+    charWeight: 4,  // ß and umlauts are very distinctive
+    words: /\b(der|die|das|und|ist|von|den|dem|ein|eine|mit|auf|des|sich|nicht|als|auch|nach|wie|bei|wird|sind|kann|noch|sein|über)\b/gi,
+    wordWeight: 2,
+  },
+  {
+    code: 'spa',
+    chars: /[ñ¿¡]/g,
+    charWeight: 5,  // ñ, ¿, ¡ are nearly unique to Spanish
+    words: /\b(el|los|las|del|una|que|por|con|para|como|pero|este|esta|son|todo|tiene|puede|desde|hasta|entre|cada)\b/gi,
+    wordWeight: 2,
+  },
+  {
+    code: 'por',
+    chars: /[ãõ]/g,
+    charWeight: 5,  // ã, õ are nearly unique to Portuguese
+    words: /\b(que|em|para|com|uma|por|dos|das|mais|como|mas|seu|sua|foi|tem|são|pode|este|esta|pelo|pela)\b/gi,
+    wordWeight: 2,
+  },
+];
+
+// Minimum score to switch away from English.
+// Calibrated to reject false positives from English loanwords (café, résumé, naïve)
+// while still detecting real non-English text with few distinctive markers.
+const LANG_DETECT_THRESHOLD = 6;
+
+export function detectLanguageFromText(text) {
+  if (!text || text.length < 20) return 'eng';
+
+  const lower = text.toLowerCase();
+
+  // Non-Latin script detection (character ranges).
+  // These are checked first because they're unambiguous — if 20%+ of
+  // characters are Cyrillic/Arabic or 10%+ are CJK, that's definitive.
+  const cyrillicCount = (text.match(/[\u0400-\u04FF]/g) || []).length;
+  if (cyrillicCount > text.length * 0.2) return 'rus';
+
+  const cjkCount = (text.match(/[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/g) || []).length;
+  if (cjkCount > text.length * 0.1) {
+    if ((text.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length > 0) return 'jpn';
+    if ((text.match(/[\uAC00-\uD7AF]/g) || []).length > 0) return 'kor';
+    return 'chi_sim';
+  }
+
+  const arabicCount = (text.match(/[\u0600-\u06FF]/g) || []).length;
+  if (arabicCount > text.length * 0.2) return 'ara';
+
+  // Latin-script language detection.
+  // Score each language by distinctive characters + function words.
+  let bestCode = 'eng';
+  let bestScore = 0;
+
+  for (const profile of LANG_PROFILES) {
+    let score = 0;
+    let hasDistinctiveEvidence = false;
+
+    // Primary distinctive characters (high weight)
+    const charMatches = lower.match(profile.chars);
+    if (charMatches) {
+      score += charMatches.length * profile.charWeight;
+      hasDistinctiveEvidence = true;
+    }
+
+    // Shared characters that appear in multiple languages (low weight).
+    // These contribute to score but are NOT considered distinctive —
+    // they can't trigger a language switch on their own. This prevents
+    // English loanwords (café, résumé, naïve) from false-triggering French.
+    if (profile.sharedChars) {
+      const shared = lower.match(profile.sharedChars);
+      if (shared) score += shared.length * (profile.sharedCharWeight || 1);
+    }
+
+    // Function words — distinctive evidence
+    const wordMatches = lower.match(profile.words);
+    if (wordMatches) {
+      score += wordMatches.length * profile.wordWeight;
+      hasDistinctiveEvidence = true;
+    }
+
+    // Extra word patterns (e.g. standalone "e"/"è" for Italian)
+    if (profile.extraWords) {
+      const extra = lower.match(profile.extraWords);
+      if (extra) {
+        score += extra.length * (profile.extraWeight || 1);
+        hasDistinctiveEvidence = true;
+      }
+    }
+
+    // Without distinctive evidence (only sharedChars matched),
+    // cap the score below threshold to prevent false positives.
+    if (!hasDistinctiveEvidence) {
+      score = Math.min(score, LANG_DETECT_THRESHOLD - 1);
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCode = profile.code;
+    }
+  }
+
+  return bestScore >= LANG_DETECT_THRESHOLD ? bestCode : 'eng';
+}
 
 export function isScannedPattern(pageSamples) {
   if (pageSamples.length === 0) return false;
