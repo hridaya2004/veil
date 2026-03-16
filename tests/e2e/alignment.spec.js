@@ -7,12 +7,12 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loadPDF, waitForTextLayer } from './helpers.js';
+import { loadPDF, waitForTextLayer, READER_URL } from './helpers.js';
 
 test.describe('Text layer alignment (native PDF)', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-native-simple.pdf');
     await waitForTextLayer(page);
   });

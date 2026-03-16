@@ -6,12 +6,12 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loadPDF, waitForTextLayer } from './helpers.js';
+import { loadPDF, waitForTextLayer, READER_URL } from './helpers.js';
 
 test.describe('Text selection (native PDF)', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-native-simple.pdf');
     await waitForTextLayer(page);
   });
@@ -78,7 +78,7 @@ test.describe('Text selection (native PDF)', () => {
 test.describe('Text selection — Antigravity (style transitions)', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-native-styles.pdf');
     await waitForTextLayer(page);
   });
@@ -133,7 +133,7 @@ test.describe('Text selection — Antigravity (style transitions)', () => {
 test.describe('Text selection — Ligature normalization', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-ligatures.pdf');
     await waitForTextLayer(page);
   });
@@ -168,7 +168,7 @@ test.describe('Text selection — Ligature normalization', () => {
 test.describe('Text selection — Punctuation merging', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-punctuation.pdf');
     await waitForTextLayer(page);
   });

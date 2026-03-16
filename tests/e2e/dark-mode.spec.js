@@ -6,12 +6,12 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loadPDF, waitForTextLayer } from './helpers.js';
+import { loadPDF, waitForTextLayer, READER_URL } from './helpers.js';
 
 test.describe('Dark mode (normal PDF)', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-native-simple.pdf');
     await waitForTextLayer(page);
   });
@@ -81,7 +81,7 @@ test.describe('Dark mode (normal PDF)', () => {
 test.describe('Dark mode (already-dark PDF)', () => {
 
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-already-dark.pdf');
     await waitForTextLayer(page);
   });

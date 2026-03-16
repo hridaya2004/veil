@@ -10,12 +10,12 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { loadPDF, waitForOcrTextLayer } from './helpers.js';
+import { loadPDF, waitForOcrTextLayer, READER_URL } from './helpers.js';
 
 test.describe('OCR text layer (scanned PDF)', () => {
 
   test('scanned PDF triggers OCR and creates text layer spans', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-scanned.pdf');
 
     // Wait for OCR to complete — this can take a while
@@ -40,7 +40,7 @@ test.describe('OCR text layer (scanned PDF)', () => {
   });
 
   test('scanned PDF does NOT apply image overlay (no overlay-visible)', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-scanned.pdf');
 
     // For scanned documents, image protection is skipped — the whole
@@ -58,7 +58,7 @@ test.describe('OCR text layer (scanned PDF)', () => {
 test.describe('OCR text layer with real content', () => {
 
   test('native PDF with text does NOT trigger OCR path', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'test-native-simple.pdf');
     await page.waitForTimeout(2000);
 
@@ -82,7 +82,7 @@ test.describe('OCR text layer with real content', () => {
 test.describe('OCR text layer with real scanned PDF', () => {
 
   test('real scanned PDF produces OCR text layer with spans inside page bounds', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
     // Wait for OCR to complete on the first page
     await waitForOcrTextLayer(page, 1);
@@ -136,7 +136,7 @@ test.describe('OCR text layer with real scanned PDF', () => {
   });
 
   test('real scanned PDF OCR text is selectable', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
     await waitForOcrTextLayer(page, 1);
 
@@ -159,7 +159,7 @@ test.describe('OCR text layer with real scanned PDF', () => {
   });
 
   test('confidence filter removes garbage from stamps/logos', async ({ page }) => {
-    await page.goto('/');
+    await page.goto(READER_URL);
     await loadPDF(page, 'real-pdfs/certificato-protesi-omero.pdf');
     await waitForOcrTextLayer(page, 1);
 

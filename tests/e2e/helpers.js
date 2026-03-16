@@ -8,6 +8,9 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const FIXTURES_DIR = join(__dirname, '..', 'fixtures');
 
+// The reader app lives at /reader.html (landing page is at /)
+export const READER_URL = '/reader.html';
+
 /**
  * Load a PDF fixture into the app by setting the file input.
  * Waits for the reader to become visible and the first page to render.

@@ -1,98 +1,223 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Smart Dark PDF</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Veil — Dark Mode PDFs Without Destroying Your Images</title>
+  <meta name="description" content="Open source PDF reader with smart dark mode. Preserves images, OCR on embedded charts, exports dark PDFs with selectable text. No AI, no upload, 100% local." />
+  <meta property="og:title" content="Veil — Smart Dark PDF Reader" />
+  <meta property="og:description" content="Dark mode PDFs without destroying your images. Open source, no AI, 100% local." />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#2a1f1a" />
+  <link rel="canonical" href="https://veil.simoneamico.com/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="landing.css" />
 </head>
 <body>
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <!-- Ambient glow -->
+  <div class="ambient-glow"></div>
 
-  <!-- Drop Zone -->
-  <div id="drop-zone">
-    <input type="file" id="file-input" accept=".pdf" hidden>
-    <div class="drop-content">
-      <svg class="drop-icon" viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-        <polyline points="14 2 14 8 20 8"/>
-        <line x1="12" y1="18" x2="12" y2="12"/>
-        <polyline points="9 15 12 12 15 15"/>
+  <!-- ═══ NAVBAR ═══ -->
+  <nav id="navbar" aria-label="Main navigation">
+    <div class="nav-logo">
+      <svg class="veil-logo" width="24" height="24" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+        <rect x="8" y="4" width="32" height="40" rx="4" fill="#3d2f25" stroke="#D4A373" stroke-width="1.5" opacity="0.6"/>
+        <path d="M8 12 C8 12, 16 8, 24 14 C32 20, 40 10, 40 10 L40 16 C40 16, 32 24, 24 18 C16 12, 8 20, 8 20 Z" fill="#D4A373" opacity="0.35"/>
+        <path d="M8 32 C8 32, 16 28, 24 34 C32 40, 40 30, 40 30 L40 36 C40 36, 32 44, 24 38 C16 32, 8 40, 8 40 Z" fill="#D4A373" opacity="0.35"/>
+        <rect x="16" y="18" width="16" height="12" rx="2" fill="#D4A373" opacity="0.15" stroke="#D4A373" stroke-width="1" stroke-dasharray="2 2"/>
+        <path d="M19 27 L23 22 L25.5 24.5 L28 21 L31 27 Z" fill="#D4A373" opacity="0.5"/>
+        <circle cx="21" cy="21.5" r="1.5" fill="#D4A373" opacity="0.5"/>
       </svg>
-      <p class="drop-title">Drop a PDF here</p>
-      <p class="drop-subtitle">or click to select a file</p>
+      <span>Veil</span>
     </div>
-  </div>
+    <div class="nav-divider"></div>
+    <a href="https://github.com" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    <a href="https://ko-fi.com" target="_blank" rel="noopener noreferrer" class="nav-link">Support</a>
+    <a href="reader.html" class="nav-cta" aria-label="Open Veil">Open Veil</a>
+  </nav>
 
-  <!-- Reader -->
-  <div id="reader" hidden>
-    <header id="toolbar">
-      <div class="toolbar-left">
-        <button id="btn-file" title="Open another file" aria-label="Open another file">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
-            <polyline points="13 2 13 9 20 9"/>
-          </svg>
-        </button>
-      </div>
-
-      <nav class="toolbar-center">
-        <button id="btn-prev" title="Previous page" aria-label="Previous page" disabled>
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="15 18 9 12 15 6"/>
-          </svg>
-        </button>
-        <span id="page-info" aria-live="polite">1 / 1</span>
-        <button id="btn-next" title="Next page" aria-label="Next page" disabled>
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="9 18 15 12 9 6"/>
-          </svg>
-        </button>
-      </nav>
-
-      <div class="toolbar-right">
-        <button id="btn-export" title="Export dark PDF" aria-label="Export dark PDF">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-        </button>
-        <button id="btn-toggle" class="toggle-active" title="Toggle original view for this page" aria-label="Toggle dark mode">
-          <svg id="icon-dark" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-          </svg>
-          <svg id="icon-light" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden>
-            <circle cx="12" cy="12" r="5"/>
-            <line x1="12" y1="1" x2="12" y2="3"/>
-            <line x1="12" y1="21" x2="12" y2="23"/>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
-            <line x1="1" y1="12" x2="3" y2="12"/>
-            <line x1="21" y1="12" x2="23" y2="12"/>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
-          </svg>
-        </button>
-      </div>
-    </header>
-
-    <main id="viewport">
-      <!-- Page containers are created dynamically by app.js -->
-    </main>
-
-    <div id="error-banner" hidden>
-      <span id="error-message"></span>
-      <button id="error-dismiss" aria-label="Dismiss">&times;</button>
+  <!-- ═══ HERO ═══ -->
+  <section class="hero" id="main-content">
+    <div class="hero-badge desktop-only">Open Source <span class="sep">/</span> No AI <span class="sep">/</span> 100% Local</div>
+    <h1>Dark mode PDFs<br><span class="hero-sub">without destroying your</span><br><span id="rotating-text" class="hero-accent">histology slides</span></h1>
+    <p class="hero-desc">Other tools blindly invert everything.<br>Veil knows what to protect.</p>
+    <a href="reader.html" class="cta-btn" aria-label="Open Veil, Free Forever">Open Veil, Free Forever <span class="cta-arrow" aria-hidden="true">→</span></a>
+    <div class="hero-meta">
+      <p class="mobile-only">Open Source <span class="sep">/</span> No AI <span class="sep">/</span> 100% Local</p>
+      <p>No signup <span class="sep">/</span> No install <span class="sep">/</span> Works offline</p>
     </div>
 
-    <div id="export-progress" hidden>
-      <div class="export-progress-bar">
-        <div class="export-progress-fill"></div>
+    <!-- ═══ BEFORE/AFTER ═══ -->
+    <div class="ba-wrap">
+      <div class="ba-container" id="ba-container" aria-label="Compare Veil with other PDF readers">
+        <!-- Others side (background) -->
+        <div class="ba-side ba-others">
+          <div class="ba-label-others">✗ Others</div>
+          <div class="ba-text-row"><div class="tr tr-title" style="height:7px;width:48%;opacity:1"></div><div class="tr" style="width:82%"></div><div class="tr" style="width:70%"></div><div class="tr" style="width:88%"></div></div>
+          <div class="ba-chart-row">
+            <div class="ba-chart ba-chart-inv">
+              <div class="ba-bars" id="others-bars"></div>
+              <div class="ba-labels-inv"><span>A</span><span>B</span><span>C</span><span>D</span><span>E</span><span>F</span></div>
+            </div>
+            <div class="ba-img ba-img-inv">
+              <div class="ba-sun-inv"></div>
+              <div class="ba-mtn-back-inv"></div>
+              <div class="ba-mtn-front-inv"></div>
+              <div class="ba-ground-inv"></div>
+            </div>
+          </div>
+          <div class="ba-caption-row"><div class="tr" style="width:10%"></div><div class="tr" style="width:36%"></div><div class="tr" style="width:20%"></div></div>
+          <div class="ba-text-row"><div class="tr tr-title" style="height:7px;width:90%;opacity:1"></div><div class="tr" style="width:75%"></div><div class="tr" style="width:82%"></div></div>
+          <div class="ba-link-row"><div class="tr" style="width:22%"></div><div class="tr ba-link-inv" style="width:18%"></div><div class="tr" style="width:28%"></div></div>
+          <div class="ba-text-row"><div class="tr tr-title" style="height:7px;width:86%;opacity:1"></div><div class="tr" style="width:68%"></div><div class="tr" style="width:78%"></div><div class="tr" style="width:92%"></div></div>
+          <div class="ba-text-row"><div class="tr tr-title" style="height:7px;width:80%;opacity:1"></div><div class="tr" style="width:90%"></div><div class="tr" style="width:65%"></div></div>
+          <div class="ba-text-row"><div class="tr tr-title" style="height:7px;width:88%;opacity:1"></div><div class="tr" style="width:72%"></div><div class="tr" style="width:85%"></div><div class="tr" style="width:60%"></div></div>
+        </div>
+        <!-- Veil side (clipped overlay) -->
+        <div class="ba-side ba-veil" id="ba-veil">
+          <div class="ba-text-row"><div class="trv trv-title" style="height:7px;width:48%;opacity:1"></div><div class="trv" style="width:82%"></div><div class="trv" style="width:70%"></div><div class="trv" style="width:88%"></div></div>
+          <div class="ba-chart-row">
+            <div class="ba-chart ba-chart-veil">
+              <div class="ba-bars" id="veil-bars"></div>
+              <div class="ba-labels-veil"><span>A</span><span class="sel">B</span><span class="sel">C</span><span class="sel">D</span><span>E</span><span>F</span></div>
+            </div>
+            <div class="ba-img ba-img-orig">
+              <div class="ba-sun-orig"></div>
+              <div class="ba-mtn-back-orig"></div>
+              <div class="ba-mtn-front-orig"></div>
+              <div class="ba-ground-orig"></div>
+            </div>
+          </div>
+          <div class="ba-caption-row"><div class="trv" style="width:10%"></div><div class="trv" style="width:36%"></div><div class="trv" style="width:20%"></div></div>
+          <div class="ba-text-row"><div class="trv trv-title" style="height:7px;width:90%;opacity:1"></div><div class="trv" style="width:75%"></div><div class="trv" style="width:82%"></div></div>
+          <div class="ba-link-row">
+            <div class="trv" style="width:22%"></div>
+            <svg class="ba-chain" width="9" height="9" viewBox="0 0 16 16" fill="none"><path d="M6.5 9.5L9.5 6.5" stroke="#6b9fd4" stroke-width="2" stroke-linecap="round"/><path d="M8.5 10.5L7 12C5.9 13.1 4.1 13.1 3 12C1.9 10.9 1.9 9.1 3 8L4.5 6.5" stroke="#6b9fd4" stroke-width="2" stroke-linecap="round"/><path d="M7.5 5.5L9 4C10.1 2.9 11.9 2.9 13 4C14.1 5.1 14.1 6.9 13 8L11.5 9.5" stroke="#6b9fd4" stroke-width="2" stroke-linecap="round"/></svg>
+            <div class="trv ba-link-veil" style="width:18%"></div>
+            <div class="trv" style="width:28%"></div>
+          </div>
+          <div class="ba-text-row"><div class="trv trv-title" style="height:7px;width:86%;opacity:1"></div><div class="trv" style="width:68%"></div><div class="trv" style="width:78%"></div><div class="trv" style="width:92%"></div></div>
+          <div class="ba-text-row"><div class="trv trv-title" style="height:7px;width:80%;opacity:1"></div><div class="trv" style="width:90%"></div><div class="trv" style="width:65%"></div></div>
+          <div class="ba-text-row"><div class="trv trv-title" style="height:7px;width:88%;opacity:1"></div><div class="trv" style="width:72%"></div><div class="trv" style="width:85%"></div><div class="trv" style="width:60%"></div></div>
+          <div class="ba-label-veil">✓ Veil</div>
+        </div>
+        <!-- Slider -->
+        <div class="ba-slider" id="ba-slider" role="slider" aria-valuenow="50" aria-valuemin="0" aria-valuemax="100" aria-label="Drag to compare Veil with other tools" tabindex="0">
+          <div class="ba-slider-line"></div>
+          <div class="ba-slider-handle">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none"><path d="M6 7L3 10L6 13" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 7L17 10L14 13" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+        </div>
       </div>
-      <span class="export-progress-text"></span>
     </div>
-  </div>
+  </section>
 
-  <script type="module" src="app.js"></script>
+  <!-- ═══ EXPLODED LAYERS ═══ -->
+  <section class="layers-section" id="layers-section">
+    <h2>Three layers, one experience</h2>
+    <p class="layers-sub">What happens when you drop a PDF</p>
+    <div class="layers-content">
+      <div class="layers-annot-left desktop-only" id="annot-left">
+        <div class="annot-item right">
+          <div class="annot-title">Pure Engineering</div>
+          <div class="annot-lines">PDF.js operator list detects images.<br>Deterministic, inspectable, yours.</div>
+        </div>
+        <div class="annot-item right">
+          <div class="annot-title">Your Device Only</div>
+          <div class="annot-lines">OCR, rendering, export, all client-side.<br>Files never leave your browser.</div>
+        </div>
+      </div>
+      <div class="layers-stack" id="layers-stack" role="img" aria-label="Exploded view of Veil's three rendering layers: original PDF, dark inversion, and image protection"></div>
+      <div class="layers-annot-right desktop-only" id="annot-right">
+        <div class="annot-item left">
+          <div class="annot-title">Nothing Lost</div>
+          <div class="annot-lines">Text stays selectable.<br>Images stay protected.<br>Already-dark pages left untouched.<br>Scanned docs get OCR automatically.<br>Export works in any reader.</div>
+        </div>
+      </div>
+    </div>
+    <!-- Mobile annotations -->
+    <div class="layers-mobile-annot mobile-only" id="mobile-annot">
+      <div class="mobile-annot-item"><div class="mobile-annot-bar"></div><div><div class="annot-title">Pure Engineering</div><div class="annot-lines">PDF.js operator list detects images. Deterministic, inspectable, yours.</div></div></div>
+      <div class="mobile-annot-item"><div class="mobile-annot-bar"></div><div><div class="annot-title">Your Device Only</div><div class="annot-lines">OCR, rendering, export, all client-side. Files never leave your browser.</div></div></div>
+      <div class="mobile-annot-item last"><div class="mobile-annot-bar"></div><div><div class="annot-title">Nothing Lost</div><div class="annot-lines">Text stays selectable, images stay protected. Already-dark pages left untouched. Scanned docs get OCR automatically. Export works in any reader.</div></div></div>
+    </div>
+  </section>
+
+  <div class="section-spacer"></div>
+
+  <!-- ═══ OCR CALLOUT ═══ -->
+  <section class="ocr-section">
+    <div class="ocr-card">
+      <div class="ocr-glow"></div>
+      <div class="ocr-badge">No other web tool does this</div>
+      <h3>OCR on images inside your PDFs</h3>
+      <p class="ocr-desc">The text in your document is selectable. The text trapped inside images isn't. Until now.</p>
+      <p class="ocr-highlight">Veil scans images inside your document and makes their text selectable. Chart labels, axis numbers, figure captions. Copy them like any other text.</p>
+      <div class="ocr-tags">
+        <span>Chart labels</span><span>Axis text</span><span>Table headers</span><span>Figure captions</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ WORKFLOW ═══ -->
+  <section class="workflow-section">
+    <div class="workflow-header">
+      <h3>Take it with you</h3>
+      <p>Most dark mode tools trap you in their viewer. Veil lets you export. Download your PDF with dark mode baked in, open it on any device, send it to anyone.</p>
+    </div>
+    <div class="workflow-cards">
+      <div class="workflow-card">
+        <div class="wf-icon">
+          <svg width="24" height="24" viewBox="0 0 20 20" fill="none"><path d="M10 3V12" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/><path d="M6.5 9L10 12.5L13.5 9" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13V16H17V13" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="wf-title">Export dark PDFs</div>
+        <div class="wf-desc">Selectable text, searchable content, original image quality. Opens anywhere.</div>
+      </div>
+      <div class="workflow-card">
+        <div class="wf-icon">
+          <svg width="24" height="24" viewBox="0 0 20 20" fill="none"><path d="M8.5 11.5L11.5 8.5" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/><path d="M10.5 12.5L9 14C7.9 15.1 6.1 15.1 5 14C3.9 12.9 3.9 11.1 5 10L6.5 8.5" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/><path d="M9.5 7.5L11 6C12.1 4.9 13.9 4.9 15 6C16.1 7.1 16.1 8.9 15 10L13.5 11.5" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </div>
+        <div class="wf-title">Links preserved</div>
+        <div class="wf-desc">Internal navigation and external references work in the viewer and survive the export. Table of contents, DOIs, bibliographic links, all intact.</div>
+      </div>
+      <div class="workflow-card">
+        <div class="wf-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M19 17H7A5 5 0 0 1 5.07 7.39 3.2 3.2 0 0 1 6.19 6.87c.5 0 1 .11 1.45.34A6.29 6.29 0 0 1 19.78 9.08 5 5 0 0 1 19 17Z" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 14L18.5 19" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/><path d="M18.5 14L13.5 19" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </div>
+        <div class="wf-title">Works offline</div>
+        <div class="wf-desc">Install Veil once and it runs without internet. Your PDFs, your device, no connection needed. Open it on a plane, in a library, anywhere.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ DONATE ═══ -->
+  <section class="donate-section">
+    <div class="donate-card">
+      <p class="donate-text">If Veil saved your night session, you can support the work.<br><span>I build tools that big tech won't, because they solve real problems for the few, not engagement metrics for the many.</span></p>
+      <a href="https://ko-fi.com" target="_blank" rel="noopener noreferrer" class="donate-btn" aria-label="Fund independent tools on Ko-fi">Fund independent tools <svg width="13" height="18" viewBox="3 1 15 20" fill="none" aria-hidden="true" style="display:inline-block;position:relative;top:-3px"><path d="M4 11H13V17C13 18.7 11.7 20 10 20H7C5.3 20 4 18.7 4 17V11Z" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 12.5H14.5C15.6 12.5 16.5 13.4 16.5 14.5C16.5 15.6 15.6 16.5 14.5 16.5H13" stroke="#D4A373" stroke-width="1.5" stroke-linecap="round"/><path d="M8.5 8.5C8.5 7 7.2 6.5 7.2 5C7.2 3.5 8.5 3 8.5 1.5" stroke="#D4A373" stroke-width="1.1" stroke-linecap="round" fill="none"/></svg></a>
+    </div>
+  </section>
+
+  <!-- ═══ FOOTER ═══ -->
+  <footer>
+    <p class="footer-closing">Built for the researcher reading papers at 2 AM, the medical student reviewing slides before rounds, and anyone who thinks a PDF reader should respect both their eyes and their images.</p>
+    <div class="footer-credits">
+      <div class="footer-logo">
+        <svg width="14" height="14" viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="8" y="4" width="32" height="40" rx="4" fill="#3d2f25" stroke="#D4A373" stroke-width="1.5" opacity="0.6"/><path d="M8 12 C8 12, 16 8, 24 14 C32 20, 40 10, 40 10 L40 16 C40 16, 32 24, 24 18 C16 12, 8 20, 8 20 Z" fill="#D4A373" opacity="0.35"/><path d="M8 32 C8 32, 16 28, 24 34 C32 40, 40 30, 40 30 L40 36 C40 36, 32 44, 24 38 C16 32, 8 40, 8 40 Z" fill="#D4A373" opacity="0.35"/><rect x="16" y="18" width="16" height="12" rx="2" fill="#D4A373" opacity="0.15" stroke="#D4A373" stroke-width="1" stroke-dasharray="2 2"/><path d="M19 27 L23 22 L25.5 24.5 L28 21 L31 27 Z" fill="#D4A373" opacity="0.5"/><circle cx="21" cy="21.5" r="1.5" fill="#D4A373" opacity="0.5"/></svg>
+        <span>Veil</span>
+      </div>
+      <span class="footer-slash">/</span>
+      <span>MIT License</span>
+      <span class="footer-slash">/</span>
+      <a href="https://simoneamico.com" target="_blank" rel="noopener noreferrer">simoneamico.com</a>
+      <span class="footer-slash">/</span>
+      <a href="https://github.com" target="_blank" rel="noopener noreferrer">GitHub</a>
+    </div>
+  </footer>
+
+  <script src="landing.js"></script>
 </body>
 </html>
