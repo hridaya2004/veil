@@ -46,64 +46,222 @@ body {
   position: fixed;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   z-index: 100;
-  transition: background var(--transition);
+  -webkit-tap-highlight-color: transparent;
 }
 
-/* Subtle ambient glow from top */
-#drop-zone::before {
+@media (pointer: coarse) {
+  #drop-zone { cursor: default; }
+}
+
+/* Drag-over: dashed border — Jakob's Law.
+   Users universally recognize this as "drop here". */
+#drop-zone.drag-over::after {
   content: '';
   position: absolute;
+  inset: 16px;
+  border: 2px dashed rgba(212, 163, 115, 0.4);
+  border-radius: 16px;
+  pointer-events: none;
+  animation: drag-border-fade-in 0.2s ease;
+}
+
+@keyframes drag-border-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* --- Veil transition layers ---
+   Three panels that slide right when a PDF loads, creating
+   a parallax curtain-opening effect. Each layer is a different
+   shade of the warm palette, moving at a different speed.
+   The reader is already rendering behind them. */
+
+.veil-layer {
+  position: absolute;
   inset: 0;
-  background: radial-gradient(ellipse 70% 40% at 50% 0%, rgba(212,163,115,0.025) 0%, transparent 70%);
+  pointer-events: none;
+  transform: translateX(0);
+  will-change: transform;
+}
+
+.veil-layer-1 {
+  background: #0a0806;
+  z-index: 3;
+  transition: transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.veil-layer-2 {
+  background: #110e0b;
+  z-index: 2;
+  transition: transform 0.85s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.veil-layer-3 {
+  background: #1a1510;
+  z-index: 1;
+  transition: transform 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* When opening: layers slide right at different speeds */
+#drop-zone.veil-opening .veil-layer-1 {
+  transform: translateX(100%);
+}
+#drop-zone.veil-opening .veil-layer-2 {
+  transform: translateX(100%);
+}
+#drop-zone.veil-opening .veil-layer-3 {
+  transform: translateX(100%);
+}
+
+/* Veil opening: let clicks through to the reader underneath */
+#drop-zone.veil-opening {
   pointer-events: none;
 }
 
-#drop-zone.drag-over {
-  background: rgba(212, 163, 115, 0.04);
+/* Content fades out as veil opens */
+#drop-zone.veil-opening .drop-hero,
+#drop-zone.veil-opening .drop-hint,
+#drop-zone.veil-opening .drop-about {
+  opacity: 0;
+  transition: opacity 0.3s ease;
 }
 
-#drop-zone.drag-over .drop-content {
-  border-color: var(--accent);
-  background: rgba(212, 163, 115, 0.03);
+@media (prefers-reduced-motion: reduce) {
+  .veil-layer { transition: none; }
+  #drop-zone.veil-opening .drop-hero,
+  #drop-zone.veil-opening .drop-hint,
+  #drop-zone.veil-opening .drop-about {
+    transition: none;
+  }
 }
 
-.drop-content {
+/* --- Wordmark --- */
+
+.drop-hero {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
-  padding: 60px 80px;
-  border: 1.5px dashed rgba(212, 163, 115, 0.12);
-  border-radius: 16px;
-  transition: border-color var(--transition), background var(--transition);
+  gap: 16px;
   user-select: none;
+  z-index: 5;
   position: relative;
+  /* Shift the hero group above center — brand in the upper third,
+     action below it with breathing room. */
+  margin-top: -4vh;
+}
+@media (min-width: 700px) {
+  .drop-hero { margin-top: -12vh; }
 }
 
-@media (max-width: 500px) {
-  .drop-content { padding: 48px 40px; }
-}
-
-.drop-icon {
+.drop-wordmark {
+  position: relative;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 72px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1;
   color: var(--accent);
-  opacity: 0.5;
-  margin-bottom: 4px;
+  transition: opacity 0.4s ease;
+}
+@media (min-width: 700px) {
+  .drop-wordmark { font-size: 96px; }
 }
 
-.drop-title {
-  font-size: 18px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
+.drop-v {
+  position: relative;
+  z-index: 1;
 }
 
-.drop-subtitle {
+.drop-v-ghost {
+  position: absolute;
+  left: 0;
+  top: -0.12em;
+  color: var(--accent);
+  opacity: 0.2;
+  z-index: 0;
+  pointer-events: none;
+  filter: blur(1px);
+}
+
+.drop-eil {
+  position: relative;
+  z-index: 1;
+}
+
+.drop-tagline {
   font-size: 14px;
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}
+/* Touch devices (phones, tablets, foldables): short tagline */
+.drop-tagline-desktop { display: none; }
+.drop-tagline-mobile { display: block; }
+/* Mouse devices only: full tagline */
+@media (pointer: fine) {
+  .drop-tagline { font-size: 17px; }
+  .drop-tagline-desktop { display: block; }
+  .drop-tagline-mobile { display: none; }
+}
+
+/* Primary CTA — mobile only. Same style as landing page .cta-btn */
+.drop-browse-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 28px;
+  border-radius: 50px;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  border: none;
+  background: var(--accent);
+  color: #2a1f1a;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.15s;
+  margin-top: 36px;
+}
+.drop-browse-btn:hover { background: var(--accent-hover); }
+.drop-browse-btn:active { background: var(--accent-active); transform: scale(0.97); }
+/* Hide on mouse devices — "click anywhere" replaces the button */
+@media (pointer: fine) {
+  .drop-browse-btn { display: none; }
+}
+
+/* --- Hint at bottom (desktop only) --- */
+
+.drop-hint {
+  position: fixed;
+  bottom: 32px;
+  font-size: 13px;
   color: var(--text-muted);
+  user-select: none;
+  z-index: 5;
+  display: none;
+}
+/* Mouse devices only — touch devices use the Browse PDF button */
+@media (pointer: fine) {
+  .drop-hint { display: block; }
+}
+
+/* --- "What is veil?" link --- */
+
+.drop-about {
+  position: fixed;
+  top: 20px;
+  left: 24px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color var(--transition);
+  z-index: 101;
+}
+.drop-about:hover {
+  color: var(--accent);
 }
 
 /* ============================================================
@@ -141,21 +299,43 @@ body {
 .toolbar-logo {
   display: flex;
   align-items: center;
-  gap: 5px;
   text-decoration: none;
-  color: var(--text-primary);
   padding: 2px 4px;
   border-radius: 4px;
   transition: opacity var(--transition);
 }
 .toolbar-logo:hover { opacity: 0.7; }
-.toolbar-logo span {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
+
+/* Double-layer wordmark — shared between reader toolbar and landing navbar */
+.nav-wordmark {
+  position: relative;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--accent);
 }
 @media (min-width: 700px) {
-  .toolbar-logo span { font-size: 13px; }
+  .nav-wordmark { font-size: 16px; }
+}
+.nav-v {
+  position: relative;
+  z-index: 1;
+}
+.nav-v-ghost {
+  position: absolute;
+  left: 0;
+  top: -0.12em;
+  color: var(--accent);
+  opacity: 0.2;
+  z-index: 0;
+  pointer-events: none;
+  filter: blur(0.5px);
+}
+.nav-eil {
+  position: relative;
+  z-index: 1;
 }
 
 .toolbar-divider {
@@ -166,15 +346,21 @@ body {
 }
 
 .toolbar-filename {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
-  max-width: 120px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-@media (min-width: 700px) {
-  .toolbar-filename { font-size: 12px; max-width: 200px; }
+
+/* Hide filename and its adjacent divider on small screens.
+   The browser tab title already shows "veil - document.pdf". */
+@media (max-width: 699px) {
+  .toolbar-filename,
+  .toolbar-filename-divider {
+    display: none;
+  }
 }
 
 .toolbar-nav {
@@ -452,6 +638,78 @@ body {
 }
 
 /* ============================================================
+   iOS Export Warning
+   ============================================================ */
+
+#ios-export-warn {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(26, 21, 16, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(212, 163, 115, 0.15);
+  border-radius: 16px;
+  z-index: 60;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  width: calc(100% - 32px);
+  max-width: 400px;
+  text-align: center;
+}
+
+#ios-export-warn-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.ios-export-warn-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+#ios-export-try {
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px 14px;
+  border-radius: 50px;
+  transition: color var(--transition);
+}
+#ios-export-try:hover {
+  color: var(--accent);
+}
+
+#ios-export-cancel {
+  background: var(--accent);
+  color: #2a1f1a;
+  border: none;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 18px;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: background var(--transition), transform 0.15s;
+}
+#ios-export-cancel:hover {
+  background: var(--accent-hover);
+}
+#ios-export-cancel:active {
+  background: var(--accent-active);
+  transform: scale(0.97);
+}
+
+/* ============================================================
    Export Progress
    ============================================================ */
 
@@ -513,8 +771,97 @@ body {
 }
 
 /* ============================================================
+   OCR Loading Indicator
+
+   A warm amber light sweeps along the perimeter of a page or
+   image when the user tries to select text before OCR finishes.
+   The effect is triggered on-demand (not shown until the user
+   actually attempts interaction) and fades out gracefully once
+   the text becomes selectable.
+
+   Uses @property to animate a CSS custom property (--ocr-angle)
+   inside a conic-gradient — the only way to get smooth rotation
+   of a gradient without JavaScript animation frames.
+   ============================================================ */
+
+@property --ocr-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes ocr-sweep {
+  to { --ocr-angle: 360deg; }
+}
+
+.ocr-loading::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 4px;
+  background: conic-gradient(
+    from var(--ocr-angle),
+    transparent 0%,
+    #C8894A 6%,
+    #D4A373 12%,
+    #C8894A 18%,
+    transparent 24%
+  );
+  /* Mask trick: the gradient fills the entire area, but the mask
+     subtracts the content box — leaving only a thin perimeter ring.
+     The padding controls the ring thickness. */
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  padding: 2px;
+  animation: ocr-sweep 1.8s linear infinite;
+  z-index: 12;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+}
+
+/* Graceful fade-out when OCR completes */
+.ocr-loading.ocr-done::before {
+  opacity: 0;
+}
+
+/* Respect user motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  .ocr-loading::before {
+    animation: none;
+    background: conic-gradient(
+      from 0deg,
+      rgba(212, 163, 115, 0.3) 0%,
+      rgba(212, 163, 115, 0.3) 100%
+    );
+  }
+}
+
+/* ============================================================
    Utilities
    ============================================================ */
+
+/* Visually hidden but accessible — required for iOS Safari which
+   refuses to open file pickers for inputs with the HTML hidden attribute.
+   The input stays in the layout (technically visible to WebKit) but
+   is invisible and takes no space. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 [hidden] {
   display: none !important;

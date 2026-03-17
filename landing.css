@@ -53,11 +53,22 @@ nav.scrolled {
   nav { gap: 18px; padding: 9px 24px; }
   nav.scrolled { padding: 7px 18px; }
 }
-.nav-logo { display: flex; align-items: center; gap: 6px; }
-.nav-logo .veil-logo { width: 18px; height: 18px; }
-@media (min-width: 700px) { .nav-logo .veil-logo { width: 24px; height: 24px; } }
-.nav-logo span { font-size: 14px; font-weight: 600; color: #f5efe2; }
-@media (min-width: 700px) { .nav-logo span { font-size: 15px; } }
+.nav-logo { display: flex; align-items: center; }
+.nav-wordmark {
+  position: relative;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 14px; font-weight: 700;
+  letter-spacing: -0.04em; line-height: 1;
+  color: #D4A373;
+}
+@media (min-width: 700px) { .nav-wordmark { font-size: 16px; } }
+.nav-v { position: relative; z-index: 1; }
+.nav-v-ghost {
+  position: absolute; left: 0; top: -0.12em;
+  color: #D4A373; opacity: 0.2; z-index: 0;
+  pointer-events: none; filter: blur(0.5px);
+}
+.nav-eil { position: relative; z-index: 1; }
 .nav-divider { width: 1px; height: 14px; background: rgba(212,163,115,0.12); }
 .nav-link {
   font-size: 12px; color: #9a8878; text-decoration: none; transition: color 0.2s;
@@ -98,7 +109,9 @@ h1 {
 .hero-accent {
   color: #D4A373; display: inline-block; min-width: 220px;
   transition: opacity 0.35s, transform 0.35s; font-style: italic;
+  margin-top: 6px;
 }
+@media (min-width: 700px) { .hero-accent { margin-top: 0; } }
 .hero-accent.fade-out { opacity: 0; transform: translateY(6px); }
 /* Prevent word wrapping on very small screens (iPhone SE 1st gen: 320px) */
 @media (max-width: 359px) {

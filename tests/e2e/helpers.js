@@ -32,6 +32,15 @@ export async function loadPDF(page, filename) {
   // Wait for the reader to become visible
   await page.locator('#reader').waitFor({ state: 'visible', timeout: 30000 });
 
+  // Wait for the drop zone veil animation to finish and become hidden
+  await page.waitForFunction(() => {
+    const dz = document.getElementById('drop-zone');
+    return dz && dz.hidden;
+  }, { timeout: 30000 });
+
+  // Brief settle after veil animation for layout/compositing to complete
+  await page.waitForTimeout(200);
+
   // Wait for the first page container to have a rendered canvas
   await page.waitForFunction(() => {
     const canvas = document.querySelector('.page-container .page-canvas');
