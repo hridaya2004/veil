@@ -140,17 +140,17 @@
     // Build inner HTML
     let html = "";
 
-    // Layer 1: Original PDF
+    // Layer 1: Your PDF
     html += buildDocLayer(0, layerGap * 2 + 20, LW, LH, tiltX, spread,
-      "Original PDF", "#9a8878", "0 8px 24px rgba(0,0,0,0.15)",
+      "Your PDF", "#9a8878", "0 8px 24px rgba(0,0,0,0.15)",
       "#f5f0ea", "#3a3028", 0.25, 0.18, mob, false);
 
-    // Layer 2: Dark Inversion
+    // Layer 2: Smart Dark Mode
     html += buildDocLayer(1, layerGap + 10, LW, LH, tiltX, spread,
-      "Dark Inversion", "#7a6b5e", `0 12px 32px rgba(0,0,0,${0.2 + spread * 0.15})`,
-      "#1e1915", "#c4b5a3", 0.35, 0.25, mob, true);
+      "Smart Dark Mode", "#7a6b5e", `0 12px 32px rgba(0,0,0,${0.2 + spread * 0.15})`,
+      "#171717", "#cfcfcf", 0.35, 0.25, mob, true);
 
-    // Layer 3: Image + Text Layer
+    // Layer 3: Protected Layer
     html += buildTransparentLayer(2, 0, LW, LH, tiltX, spread, mob);
 
     // Connectors
@@ -184,7 +184,7 @@
   function buildDocLayer(idx, top, w, h, tiltX, spread, label, labelColor, shadow, bg, lineColor, opTop, opBot, mob, inverted) {
     const n1 = mob ? 3 : 4, n2 = mob ? 1 : 2;
     const imgH = mob ? 40 : 60;
-    const labelOp = spread > 0.2 ? 1 : 0;
+    const labelOp = spread > 0.15 ? Math.min(1, (spread - 0.15) / 0.25) : 0;
     let border = inverted ? "border:1px solid rgba(212,163,115,0.1);border-radius:10px;" : "";
     let lines1 = docLinesHtml(lineColor, opTop, n1, mob);
     let lines2 = docLinesHtml(lineColor, opBot, n2, mob);
@@ -198,29 +198,45 @@
   function buildTransparentLayer(idx, top, w, h, tiltX, spread, mob) {
     const imgH = mob ? 40 : 60;
     const borderOp = 0.08 + spread * 0.12;
-    const labelOp = spread > 0.2 ? 1 : 0;
+    const labelOp = spread > 0.15 ? Math.min(1, (spread - 0.15) / 0.25) : 0;
     const pad = mob ? "6px 12px" : "8px 16px";
     const dotH = mob ? 3 : 4;
     const spacerH = mob ? 46 : 68;
     const shadow = `0 16px 40px rgba(0,0,0,${0.15 + spread * 0.1})`;
+    const gap = mob ? 4 : 6;
     const sunSize = mob ? 9 : 13;
-    const mtnBH = mob ? 28 : 42;
-    const mtnFH = mob ? 22 : 33;
+    const sS = Math.round(imgH * 0.22);
+
+    // Chart bars (original colors — this layer protects them)
+    const barColors = ["#e74c3c","#2ecc71","#3498db","#9b59b6","#f39c12","#1abc9c"];
+    const barHeights = [0.6, 0.85, 0.45, 0.72, 0.9, 0.55];
+    let barsHtml = "";
+    for (let i = 0; i < 6; i++) {
+      barsHtml += `<div style="flex:1;height:${barHeights[i]*100}%;background:${barColors[i]};border-radius:1px 1px 0 0;opacity:0.9"></div>`;
+    }
+
     return `<div class="doc-layer" style="top:${top}px;width:${w}px;height:${h}px;transform:rotateX(${tiltX}deg);box-shadow:${shadow}">
       <div style="background:transparent;width:100%;height:100%;border:1px solid rgba(212,163,115,${borderOp});border-radius:10px">
         <div style="height:${spacerH}px"></div>
-        <div style="margin:0 ${mob?12:16}px;height:${imgH}px;border-radius:5px;background:linear-gradient(180deg,#5ba3d9,#87CEEB);position:relative;overflow:hidden;box-shadow:0 2px 12px rgba(135,206,235,0.15)">
-          <div style="position:absolute;bottom:0;left:8%;width:0;height:0;border-left:24px solid transparent;border-right:24px solid transparent;border-bottom:${mtnBH}px solid #6b7b8a"></div>
-          <div style="position:absolute;bottom:0;right:12%;width:0;height:0;border-left:18px solid transparent;border-right:18px solid transparent;border-bottom:${mtnFH}px solid #556270"></div>
-          <div style="position:absolute;bottom:0;left:0;right:0;height:18%;background:#7a8a6a"></div>
-          <div style="position:absolute;top:14%;right:20%;width:${sunSize}px;height:${sunSize}px;border-radius:50%;background:#ffd700"></div>
+        <div style="display:flex;gap:${gap}px;margin:0 ${mob?12:16}px;height:${imgH}px">
+          <div style="flex:1;background:#f8f6f3;border-radius:4px;padding:4px 4px 2px;display:flex;flex-direction:column;box-shadow:0 1px 6px rgba(0,0,0,0.08)">
+            <div style="flex:1;display:flex;align-items:flex-end;gap:2px">${barsHtml}</div>
+          </div>
+          <div style="flex:1;background:linear-gradient(180deg,#5ba3d9,#87CEEB 50%,#a8d8ea);border-radius:4px;position:relative;overflow:hidden;box-shadow:0 2px 12px rgba(135,206,235,0.15)">
+            <div style="position:absolute;bottom:0;left:25%;width:0;height:0;border-left:22px solid transparent;border-right:22px solid transparent;border-bottom:28px solid #6b7b8a"></div>
+            <div style="position:absolute;bottom:0;right:28%;width:0;height:0;border-left:16px solid transparent;border-right:16px solid transparent;border-bottom:22px solid #556270"></div>
+            <div style="position:absolute;bottom:0;left:0;right:0;height:15%;background:#7a8a6a"></div>
+            <div style="position:absolute;top:14%;right:18%;width:${sS}px;height:${sS}px;border-radius:50%;background:#ffd700;box-shadow:0 0 6px rgba(255,215,0,0.4)"></div>
+          </div>
         </div>
-        <div style="padding:${pad};display:flex;flex-direction:column;gap:${mob?3:4}px">
-          <div style="height:${dotH}px;width:70%;background:rgba(212,163,115,0.12);border-radius:2px"></div>
-          <div style="height:${dotH}px;width:55%;background:rgba(212,163,115,0.08);border-radius:2px"></div>
+        <div style="padding:${mob?'4px 12px':'6px 16px'};display:flex;gap:4px;align-items:center">
+          <div style="height:3px;width:20%;background:rgba(212,163,115,0.1);border-radius:2px"></div>
+          <svg width="6" height="6" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;opacity:0.7"><path d="M6.5 9.5L9.5 6.5" stroke="#6b9fd4" stroke-width="1.5" stroke-linecap="round"/><path d="M8.5 10.5L7 12C5.9 13.1 4.1 13.1 3 12C1.9 10.9 1.9 9.1 3 8L4.5 6.5" stroke="#6b9fd4" stroke-width="1.5" stroke-linecap="round"/><path d="M7.5 5.5L9 4C10.1 2.9 11.9 2.9 13 4C14.1 5.1 14.1 6.9 13 8L11.5 9.5" stroke="#6b9fd4" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <div style="height:3px;width:16%;background:#6b9fd4;opacity:0.6;border-radius:2px;border-bottom:1px solid #6b9fd4"></div>
+          <div style="height:3px;width:24%;background:rgba(212,163,115,0.1);border-radius:2px"></div>
         </div>
       </div>
-      <div class="doc-layer-label" style="color:#D4A373;opacity:${labelOp}">Image + Text Layer</div>
+      <div class="doc-layer-label" style="color:#D4A373;opacity:${labelOp}">Protected Layer</div>
     </div>`;
   }
 
@@ -238,21 +254,40 @@
 
   function imgBlockHtml(inverted, h, mob) {
     const margin = mob ? "0 12px" : "0 16px";
+    const gap = mob ? 4 : 6;
+
+    // Chart (bar graph) — matches before/after section
+    const chartBg = inverted ? "#070709" : "#f8f6f3";
+    const barColors = inverted
+      ? ["#18b3c3","#d1338e","#cb6724","#64a649","#0c63ed","#e54363"]
+      : ["#e74c3c","#2ecc71","#3498db","#9b59b6","#f39c12","#1abc9c"];
+    const barHeights = [0.6, 0.85, 0.45, 0.72, 0.9, 0.55];
+    let barsHtml = "";
+    for (let i = 0; i < 6; i++) {
+      barsHtml += `<div style="flex:1;height:${barHeights[i]*100}%;background:${barColors[i]};border-radius:1px 1px 0 0;opacity:0.9"></div>`;
+    }
+
+    // Landscape image — matches before/after section exactly
     const bg = inverted
-      ? "linear-gradient(180deg,#a45c26,#572715)"
-      : "linear-gradient(180deg,#5ba3d9,#87CEEB)";
+      ? "linear-gradient(180deg,#a45c26,#783114 50%,#572715)"
+      : "linear-gradient(180deg,#5ba3d9,#87CEEB 50%,#a8d8ea)";
     const mtnB = inverted ? "#948475" : "#6b7b8a";
     const mtnF = inverted ? "#aa9d8f" : "#556270";
     const ground = inverted ? "#857595" : "#7a8a6a";
     const sun = inverted ? "#0028ff" : "#ffd700";
-    const bL = Math.round(h * 0.5), bR = bL, bB = Math.round(h * 0.7);
-    const fL = Math.round(h * 0.38), fR = fL, fB = Math.round(h * 0.55);
+    const sunGlow = inverted ? "0 0 6px rgba(0,40,255,0.3)" : "0 0 6px rgba(255,215,0,0.4)";
     const sS = Math.round(h * 0.22);
-    return `<div class="doc-img-block" style="height:${h}px;background:${bg};margin:${margin}">
-      <div style="position:absolute;bottom:0;left:8%;width:0;height:0;border-left:${bL}px solid transparent;border-right:${bR}px solid transparent;border-bottom:${bB}px solid ${mtnB}"></div>
-      <div style="position:absolute;bottom:0;right:12%;width:0;height:0;border-left:${fL}px solid transparent;border-right:${fR}px solid transparent;border-bottom:${fB}px solid ${mtnF}"></div>
-      <div style="position:absolute;bottom:0;left:0;right:0;height:18%;background:${ground}"></div>
-      <div style="position:absolute;top:14%;right:20%;width:${sS}px;height:${sS}px;border-radius:50%;background:${sun}"></div>
+
+    return `<div style="display:flex;gap:${gap}px;margin:${margin};height:${h}px">
+      <div style="flex:1;background:${chartBg};border-radius:4px;padding:4px 4px 2px;display:flex;flex-direction:column">
+        <div style="flex:1;display:flex;align-items:flex-end;gap:2px">${barsHtml}</div>
+      </div>
+      <div style="flex:1;background:${bg};border-radius:4px;position:relative;overflow:hidden">
+        <div style="position:absolute;bottom:0;left:25%;width:0;height:0;border-left:22px solid transparent;border-right:22px solid transparent;border-bottom:28px solid ${mtnB}"></div>
+        <div style="position:absolute;bottom:0;right:28%;width:0;height:0;border-left:16px solid transparent;border-right:16px solid transparent;border-bottom:22px solid ${mtnF}"></div>
+        <div style="position:absolute;bottom:0;left:0;right:0;height:15%;background:${ground}"></div>
+        <div style="position:absolute;top:14%;right:18%;width:${sS}px;height:${sS}px;border-radius:50%;background:${sun};box-shadow:${sunGlow}"></div>
+      </div>
     </div>`;
   }
 
@@ -288,9 +323,14 @@
   // Initial build
   buildLayers();
 
-  // Rebuild on resize
+  // Rebuild on resize — but only when the viewport width actually changes.
+  // Pinch-to-zoom on mobile fires resize events without changing innerWidth,
+  // which would cause layers to rebuild with incorrect dimensions.
   let resizeTimer;
+  let lastInnerWidth = window.innerWidth;
   window.addEventListener("resize", () => {
+    if (window.innerWidth === lastInnerWidth) return;
+    lastInnerWidth = window.innerWidth;
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => buildLayers(), 100);
   });

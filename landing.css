@@ -17,11 +17,11 @@ body {
   text-decoration: none; z-index: 200; transition: top 0.2s;
 }
 .skip-link:focus { top: 0; }
-.desktop-only { display: none; }
+.desktop-only { display: none !important; }
 .mobile-only { display: block; }
 @media (min-width: 700px) {
-  .desktop-only { display: block; }
-  .mobile-only { display: none; }
+  .desktop-only { display: block !important; }
+  .mobile-only { display: none !important; }
 }
 
 /* Slash separators — reduced opacity + breathing room */
@@ -36,8 +36,8 @@ body {
 /* ═══ NAVBAR ═══ */
 nav {
   position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 100;
-  display: flex; align-items: center; gap: 12px;
-  padding: 7px 16px; border-radius: 50px;
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 18px; border-radius: 50px;
   background: rgba(42,31,26,0.65);
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
@@ -56,17 +56,17 @@ nav.scrolled {
 .nav-logo { display: flex; align-items: center; gap: 6px; }
 .nav-logo .veil-logo { width: 18px; height: 18px; }
 @media (min-width: 700px) { .nav-logo .veil-logo { width: 24px; height: 24px; } }
-.nav-logo span { font-size: 13px; font-weight: 600; color: #f5efe2; }
+.nav-logo span { font-size: 14px; font-weight: 600; color: #f5efe2; }
 @media (min-width: 700px) { .nav-logo span { font-size: 15px; } }
 .nav-divider { width: 1px; height: 14px; background: rgba(212,163,115,0.12); }
 .nav-link {
-  font-size: 11px; color: #9a8878; text-decoration: none; transition: color 0.2s;
+  font-size: 12px; color: #9a8878; text-decoration: none; transition: color 0.2s;
 }
 .nav-link:hover { color: #D4A373; }
 .nav-link:active { color: #a07848; }
 @media (min-width: 700px) { .nav-link { font-size: 12px; } }
 .nav-cta {
-  font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 50px;
+  font-size: 12px; font-weight: 600; padding: 5px 14px; border-radius: 50px;
   text-decoration: none; white-space: nowrap;
   background: #D4A373; color: #2a1f1a;
   transition: background 0.2s, transform 0.15s;
@@ -172,7 +172,15 @@ h1 {
 }
 
 /* Chart row */
-.ba-chart-row { height: 28%; display: flex; gap: 8px; margin: 4px 0; }
+.ba-chart-row { height: 28%; min-height: 80px; display: flex; gap: 8px; margin: 4px 0; }
+
+/* Landscape image: fixed aspect ratio prevents squishing on small screens */
+.ba-img { aspect-ratio: 4/3; }
+
+/* Hide extra text rows on mobile to give images and labels room */
+@media (max-width: 699px) {
+  .ba-extra-row { display: none; }
+}
 .ba-chart {
   flex: 1; border-radius: 6px; padding: 6px 6px 2px;
   display: flex; flex-direction: column;
@@ -203,12 +211,23 @@ h1 {
 .ba-sun-orig, .ba-sun-inv { position: absolute; top: 14%; right: 18%; width: 18px; height: 18px; border-radius: 50%; }
 .ba-sun-orig { background: #ffd700; box-shadow: 0 0 8px rgba(255,215,0,0.4); }
 .ba-sun-inv { background: #0028ff; box-shadow: 0 0 8px rgba(0,40,255,0.3); }
+/* Mobile: compact mountains matching the aspect-ratio image */
 .ba-mtn-back-orig, .ba-mtn-back-inv { position: absolute; bottom: 0; left: 5%; width: 0; height: 0; border-left: 50px solid transparent; border-right: 50px solid transparent; }
 .ba-mtn-back-orig { border-bottom: 60px solid #6b7b8a; }
 .ba-mtn-back-inv { border-bottom: 60px solid #948475; }
 .ba-mtn-front-orig, .ba-mtn-front-inv { position: absolute; bottom: 0; right: 8%; width: 0; height: 0; border-left: 40px solid transparent; border-right: 40px solid transparent; }
 .ba-mtn-front-orig { border-bottom: 48px solid #556270; }
 .ba-mtn-front-inv { border-bottom: 48px solid #aa9d8f; }
+
+/* Desktop: larger mountains, closer to center */
+@media (min-width: 700px) {
+  .ba-mtn-back-orig, .ba-mtn-back-inv { left: 8%; border-left-width: 66px; border-right-width: 66px; }
+  .ba-mtn-back-orig { border-bottom-width: 80px; }
+  .ba-mtn-back-inv { border-bottom-width: 80px; }
+  .ba-mtn-front-orig, .ba-mtn-front-inv { right: 12%; border-left-width: 52px; border-right-width: 52px; }
+  .ba-mtn-front-orig { border-bottom-width: 64px; }
+  .ba-mtn-front-inv { border-bottom-width: 64px; }
+}
 .ba-ground-orig, .ba-ground-inv { position: absolute; bottom: 0; left: 0; right: 0; height: 15%; }
 .ba-ground-orig { background: #7a8a6a; }
 .ba-ground-inv { background: #857595; }
@@ -271,7 +290,7 @@ h1 {
   position: relative; flex-shrink: 0; cursor: pointer;
 }
 .layers-annot-left, .layers-annot-right {
-  display: flex; flex-direction: column; gap: 32px; width: 200px;
+  display: flex; flex-direction: column; gap: 40px; width: 200px;
   transition: opacity 0.4s, transform 0.4s;
 }
 .layers-annot-left { text-align: right; }
@@ -285,16 +304,10 @@ h1 {
 
 /* Mobile annotations */
 .layers-mobile-annot {
-  width: 100%; max-width: 320px; margin-top: 44px;
+  width: 100%; max-width: 340px; margin-top: 56px;
   display: flex; flex-direction: column;
   transition: opacity 0.4s, transform 0.4s;
-}
-/* Override: hide mobile annotations on desktop.
-   Must use higher specificity than .layers-mobile-annot's display:flex
-   which otherwise wins over .mobile-only's display:none (same specificity,
-   later source order). */
-@media (min-width: 700px) {
-  .layers-mobile-annot.mobile-only { display: none; }
+  padding: 0 20px;
 }
 .mobile-annot-item {
   display: flex; gap: 14px; align-items: stretch; padding: 16px 0;
@@ -352,8 +365,8 @@ h1 {
 .ocr-tags { margin-top: 24px; display: flex; gap: 10px; flex-wrap: wrap; }
 .ocr-tags span {
   padding: 5px 12px; border-radius: 50px;
-  background: rgba(212,163,115,0.06); border: 1px solid rgba(212,163,115,0.08);
-  font-size: 11px; color: #7a6b5e;
+  background: rgba(212,163,115,0.06); border: 1px solid rgba(212,163,115,0.12);
+  font-size: 11px; color: #a89682;
 }
 
 /* ═══ WORKFLOW ═══ */

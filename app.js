@@ -180,6 +180,7 @@ let cachedFontBytes = null;
 
 // Export state
 let exporting = false;
+let exportCancelled = false;
 let originalFileName = 'document';
 
 // ============================================================
@@ -201,9 +202,98 @@ const btnExport = document.getElementById('btn-export');
 const exportProgressEl = document.getElementById('export-progress');
 const exportProgressFill = document.querySelector('.export-progress-fill');
 const exportProgressText = document.querySelector('.export-progress-text');
+const exportCancelBtn = document.getElementById('export-cancel');
 const errorBanner = document.getElementById('error-banner');
 const errorMessage = document.getElementById('error-message');
 const errorDismiss = document.getElementById('error-dismiss');
+const fileNameEl = document.getElementById('file-name');
+const toolbar = document.getElementById('toolbar');
+
+// ============================================================
+// Focus Mode
+//
+// After 3 seconds of no mouse movement, the toolbar fades out.
+// The reader becomes pure content — just the PDF.
+//
+// The toolbar reappears ONLY when the mouse approaches the top
+// edge of the window (top 60px). Moving the mouse elsewhere
+// does NOT bring it back — reading should be uninterrupted.
+//
+// Keyboard shortcut: F to toggle manually.
+// ============================================================
+
+let focusTimer = null;
+let focusPaused = false;
+const FOCUS_DELAY = 1500;
+const TOOLBAR_TRIGGER_ZONE = 35; // px from top edge
+const TOOLBAR_HOVER_DELAY = 300; // ms mouse must stay in zone
+
+function enterFocusMode() {
+  if (!readerEl || readerEl.hidden || focusPaused) return;
+  toolbar.classList.add('toolbar-hidden');
+}
+
+function exitFocusMode() {
+  toolbar.classList.remove('toolbar-hidden');
+  resetFocusTimer();
+}
+
+function resetFocusTimer() {
+  if (focusTimer) clearTimeout(focusTimer);
+  focusTimer = setTimeout(() => { focusTimer = null; enterFocusMode(); }, FOCUS_DELAY);
+}
+
+// Mouse near top edge: show toolbar after dwelling briefly.
+// Throttled to ~30fps to avoid timer churn during trackpad scroll.
+let hoverTimer = null;
+let mouseMoveThrottled = false;
+
+document.addEventListener('mousemove', (e) => {
+  if (mouseMoveThrottled || !readerEl || readerEl.hidden) return;
+  mouseMoveThrottled = true;
+  requestAnimationFrame(() => { mouseMoveThrottled = false; });
+
+  // Is the mouse over the toolbar or in the trigger zone?
+  const toolbarRect = toolbar.getBoundingClientRect();
+  const overToolbar = e.clientY <= toolbarRect.bottom + 5 &&
+    e.clientX >= toolbarRect.left - 10 && e.clientX <= toolbarRect.right + 10;
+
+  if (e.clientY <= TOOLBAR_TRIGGER_ZONE || overToolbar) {
+    if (toolbar.classList.contains('toolbar-hidden') && !hoverTimer) {
+      hoverTimer = setTimeout(() => {
+        hoverTimer = null;
+        exitFocusMode();
+      }, TOOLBAR_HOVER_DELAY);
+    }
+  } else {
+    if (hoverTimer) {
+      clearTimeout(hoverTimer);
+      hoverTimer = null;
+    }
+  }
+
+  // Toolbar visible: keep it while mouse is over it, hide timer when away
+  if (!toolbar.classList.contains('toolbar-hidden')) {
+    if (overToolbar) {
+      clearTimeout(focusTimer);
+    } else {
+      resetFocusTimer();
+    }
+  }
+}, { passive: true });
+
+// Keyboard: F to toggle focus mode
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey
+      && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    if (toolbar.classList.contains('toolbar-hidden')) {
+      exitFocusMode();
+    } else {
+      clearTimeout(focusTimer);
+      enterFocusMode();
+    }
+  }
+});
 
 // ============================================================
 // Error Display
@@ -232,6 +322,11 @@ errorDismiss.addEventListener('click', () => {
 function handleFile(file) {
   if (!file || file.type !== 'application/pdf') return;
   originalFileName = file.name.replace(/\.pdf$/i, '');
+  if (fileNameEl) fileNameEl.textContent = file.name;
+  document.title = `veil - ${file.name}`;
+
+  // Start focus mode timer when a PDF is loaded
+  resetFocusTimer();
 
   const fr = new FileReader();
   fr.onload = async (e) => {
@@ -263,6 +358,8 @@ async function loadPDF(data) {
 
     await buildPageSlots();
     setupIntersectionObserver();
+    // Center the first page in the viewport immediately (no animation)
+    scrollToPage(1, true);
     updateCurrentPageFromScroll();
   } catch (err) {
     console.error('Failed to load PDF:', err);
@@ -1471,13 +1568,65 @@ function updateNavigationUI() {
   btnNext.disabled = currentVisiblePage >= pdfDoc.numPages;
 }
 
-function scrollToPage(pageNum) {
+// Click-to-edit page number: transforms the label into an input
+pageInfo.addEventListener('click', () => {
+  if (!pdfDoc) return;
+
+  const current = currentVisiblePage;
+  const total = pdfDoc.numPages;
+
+  // Create inline input
+  const input = document.createElement('input');
+  input.id = 'page-input';
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.value = current;
+  input.setAttribute('aria-label', `Go to page (1-${total})`);
+
+  // Pause focus mode while editing — toolbar stays visible
+  focusPaused = true;
+  clearTimeout(focusTimer);
+  focusTimer = null;
+
+  // Replace the label with the input
+  pageInfo.style.display = 'none';
+  pageInfo.parentNode.insertBefore(input, pageInfo);
+  input.select();
+
+  function commit() {
+    const val = parseInt(input.value, 10);
+    if (!isNaN(val) && val >= 1 && val <= total) {
+      scrollToPage(val);
+    }
+    restore();
+  }
+
+  function restore() {
+    input.remove();
+    pageInfo.style.display = '';
+    // Resume focus mode
+    focusPaused = false;
+    resetFocusTimer();
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { e.preventDefault(); restore(); }
+  });
+
+  input.addEventListener('blur', restore);
+});
+
+function scrollToPage(pageNum, instant = false) {
   if (!pdfDoc) return;
   const clamped = Math.max(1, Math.min(pageNum, pdfDoc.numPages));
   const slot = pageSlots.get(clamped);
   if (!slot) return;
 
-  slot.container.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  slot.container.scrollIntoView({
+    behavior: instant ? 'instant' : 'smooth',
+    block: 'center',
+  });
 }
 
 // ============================================================
@@ -1666,6 +1815,7 @@ async function exportDarkPdf() {
   if (!pdfDoc || exporting) return;
 
   exporting = true;
+  exportCancelled = false;
   btnExport.disabled = true;
 
   try {
@@ -1697,7 +1847,24 @@ async function exportDarkPdf() {
     showExportProgress(0, totalPages);
     const deferredAnnotations = [];
 
+    // Create a shared eng-only OCR worker for the entire export.
+    // Used for both scanned documents AND image OCR in native PDFs.
+    // Created once, terminated after the loop — no per-page overhead.
+    let exportWorker = null;
+    const needsOcr = isScannedDocument || true; // always create — native PDFs may have images
+    if (needsOcr) {
+      try {
+        const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+        const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
+        exportWorker = await createWorker('eng', 1, { logger: () => {} });
+      } catch (err) {
+        console.warn('[Export] Failed to create OCR worker:', err);
+      }
+    }
+
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      if (exportCancelled) break;
+
       const page = await pdfDoc.getPage(pageNum);
       const origVp = page.getViewport({ scale: 1 });
       const renderVp = page.getViewport({ scale: currentScale * exportDpr });
@@ -1719,6 +1886,8 @@ async function exportDarkPdf() {
       }
 
       const results = await Promise.all(tasks);
+      if (exportCancelled) { renderCanvas.width = 0; break; }
+
       const opList = results[1];
       const annotations = results[2];
       const textContent = isScannedDocument ? null : results[3];
@@ -1807,68 +1976,165 @@ async function exportDarkPdf() {
             // Skip characters not encodable in the current font
           }
         }
-      } else if (isScannedDocument) {
-        // Scanned PDF: run OCR for text layer in the sandwich PDF.
-        //
-        // Export uses eng-only for OCR (not the dual eng+ita from web view).
-        // Two reasons:
-        //   1. Speed: single model is ~2x faster per page
-        //   2. The sandwich PDF is opened in native readers (Apple Preview)
-        //      whose layout engines compensate. Fase 23 showed eng-only at
-        //      144 DPI + Apple Preview = near-parity with Apple OCR.
-        //
-        // A temporary eng-only worker is created to avoid mutating the
-        // shared worker used by the web view (which needs eng+ita).
-        const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
-        const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
-        const exportWorker = await createWorker('eng', 1, { logger: () => {} });
 
+        // --- OCR on images within this native page ---
+        // Makes text inside charts, figures, and screenshots selectable
+        // in the exported PDF. Same dual-pass approach as the web view
+        // (0° horizontal + 90° vertical) for maximum coverage.
         if (exportWorker) {
-          // Preprocess for better OCR (same grayscale + contrast as web view)
-          const processed = preprocessCanvasForOcr(renderCanvas);
-          const ocrBlob = await new Promise(r =>
-            processed.toBlob(r, 'image/png')
+          const regions = extractImageRegions(opList, renderVp.transform);
+          const imgCandidates = regions.filter(
+            r => r.width >= OCR_IMAGE_MIN_SIZE && r.height >= OCR_IMAGE_MIN_SIZE
           );
-          processed.width = 0; // release
-          const { data } = await exportWorker.recognize(ocrBlob);
 
-          if (data.words) {
-            const sx = origVp.width / w;
-            const sy = origVp.height / h;
-
-            for (const word of data.words) {
-              if (!word.text || !word.text.trim()) continue;
-              if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
-              if (isOcrArtifact(word.text)) continue;
-              const wordText = normalizeLigatures(word.text);
-              const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
-              if (baseFontSize < 1) continue;
-
-              try {
-                // Adjust fontSize so font width matches OCR bbox width
-                const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
-                let drawSize = baseFontSize;
-                if (targetWidth > 0) {
-                  const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
-                  if (naturalWidth > 0) {
-                    drawSize = baseFontSize * (targetWidth / naturalWidth);
-                  }
-                }
-
-                outPage.drawText(wordText, {
-                  x: word.bbox.x0 * sx,
-                  y: origVp.height - word.bbox.y1 * sy,
-                  size: drawSize,
-                  font,
-                  opacity: 0,
-                });
-              } catch (_) {
-                // Skip characters not encodable in the current font
-              }
-            }
+          if (imgCandidates.length > 0) {
+            await new Promise(r => setTimeout(r, 0));
           }
 
-          await exportWorker.terminate();
+          for (const region of imgCandidates) {
+            if (exportCancelled) break;
+            const sx2 = Math.max(0, region.x);
+            const sy2 = Math.max(0, region.y);
+            const sw2 = Math.min(region.width, w - sx2);
+            const sh2 = Math.min(region.height, h - sy2);
+            if (sw2 <= 0 || sh2 <= 0) continue;
+
+            // Scale factors: render canvas pixels → PDF points
+            const imgSx = origVp.width / w;
+            const imgSy = origVp.height / h;
+
+            // Extract region from the original (non-inverted) render
+            const regionCanvas = document.createElement('canvas');
+            regionCanvas.width = sw2;
+            regionCanvas.height = sh2;
+            regionCanvas.getContext('2d').drawImage(
+              renderCanvas, sx2, sy2, sw2, sh2, 0, 0, sw2, sh2
+            );
+
+            // --- Pass 1: Horizontal text ---
+            const proc0 = preprocessCanvasForOcr(regionCanvas);
+            try {
+              const blob0 = await new Promise(r => proc0.toBlob(r, 'image/png'));
+              proc0.width = 0;
+              const { data: data0 } = await exportWorker.recognize(blob0);
+
+              if (data0.words) {
+                for (const word of data0.words) {
+                  if (!word.text || !word.text.trim()) continue;
+                  if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
+                  if (isOcrArtifact(word.text)) continue;
+                  const wordText = normalizeLigatures(word.text);
+                  const fontSize = (word.bbox.y1 - word.bbox.y0) * imgSy * 0.85;
+                  if (fontSize < 1) continue;
+
+                  try {
+                    const targetW = (word.bbox.x1 - word.bbox.x0) * imgSx;
+                    let drawSize = fontSize;
+                    if (targetW > 0) {
+                      const natW = font.widthOfTextAtSize(wordText, fontSize);
+                      if (natW > 0) drawSize = fontSize * (targetW / natW);
+                    }
+                    outPage.drawText(wordText, {
+                      x: (sx2 + word.bbox.x0) * imgSx,
+                      y: origVp.height - (sy2 + word.bbox.y1) * imgSy,
+                      size: drawSize,
+                      font,
+                      opacity: 0,
+                    });
+                  } catch (_) {}
+                }
+              }
+            } catch (_) { proc0.width = 0; }
+
+            // --- Pass 2: Vertical text (90° CW rotation) ---
+            const rotated = rotateCanvas90CW(regionCanvas);
+            regionCanvas.width = 0;
+            const proc90 = preprocessCanvasForOcr(rotated);
+            rotated.width = 0;
+
+            try {
+              const blob90 = await new Promise(r => proc90.toBlob(r, 'image/png'));
+              proc90.width = 0;
+              const { data: data90 } = await exportWorker.recognize(blob90);
+
+              if (data90.words) {
+                // Rotated canvas: W=sh2, H=sw2. Map back to original coordinates.
+                // In the 90° CW rotated image, a word at (rx, ry) maps to
+                // original coordinates: (ry, sh2 - rx - wordHeight)
+                for (const word of data90.words) {
+                  if (!word.text || !word.text.trim()) continue;
+                  if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
+                  if (isOcrArtifact(word.text)) continue;
+                  const wordText = normalizeLigatures(word.text);
+                  const wordH = word.bbox.y1 - word.bbox.y0;
+                  const wordW = word.bbox.x1 - word.bbox.x0;
+                  const fontSize = wordH * imgSx * 0.85; // rotated: height maps to X
+                  if (fontSize < 1) continue;
+
+                  // Transform rotated coords back to original region coords
+                  const origX = word.bbox.y0; // ry → origX
+                  const origY = sh2 - word.bbox.x1; // sh2 - rx1 → origY
+
+                  try {
+                    const targetW = wordW * imgSy; // rotated width maps to Y in original
+                    let drawSize = fontSize;
+                    if (targetW > 0) {
+                      const natW = font.widthOfTextAtSize(wordText, fontSize);
+                      if (natW > 0) drawSize = fontSize * (targetW / natW);
+                    }
+                    outPage.drawText(wordText, {
+                      x: (sx2 + origX) * imgSx,
+                      y: origVp.height - (sy2 + origY + wordH) * imgSy,
+                      size: drawSize,
+                      font,
+                      opacity: 0,
+                    });
+                  } catch (_) {}
+                }
+              }
+            } catch (_) { proc90.width = 0; }
+          }
+        }
+      } else if (isScannedDocument && exportWorker) {
+        // Scanned PDF: full-page OCR using the shared export worker.
+        const processed = preprocessCanvasForOcr(renderCanvas);
+        const ocrBlob = await new Promise(r =>
+          processed.toBlob(r, 'image/png')
+        );
+        processed.width = 0;
+        const { data } = await exportWorker.recognize(ocrBlob);
+
+        if (data.words) {
+          const sx = origVp.width / w;
+          const sy = origVp.height / h;
+
+          for (const word of data.words) {
+            if (!word.text || !word.text.trim()) continue;
+            if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
+            if (isOcrArtifact(word.text)) continue;
+            const wordText = normalizeLigatures(word.text);
+            const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
+            if (baseFontSize < 1) continue;
+
+            try {
+              const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
+              let drawSize = baseFontSize;
+              if (targetWidth > 0) {
+                const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
+                if (naturalWidth > 0) {
+                  drawSize = baseFontSize * (targetWidth / naturalWidth);
+                }
+              }
+
+              outPage.drawText(wordText, {
+                x: word.bbox.x0 * sx,
+                y: origVp.height - word.bbox.y1 * sy,
+                size: drawSize,
+                font,
+                opacity: 0,
+              });
+            } catch (_) {}
+          }
         }
       }
 
@@ -1887,6 +2153,20 @@ async function exportDarkPdf() {
 
       // Yield to UI thread for progress bar update
       await new Promise(r => setTimeout(r, 0));
+    }
+
+    // --- Cancelled? Clean up and abort ---
+    if (exportCancelled) {
+      if (exportWorker) await exportWorker.terminate();
+      hideExportProgress();
+      exporting = false;
+      btnExport.disabled = false;
+      return;
+    }
+
+    // --- Terminate the shared export OCR worker ---
+    if (exportWorker) {
+      await exportWorker.terminate();
     }
 
     // --- Embed link annotations (all pages now exist) ---
@@ -1911,7 +2191,7 @@ async function exportDarkPdf() {
   } catch (err) {
     console.error('Export failed:', err);
     hideExportProgress();
-    showError('Export failed. Please try again.');
+    if (!exportCancelled) showError('Export failed. Please try again.');
   } finally {
     exporting = false;
     btnExport.disabled = false;
@@ -1989,6 +2269,7 @@ btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1));
 btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1));
 btnToggle.addEventListener('click', toggleDarkMode);
 btnExport.addEventListener('click', exportDarkPdf);
+exportCancelBtn.addEventListener('click', () => { exportCancelled = true; });
 btnFile.addEventListener('click', () => fileInput.click());
 
 // --- Keyboard ---

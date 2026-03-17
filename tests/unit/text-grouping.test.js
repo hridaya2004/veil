@@ -167,11 +167,11 @@ describe('shouldInsertSpace', () => {
 describe('calculateScale', () => {
   it('fits a US Letter page in a 1280x900 window', () => {
     const scale = calculateScale(612, 792, 1280, 900);
-    // availW = 1280 - 48 = 1232, availH = 900 - 48 - 48 = 804
-    // widthScale = 1232/612 ≈ 2.013
-    // heightScale = 804/792 ≈ 1.015
-    // min(2.013, 1.015, 3) = 1.015
-    expect(scale).toBeCloseTo(804 / 792, 2);
+    // availW = 1280 - 16 = 1264, availH = 900 - 48 - 16 = 836
+    // widthScale = 1264/612 ≈ 2.065
+    // heightScale = 836/792 ≈ 1.056
+    // min(2.065, 1.056, 3) ≈ 1.056
+    expect(scale).toBeCloseTo(836 / 792, 2);
   });
 
   it('never exceeds 3x', () => {
@@ -182,11 +182,11 @@ describe('calculateScale', () => {
 
   it('handles landscape page', () => {
     const scale = calculateScale(792, 612, 1280, 900);
-    // availW = 1232, availH = 804
-    // widthScale = 1232/792 ≈ 1.555
-    // heightScale = 804/612 ≈ 1.314
-    // min(1.555, 1.314, 3) ≈ 1.314
-    expect(scale).toBeCloseTo(804 / 612, 2);
+    // availW = 1264, availH = 836
+    // widthScale = 1264/792 ≈ 1.596
+    // heightScale = 836/612 ≈ 1.366
+    // min(1.596, 1.366, 3) ≈ 1.366
+    expect(scale).toBeCloseTo(836 / 612, 2);
   });
 });
 

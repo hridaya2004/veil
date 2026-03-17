@@ -575,7 +575,7 @@ export function shouldInsertSpace(prevStr, itemStr, gap, fontSize, spaceAdvance)
 // Scale Calculation
 // ============================================================
 
-export function calculateScale(pageWidth, pageHeight, windowWidth, windowHeight, toolbarHeight = 48, padding = 48) {
+export function calculateScale(pageWidth, pageHeight, windowWidth, windowHeight, toolbarHeight = 48, padding = 16) {
   const availW = windowWidth - padding;
   const availH = windowHeight - toolbarHeight - padding;
   return Math.min(availW / pageWidth, availH / pageHeight, 3);
