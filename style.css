@@ -650,8 +650,8 @@ body {
 }
 
 #info-banner {
-  background: rgba(26, 32, 42, 0.9);
-  border: 1px solid rgba(115, 163, 212, 0.15);
+  background: rgba(42, 31, 26, 0.9);
+  border: 1px solid rgba(212, 163, 115, 0.15);
   transition: opacity 0.4s ease;
 }
 
@@ -665,7 +665,7 @@ body {
 
 #info-message {
   font-size: 13px;
-  color: #a0c8e8;
+  color: var(--accent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

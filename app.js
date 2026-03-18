@@ -424,7 +424,6 @@ const readerEl = document.getElementById('reader');
 const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
 const btnToggle = document.getElementById('btn-toggle');
-const btnFile = document.getElementById('btn-file');
 const pageInfo = document.getElementById('page-info');
 const iconDark = document.getElementById('icon-dark');
 const iconLight = document.getElementById('icon-light');
@@ -595,17 +594,21 @@ infoBanner.addEventListener('click', () => {
 });
 
 // Pinch-to-zoom hint: on mobile, portrait pages are rendered at
-// a lower scale than landscape (fit-to-page vs fit-to-width).
-// When the user zooms in for the first time, the pixel density
-// becomes noticeable. Suggest landscape where pages render at
-// full width with more pixels per point. Shown once per session.
+// a lower scale than landscape. When the user zooms in, suggest
+// landscape for better quality. Shown once per session, after the
+// zoom gesture settles (500ms debounce) so the banner is visible.
 let _zoomHintShown = false;
+let _zoomSettleTimer = null;
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
     if (_zoomHintShown || !pdfDoc) return;
     if (window.visualViewport.scale > 1.2) {
-      _zoomHintShown = true;
-      showInfo('For best visual quality, try landscape mode.');
+      clearTimeout(_zoomSettleTimer);
+      _zoomSettleTimer = setTimeout(() => {
+        if (_zoomHintShown) return;
+        _zoomHintShown = true;
+        showInfo('For best visual quality, try landscape mode.');
+      }, 500);
     }
   });
 }
@@ -3381,7 +3384,6 @@ exportCancelBtn.addEventListener('click', () => {
   exporting = false;
   btnExport.disabled = false;
 });
-btnFile.addEventListener('click', () => fileInput.click());
 
 // --- Keyboard ---
 document.addEventListener('keydown', (e) => {
