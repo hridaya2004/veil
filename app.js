@@ -216,10 +216,16 @@ const pageDarkOverride = new Map();
 // true = page is already dark, skip inversion.
 const pageAlreadyDark = new Map();
 
-// Tracks which page containers exist in the DOM and their render state.
-// Map<pageNum, { container, mainCanvas, overlayCanvas, textLayer,
-//                rendered: boolean, rendering: boolean, renderGeneration }>
-const pageSlots = new Map();
+// Virtual scrolling: only a few DOM containers exist at any time.
+// pageSlots maps currently-active page numbers to their pool container.
+// pageRenderState tracks per-page state that persists across recycling.
+const pageSlots = new Map(); // Map<pageNum, poolSlot>
+const pageRenderState = new Map(); // Map<pageNum, { rendered, rendering, ... }>
+let pageGeometry = []; // [{cssWidth, cssHeight, offsetTop}] indexed by pageNum (1-based, index 0 unused)
+const POOL_SIZE = 7;
+const VIRTUAL_BUFFER = 2; // pages above/below viewport to pre-assign
+const PAGE_GAP = 40; // px between pages (matches CSS gap)
+const VIEWPORT_PADDING_TOP = 64; // space for floating toolbar
 
 // Monotonically increasing, bumped on new PDF load or resize
 let globalGeneration = 0;
@@ -668,9 +674,9 @@ async function loadPDF(data) {
     isScannedDocument = await detectScannedDocument();
 
     await buildPageSlots();
-    setupIntersectionObserver();
     // Center the first page in the viewport immediately (no animation)
     scrollToPage(1, true);
+    reconcileContainers();
     updateCurrentPageFromScroll();
 
   } catch (err) {
@@ -1059,18 +1065,19 @@ function cleanupOcrIndicators(slot) {
     }, 650);
   };
 
-  if (slot.container.classList.contains('ocr-loading')) {
-    fadeOut(slot.container);
+  if (slot.element.classList.contains('ocr-loading')) {
+    fadeOut(slot.element);
   }
-  slot.container.querySelectorAll('[data-ocr-loading]').forEach(fadeOut);
+  slot.element.querySelectorAll('[data-ocr-loading]').forEach(fadeOut);
 }
 
 function ocrFinished(slot) {
-  slot.ocrInProgress = false;
-  slot.imageRegionsCss = [];
+  const pageNum = slot.assignedPage;
+  const state = pageNum != null ? pageRenderState.get(pageNum) : null;
+  if (state) {
+    state.ocrInProgress = false;
+  }
 
-  // Clean up immediately, then again after a short delay to catch
-  // any indicator created by a pointerdown that raced with us.
   cleanupOcrIndicators(slot);
   setTimeout(() => cleanupOcrIndicators(slot), 100);
 }
@@ -1079,8 +1086,8 @@ function ocrFinished(slot) {
  * Checks whether a CSS-space point (x,y relative to the page container)
  * falls inside one of the known image regions on this page.
  */
-function hitTestImageRegion(slot, x, y) {
-  for (const r of slot.imageRegionsCss) {
+function hitTestImageRegion(stateOrSlot, x, y) {
+  for (const r of stateOrSlot.imageRegionsCss) {
     if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
       return r;
     }
@@ -1093,20 +1100,18 @@ function hitTestImageRegion(slot, x, y) {
  * text that isn't ready yet.
  */
 function showOcrLoading(slot, region) {
-  // Double-check: don't show if OCR already finished (race condition guard)
-  if (!slot.ocrInProgress) return;
+  const pageNum = slot.assignedPage;
+  const state = pageNum != null ? pageRenderState.get(pageNum) : null;
+  if (!state || !state.ocrInProgress) return;
 
   if (isScannedDocument) {
-    // Scanned doc: animate the entire page perimeter
-    if (!slot.container.classList.contains('ocr-loading')) {
-      slot.container.classList.remove('ocr-done');
-      slot.container.classList.add('ocr-loading');
+    if (!slot.element.classList.contains('ocr-loading')) {
+      slot.element.classList.remove('ocr-done');
+      slot.element.classList.add('ocr-loading');
     }
   } else if (region) {
-    // Native PDF: animate the perimeter of the specific image region.
-    // Create a positioned overlay div matching the image bounds.
     const key = `${Math.round(region.x)}-${Math.round(region.y)}`;
-    if (slot.container.querySelector(`[data-ocr-loading="${key}"]`)) return;
+    if (slot.element.querySelector(`[data-ocr-loading="${key}"]`)) return;
 
     const indicator = document.createElement('div');
     indicator.className = 'ocr-loading';
@@ -1118,7 +1123,7 @@ function showOcrLoading(slot, region) {
     indicator.style.height = region.h + 'px';
     indicator.style.pointerEvents = 'none';
     indicator.style.zIndex = '11';
-    slot.container.appendChild(indicator);
+    slot.element.appendChild(indicator);
   }
 }
 
@@ -1172,7 +1177,8 @@ function triggerOcrIndicator(e) {
 
   const pageNum = parseInt(container.dataset.pageNum, 10);
   const slot = pageSlots.get(pageNum);
-  if (!slot || !slot.ocrInProgress) return;
+  const state = pageRenderState.get(pageNum);
+  if (!slot || !state || !state.ocrInProgress) return;
 
   const rect = container.getBoundingClientRect();
   const x = e.clientX - rect.left;
@@ -1181,7 +1187,7 @@ function triggerOcrIndicator(e) {
   if (isScannedDocument) {
     showOcrLoading(slot, null);
   } else {
-    const region = hitTestImageRegion(slot, x, y);
+    const region = hitTestImageRegion(state, x, y);
     if (region) {
       showOcrLoading(slot, region);
     }
@@ -1413,17 +1419,12 @@ function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, css
 // ============================================================
 
 function cleanup() {
-  // Remove all page containers from viewport
   viewport.innerHTML = '';
   pageSlots.clear();
-  if (scrollObserver) {
-    scrollObserver.disconnect();
-    scrollObserver = null;
-  }
-  if (evictionObserver) {
-    evictionObserver.disconnect();
-    evictionObserver = null;
-  }
+  pageRenderState.clear();
+  containerPool.length = 0;
+  pageGeometry = [null];
+  scrollSpacer = null;
 }
 
 // ============================================================
@@ -1446,282 +1447,309 @@ function calculateScale(page) {
 }
 
 // ============================================================
-// Continuous Scroll: Build Page Slots
+// Virtual Scrolling: Page Geometry + Container Pool
 //
-// Creates a container for each page with placeholder dimensions.
-// The actual rendering happens lazily via IntersectionObserver.
+// Instead of creating one container per page (O(N) DOM nodes,
+// 2N canvas contexts), we maintain a small pool of recycled
+// containers. A spacer div provides the correct scroll height
+// for the native scrollbar. During scroll, containers are
+// repositioned and reassigned to whichever pages are visible.
+//
+// Why: 505 pages × 2 canvases = 1010 CanvasRenderingContext2D.
+// Even zeroed, each context holds GPU state in the compositor.
+// On 4GB devices this alone triggers OOM. With 7 containers
+// (14 contexts), memory is O(1) regardless of document length.
 // ============================================================
+
+let scrollSpacer = null; // the tall div that drives the native scrollbar
+const containerPool = []; // array of {element, mainCanvas, overlayCanvas, ...}
+
+function createPoolContainer() {
+  const container = document.createElement('div');
+  container.className = 'page-container';
+  container.style.position = 'absolute';
+  container.style.left = '50%';
+  container.style.transform = 'translateX(-50%)';
+  container.style.display = 'none';
+
+  const mainCanvas = document.createElement('canvas');
+  mainCanvas.className = 'page-canvas';
+
+  const overlayCanvas = document.createElement('canvas');
+  overlayCanvas.className = 'page-overlay';
+
+  const textLayer = document.createElement('div');
+  textLayer.className = 'text-layer';
+
+  const verticalOcrLayer = document.createElement('div');
+  verticalOcrLayer.className = 'text-layer vertical-ocr-layer';
+
+  const pageLabel = document.createElement('div');
+  pageLabel.className = 'page-label';
+
+  container.appendChild(mainCanvas);
+  container.appendChild(overlayCanvas);
+  container.appendChild(textLayer);
+  container.appendChild(verticalOcrLayer);
+  container.appendChild(pageLabel);
+
+  return {
+    element: container,
+    mainCanvas,
+    overlayCanvas,
+    textLayer,
+    verticalOcrLayer,
+    pageLabel,
+    assignedPage: null,
+  };
+}
+
+function getOrCreateRenderState(pageNum) {
+  let state = pageRenderState.get(pageNum);
+  if (!state) {
+    state = {
+      rendered: false,
+      rendering: false,
+      renderGeneration: 0,
+      ocrInProgress: false,
+      imageRegionsCss: [],
+      imageRegionsRaw: [],
+      _renderTask: null,
+    };
+    pageRenderState.set(pageNum, state);
+  }
+  return state;
+}
+
+// Binary search: find first page whose bottom edge > viewTop
+function binarySearchFirstVisible(viewTop) {
+  let lo = 1, hi = pdfDoc.numPages;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const pg = pageGeometry[mid];
+    if (pg.offsetTop + pg.cssHeight < viewTop) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+function getVisiblePageRange() {
+  const scrollTop = viewport.scrollTop;
+  const viewportHeight = viewport.clientHeight;
+  const viewBottom = scrollTop + viewportHeight;
+
+  let firstVisible = binarySearchFirstVisible(scrollTop);
+  let lastVisible = firstVisible;
+  while (lastVisible < pdfDoc.numPages &&
+    pageGeometry[lastVisible + 1].offsetTop < viewBottom) {
+    lastVisible++;
+  }
+
+  const buf = _isMemoryConstrained ? 1 : VIRTUAL_BUFFER;
+  const rangeStart = Math.max(1, firstVisible - buf);
+  const rangeEnd = Math.min(pdfDoc.numPages, lastVisible + buf);
+
+  return { firstVisible, lastVisible, rangeStart, rangeEnd };
+}
+
+function assignContainer(poolSlot, pageNum) {
+  const geo = pageGeometry[pageNum];
+  const el = poolSlot.element;
+
+  el.style.top = geo.offsetTop + 'px';
+  el.style.width = geo.cssWidth + 'px';
+  el.style.height = geo.cssHeight + 'px';
+  el.style.display = '';
+  el.dataset.pageNum = pageNum;
+
+  poolSlot.mainCanvas.style.width = geo.cssWidth + 'px';
+  poolSlot.mainCanvas.style.height = geo.cssHeight + 'px';
+  poolSlot.overlayCanvas.style.width = geo.cssWidth + 'px';
+  poolSlot.overlayCanvas.style.height = geo.cssHeight + 'px';
+  poolSlot.textLayer.style.width = geo.cssWidth + 'px';
+  poolSlot.textLayer.style.height = geo.cssHeight + 'px';
+  poolSlot.verticalOcrLayer.style.width = geo.cssWidth + 'px';
+  poolSlot.verticalOcrLayer.style.height = geo.cssHeight + 'px';
+  poolSlot.pageLabel.textContent = pageNum;
+
+  poolSlot.assignedPage = pageNum;
+  pageSlots.set(pageNum, poolSlot);
+
+  // Trigger rendering if not already done
+  const state = getOrCreateRenderState(pageNum);
+  if (!state.rendered && !state.rendering) {
+    enqueueRender(pageNum);
+  }
+}
+
+function evictContainer(poolSlot) {
+  const pageNum = poolSlot.assignedPage;
+  if (pageNum == null) return;
+
+  // Cancel pending work
+  cancelQueuedRender(pageNum);
+  cancelOcrJobsForPage(pageNum);
+  const state = pageRenderState.get(pageNum);
+  if (state && state._renderTask) {
+    state._renderTask.cancel();
+    state._renderTask = null;
+  }
+
+  // Release canvas memory
+  poolSlot.mainCanvas.width = 0;
+  poolSlot.mainCanvas.height = 0;
+  poolSlot.overlayCanvas.width = 0;
+  poolSlot.overlayCanvas.height = 0;
+  poolSlot.overlayCanvas.classList.remove('overlay-visible');
+  poolSlot.mainCanvas.classList.remove('dark-active');
+  poolSlot.mainCanvas.style.visibility = '';
+  poolSlot.overlayCanvas.style.visibility = '';
+
+  // Clear text layers and annotations
+  poolSlot.textLayer.innerHTML = '';
+  poolSlot.verticalOcrLayer.innerHTML = '';
+  poolSlot.element.querySelectorAll('.link-annot').forEach(el => el.remove());
+  poolSlot.element.querySelectorAll('[data-ocr-loading]').forEach(el => el.remove());
+  poolSlot.element.classList.remove('ocr-loading', 'ocr-done');
+
+  // Release PDF.js page cache on constrained devices
+  if (_isMemoryConstrained && pdfDoc && !isResetting) {
+    pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
+  }
+
+  // Update state
+  if (state) {
+    state.rendered = false;
+    state.rendering = false;
+    state.ocrInProgress = false;
+    state.imageRegionsCss = [];
+    state.imageRegionsRaw = [];
+  }
+
+  poolSlot.element.style.display = 'none';
+  poolSlot.assignedPage = null;
+  pageSlots.delete(pageNum);
+}
+
+function reconcileContainers() {
+  if (!pdfDoc || pdfDoc.numPages === 0) return;
+
+  const { rangeStart, rangeEnd } = getVisiblePageRange();
+  const needed = new Set();
+  for (let p = rangeStart; p <= rangeEnd; p++) needed.add(p);
+
+  // Release containers no longer in range
+  for (const poolSlot of containerPool) {
+    if (poolSlot.assignedPage != null && !needed.has(poolSlot.assignedPage)) {
+      evictContainer(poolSlot);
+    }
+  }
+
+  // Assign free containers to newly-needed pages (closest to center first)
+  const centerPage = Math.round((rangeStart + rangeEnd) / 2);
+  const sorted = [...needed].filter(p => !pageSlots.has(p))
+    .sort((a, b) => Math.abs(a - centerPage) - Math.abs(b - centerPage));
+
+  for (const pageNum of sorted) {
+    const free = containerPool.find(s => s.assignedPage === null);
+    if (!free) break; // pool exhausted
+    assignContainer(free, pageNum);
+  }
+}
 
 async function buildPageSlots() {
   if (!pdfDoc) return;
 
+  // Clear previous state
   viewport.innerHTML = '';
   pageSlots.clear();
+  pageRenderState.clear();
+  containerPool.length = 0;
+  pageGeometry = [null]; // index 0 unused (pages are 1-based)
 
-  // We need the first page to determine scale
+  // Determine scale from first page
   const firstPage = await pdfDoc.getPage(1);
   const scale = calculateScale(firstPage);
   currentScale = scale;
   const dpr = getDpr();
 
-  // Batch DOM insertion with DocumentFragment
-  const fragment = document.createDocumentFragment();
+  // Compute geometry for all pages. Most PDFs have uniform page sizes —
+  // detect this after page 1 and skip getPage() for the rest.
+  const firstVp = firstPage.getViewport({ scale: scale * dpr });
+  const firstCssW = Math.floor(firstVp.width / dpr);
+  const firstCssH = Math.floor(firstVp.height / dpr);
+  let uniform = true;
 
+  // Build geometry table
+  let offsetTop = VIEWPORT_PADDING_TOP;
   for (let i = 1; i <= pdfDoc.numPages; i++) {
-    const page = await pdfDoc.getPage(i);
-    const scaledViewport = page.getViewport({ scale: scale * dpr });
+    let cssW = firstCssW;
+    let cssH = firstCssH;
 
-    const cssW = Math.floor(scaledViewport.width / dpr);
-    const cssH = Math.floor(scaledViewport.height / dpr);
+    if (i > 1) {
+      // Check if this page has different dimensions
+      const page = await pdfDoc.getPage(i);
+      const vp = page.getViewport({ scale: scale * dpr });
+      cssW = Math.floor(vp.width / dpr);
+      cssH = Math.floor(vp.height / dpr);
+      if (cssW !== firstCssW || cssH !== firstCssH) uniform = false;
+    }
 
-    // Container
-    const container = document.createElement('div');
-    container.className = 'page-container';
-    container.style.width = cssW + 'px';
-    container.style.height = cssH + 'px';
-    container.dataset.pageNum = i;
+    pageGeometry[i] = { cssWidth: cssW, cssHeight: cssH, offsetTop };
+    offsetTop += cssH + PAGE_GAP;
 
-    // Main canvas
-    const mainCanvas = document.createElement('canvas');
-    mainCanvas.className = 'page-canvas';
-    mainCanvas.style.width = cssW + 'px';
-    mainCanvas.style.height = cssH + 'px';
-
-    // Overlay canvas
-    const overlayCanvas = document.createElement('canvas');
-    overlayCanvas.className = 'page-overlay';
-    overlayCanvas.style.width = cssW + 'px';
-    overlayCanvas.style.height = cssH + 'px';
-
-    // Text layer (horizontal text: native + OCR horizontal)
-    const textLayer = document.createElement('div');
-    textLayer.className = 'text-layer';
-    textLayer.style.width = cssW + 'px';
-    textLayer.style.height = cssH + 'px';
-
-    // Vertical OCR layer (separate from text-layer to prevent
-    // selection interference between horizontal and vertical text).
-    // Same position/size as text-layer but independent DOM tree.
-    const verticalOcrLayer = document.createElement('div');
-    verticalOcrLayer.className = 'text-layer vertical-ocr-layer';
-    verticalOcrLayer.style.width = cssW + 'px';
-    verticalOcrLayer.style.height = cssH + 'px';
-
-    // Page number label
-    const pageLabel = document.createElement('div');
-    pageLabel.className = 'page-label';
-    pageLabel.textContent = i;
-
-    container.appendChild(mainCanvas);
-    container.appendChild(overlayCanvas);
-    container.appendChild(textLayer);
-    container.appendChild(verticalOcrLayer);
-    container.appendChild(pageLabel);
-    fragment.appendChild(container);
-
-    pageSlots.set(i, {
-      container,
-      mainCanvas,
-      overlayCanvas,
-      textLayer,
-      verticalOcrLayer,
-      rendered: false,
-      rendering: false,
-      renderGeneration: 0,
-      ocrInProgress: false,       // true while Tesseract is processing this page
-      imageRegionsCss: [],        // [{x,y,w,h}] in CSS px — for loading indicator hit-testing
-      imageRegionsRaw: [],        // raw regions in canvas px — for on-demand vertical OCR
-      _renderTask: null,          // PDF.js RenderTask — cancelled on eviction
-    });
+    // Optimization: if all pages so far are uniform, skip getPage for rest
+    if (uniform && i === 2 && cssW === firstCssW && cssH === firstCssH) {
+      for (let j = 3; j <= pdfDoc.numPages; j++) {
+        offsetTop = VIEWPORT_PADDING_TOP + (j - 1) * (firstCssH + PAGE_GAP);
+        pageGeometry[j] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
+      }
+      break;
+    }
   }
 
-  viewport.appendChild(fragment);
+  // Total scroll height
+  const totalHeight = pageGeometry[pdfDoc.numPages].offsetTop +
+    pageGeometry[pdfDoc.numPages].cssHeight + 16; // bottom padding
+
+  // Create spacer
+  scrollSpacer = document.createElement('div');
+  scrollSpacer.id = 'scroll-spacer';
+  scrollSpacer.style.position = 'relative';
+  scrollSpacer.style.width = '100%';
+  scrollSpacer.style.height = totalHeight + 'px';
+
+  // Create container pool
+  for (let i = 0; i < POOL_SIZE; i++) {
+    const slot = createPoolContainer();
+    scrollSpacer.appendChild(slot.element);
+    containerPool.push(slot);
+  }
+
+  viewport.appendChild(scrollSpacer);
+
+  // Initial assignment
+  reconcileContainers();
 }
 
 // ============================================================
-// IntersectionObserver: Lazy Rendering
-//
-// Observes each page container. When a page enters (or is near)
-// the viewport, we render it. Pages far from view are unloaded
-// to save memory.
+// Device Detection & Memory Profiles
 // ============================================================
 
-let scrollObserver = null;
-let evictionObserver = null;
-
-// How far from the viewport (in %) a page must be before its
-// canvas memory is released. Must be larger than the render
-// margin (200%) so pages are re-rendered before becoming visible.
-// Render margin: how far ahead the IntersectionObserver starts rendering.
-// Eviction margin: how far away before memory is released. Must be wider
-// than the render margin so pages re-render before becoming visible.
-// Mobile: tighter margins to keep fewer pages in memory at once.
 const _isMobileDevice = window.matchMedia('(pointer: coarse)').matches;
-
-// iOS/iPadOS detection: WebKit is the only engine allowed on iOS.
-// Safari, Chrome iOS, Firefox iOS — all use WebKit under the hood.
 const _isIOS = _isMobileDevice && /iPad|iPhone/.test(navigator.userAgent);
-
-// Memory-constrained device: iOS (jetsam at ~300MB, no swap) or any
-// mobile device with ≤ 4GB RAM (budget Android tablets, older phones).
-// navigator.deviceMemory is Chrome 63+ (returns approximate GB).
-// When unavailable on a mobile device, assume constrained (safe default).
 const _deviceMemoryGB = navigator.deviceMemory || 0;
 const _isMemoryConstrained = _isIOS || (_isMobileDevice && (_deviceMemoryGB > 0 ? _deviceMemoryGB <= 4 : false));
 
-// Large documents on memory-constrained devices need even more
-// aggressive management. At 150+ pages, canvas backing stores plus
-// PDF.js worker state can exhaust the memory budget.
 const LARGE_DOC_THRESHOLD = 150;
 let _isLargeDocConstrained = false;
 
 function getDpr() {
   const raw = window.devicePixelRatio || 1;
   return _isLargeDocConstrained ? Math.min(raw, 2) : raw;
-}
-
-// Margins adapt based on device and document size.
-// iOS + large doc: ultra-tight margins to minimize pages in memory.
-// Mobile: moderate margins for smooth scrolling.
-// Desktop: generous margins for instant page transitions.
-function getRenderMargin() {
-  if (_isLargeDocConstrained) return '80%';
-  if (_isMemoryConstrained) return '100%';
-  if (_isMobileDevice) return '150%';
-  return '200%';
-}
-
-function getEvictionMargin() {
-  if (_isLargeDocConstrained) return '150%';
-  if (_isMemoryConstrained) return '300%';
-  if (_isMobileDevice) return '400%';
-  return '600%';
-}
-
-function setupIntersectionObserver() {
-  if (scrollObserver) scrollObserver.disconnect();
-  if (evictionObserver) evictionObserver.disconnect();
-
-  // --- Render observer: triggers rendering for nearby pages ---
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        const pageNum = parseInt(entry.target.dataset.pageNum, 10);
-        const slot = pageSlots.get(pageNum);
-        if (!slot) continue;
-
-        if (entry.isIntersecting) {
-          // Visible page goes through the render queue (respects
-          // velocity detection and concurrency limit).
-          enqueueRender(pageNum);
-          // Pre-render adjacent pages via requestIdleCallback —
-          // they render only when the browser is idle, not during
-          // fast scroll or heavy rendering. During normal reading
-          // the browser is idle immediately after the visible page
-          // renders, so the delay is imperceptible.
-          for (let offset = 1; offset <= PRERENDER_MARGIN; offset++) {
-            const ahead = pageNum + offset;
-            const behind = pageNum - offset;
-            // Use requestIdleCallback where available — pre-renders only
-            // happen when the browser is idle, not during fast scroll.
-            // In automated test environments (webdriver), rIC can stall
-            // indefinitely in headless mode, so we fall back to setTimeout.
-            const schedulePrerender = (typeof requestIdleCallback === 'function' && !navigator.webdriver)
-              ? requestIdleCallback
-              : (fn) => setTimeout(fn, 50);
-            schedulePrerender(() => { enqueueRender(ahead); });
-            schedulePrerender(() => { enqueueRender(behind); });
-          }
-        }
-      }
-      // Update current page indicator based on scroll
-      updateCurrentPageFromScroll();
-    },
-    {
-      root: viewport,
-      rootMargin: getRenderMargin() + ' 0px',
-      threshold: 0,
-    }
-  );
-
-  // --- Eviction observer: releases memory for distant pages ---
-  // Uses a wider margin than the render observer, so pages get
-  // re-rendered (by the render observer) before they become visible.
-  // When a page leaves this wide margin, its canvases are zeroed
-  // and its text layer is cleared — freeing GPU and DOM memory.
-  evictionObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) continue; // still nearby, keep it
-
-        const pageNum = parseInt(entry.target.dataset.pageNum, 10);
-        const slot = pageSlots.get(pageNum);
-        if (!slot || !slot.rendered) continue;
-
-        // Cancel any pending render or OCR for this page
-        cancelQueuedRender(pageNum);
-        cancelOcrJobsForPage(pageNum);
-        // Cancel in-flight PDF.js render task — frees GPU memory immediately
-        // instead of waiting for the render to complete on a page the user
-        // has already scrolled past.
-        if (slot._renderTask) {
-          slot._renderTask.cancel();
-          slot._renderTask = null;
-        }
-
-        // Release canvas memory. On iOS, zero the dimensions to free
-        // GPU backing stores (critical for jetsam). On desktop/Android,
-        // just clear the content — keeps the backing store allocated
-        // (avoids flash on re-render) and memory is not an issue.
-        if (_isMemoryConstrained) {
-          slot.mainCanvas.width = 0;
-          slot.mainCanvas.height = 0;
-          slot.overlayCanvas.width = 0;
-          slot.overlayCanvas.height = 0;
-        } else {
-          const mc = slot.mainCanvas;
-          const oc = slot.overlayCanvas;
-          if (mc.width > 0) mc.getContext('2d').clearRect(0, 0, mc.width, mc.height);
-          if (oc.width > 0) oc.getContext('2d').clearRect(0, 0, oc.width, oc.height);
-        }
-        slot.overlayCanvas.classList.remove('overlay-visible');
-        // Remove dark mode filter so the CSS background (#1e1e1e) shows
-        // correctly as a dark placeholder — without this, invert(0.86)
-        // turns #1e1e1e into #c3c3c3 (light gray).
-        slot.mainCanvas.classList.remove('dark-active');
-
-        // Clear text layers, link annotations, and OCR loading indicators
-        slot.textLayer.innerHTML = '';
-        slot.verticalOcrLayer.innerHTML = '';
-        slot.container.querySelectorAll('.link-annot').forEach(el => el.remove());
-        slot.container.querySelectorAll('[data-ocr-loading]').forEach(el => el.remove());
-        slot.container.classList.remove('ocr-loading', 'ocr-done');
-
-        // Release PDF.js internal caches for this page.
-        // Only on memory-constrained devices. Guard against engine reset.
-        if (_isMemoryConstrained && pdfDoc && !isResetting) {
-          pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
-        }
-
-        // Mark as unrendered so the render observer will redo it
-        slot.rendered = false;
-        slot.rendering = false;
-        slot.ocrInProgress = false;
-        slot.imageRegionsCss = [];
-        slot.imageRegionsRaw = [];
-      }
-    },
-    {
-      root: viewport,
-      rootMargin: getEvictionMargin() + ' 0px',
-      threshold: 0,
-    }
-  );
-
-  for (const [, slot] of pageSlots) {
-    scrollObserver.observe(slot.container);
-    evictionObserver.observe(slot.container);
-  }
 }
 
 // ============================================================
@@ -1928,8 +1956,9 @@ function maybeScheduleEngineReset() {
 
 function enqueueRender(pageNum) {
   if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
-  const slot = pageSlots.get(pageNum);
-  if (!slot || slot.rendered || slot.rendering) return;
+  if (!pageSlots.has(pageNum)) return; // page has no active container
+  const state = getOrCreateRenderState(pageNum);
+  if (state.rendered || state.rendering) return;
 
   // Don't duplicate
   if (renderQueue.includes(pageNum)) return;
@@ -1994,11 +2023,13 @@ async function renderPageIfNeeded(pageNum) {
   if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
 
   const slot = pageSlots.get(pageNum);
-  if (!slot || slot.rendered || slot.rendering) return;
+  if (!slot) return;
+  const state = getOrCreateRenderState(pageNum);
+  if (state.rendered || state.rendering) return;
 
-  slot.rendering = true;
+  state.rendering = true;
   const myGen = globalGeneration;
-  slot.renderGeneration = myGen;
+  state.renderGeneration = myGen;
 
   try {
     const page = await pdfDoc.getPage(pageNum);
@@ -2019,7 +2050,7 @@ async function renderPageIfNeeded(pageNum) {
       canvasContext: renderCanvas.getContext('2d'),
       viewport: scaledViewport,
     });
-    slot._renderTask = renderTask;
+    state._renderTask = renderTask;
 
     const parallelTasks = [
       renderTask.promise,
@@ -2081,7 +2112,7 @@ async function renderPageIfNeeded(pageNum) {
           slot.textLayer, cached, cached._canvasW, cached._canvasH, cssW, cssH
         );
       } else {
-        slot.ocrInProgress = true;
+        state.ocrInProgress = true;
         const effectiveScale = currentScale * dpr;
 
         enqueueOcrJob({
@@ -2123,11 +2154,14 @@ async function renderPageIfNeeded(pageNum) {
             data._canvasH = processed.height;
             ocrCache.set(cacheKey, data);
 
-            buildOcrTextLayerDirect(
-              slot.textLayer, data, processed.width, processed.height, cssW, cssH
-            );
-            processed.width = 0;
-            ocrFinished(slot);
+            // The slot may have been recycled during OCR — re-lookup
+            const currentSlot = pageSlots.get(pageNum);
+            if (currentSlot) {
+              buildOcrTextLayerDirect(
+                currentSlot.textLayer, data, processed.width, processed.height, cssW, cssH
+              );
+              ocrFinished(currentSlot);
+            }
           },
         });
       }
@@ -2142,8 +2176,8 @@ async function renderPageIfNeeded(pageNum) {
           .sort((a, b) => (b.width * b.height) - (a.width * a.height)); // largest first
 
         // Store image region bounds for hit-testing and on-demand vertical OCR
-        slot.imageRegionsRaw = candidates.map(r => ({ ...r }));
-        slot.imageRegionsCss = candidates.map(r => ({
+        state.imageRegionsRaw = candidates.map(r => ({ ...r }));
+        state.imageRegionsCss = candidates.map(r => ({
           x: Math.max(0, r.x) / dpr,
           y: Math.max(0, r.y) / dpr,
           w: Math.min(r.width, w - Math.max(0, r.x)) / dpr,
@@ -2153,18 +2187,20 @@ async function renderPageIfNeeded(pageNum) {
         // Only auto-OCR the top N images (budget). Rest are on-demand.
         const autoOcr = candidates.slice(0, OCR_IMAGE_BUDGET);
         if (autoOcr.length > 0) {
-          slot.ocrInProgress = true;
+          state.ocrInProgress = true;
 
           enqueueOcrJob({
             id: `img-${pageNum}`,
             pageNum,
             cancelled: false,
             execute: async () => {
+              const currentSlot = pageSlots.get(pageNum);
+              if (!currentSlot) return;
               await ocrImageRegions(
-                slot.mainCanvas, slot.textLayer, slot.verticalOcrLayer,
+                currentSlot.mainCanvas, currentSlot.textLayer, currentSlot.verticalOcrLayer,
                 autoOcr.map(r => ({ ...r })), dpr, myGen, pageNum
               );
-              ocrFinished(slot);
+              ocrFinished(currentSlot);
             },
           });
         }
@@ -2175,32 +2211,28 @@ async function renderPageIfNeeded(pageNum) {
     try {
       const annotations = await page.getAnnotations();
       if (globalGeneration === myGen) {
-        buildLinkLayer(slot.container, annotations, scaledViewport, dpr, pageNum);
+        buildLinkLayer(slot.element, annotations, scaledViewport, dpr, pageNum);
       }
     } catch (_) { /* some pages have no annotations */ }
 
-    slot.rendered = true;
-    slot._renderTask = null;
+    state.rendered = true;
+    state._renderTask = null;
     applyDarkModeToPage(pageNum);
 
     // Everything is ready — reveal both canvases in one compositing frame.
-    // The user transitions directly from placeholder to final page.
     slot.mainCanvas.style.visibility = '';
     slot.overlayCanvas.style.visibility = '';
 
-    // On iOS, release PDF.js internal caches (decompressed images, fonts,
-    // operator list). Each rendered page keeps ~30-80MB; 4-5 pages trigger
-    // a jetsam kill. Desktop/Android skip this — they benefit from the cache.
+    // On memory-constrained devices, release PDF.js internal caches.
     if (_isMemoryConstrained) page.cleanup();
   } catch (err) {
     if (globalGeneration !== myGen) return;
-    // RenderTask.cancel() throws — don't log that as an error
     if (err?.name !== 'RenderingCancelledException' && err?.message !== 'Rendering cancelled') {
       console.error(`Render page ${pageNum} failed:`, err);
     }
   } finally {
-    slot.rendering = false;
-    slot._renderTask = null;
+    state.rendering = false;
+    state._renderTask = null;
   }
 }
 
@@ -2479,7 +2511,9 @@ function shouldApplyDark(pageNum) {
 
 function applyDarkModeToPage(pageNum) {
   const slot = pageSlots.get(pageNum);
-  if (!slot || !slot.rendered) return;
+  if (!slot) return;
+  const state = pageRenderState.get(pageNum);
+  if (!state || !state.rendered) return;
 
   const dark = shouldApplyDark(pageNum);
   slot.mainCanvas.classList.toggle('dark-active', dark);
@@ -2499,20 +2533,25 @@ function applyDarkModeToAllPages() {
 let currentVisiblePage = 1;
 
 function updateCurrentPageFromScroll() {
-  if (!pdfDoc) return;
+  if (!pdfDoc || pageGeometry.length <= 1) return;
 
-  const viewportRect = viewport.getBoundingClientRect();
-  const viewportCenter = viewportRect.top + viewportRect.height / 2;
+  // Find the page whose center is closest to the viewport center.
+  // Uses the precomputed geometry table — pure math, no DOM queries.
+  const viewCenter = viewport.scrollTop + viewport.clientHeight / 2;
   let closestPage = 1;
   let closestDist = Infinity;
 
-  for (const [pageNum, slot] of pageSlots) {
-    const rect = slot.container.getBoundingClientRect();
-    const pageCenter = rect.top + rect.height / 2;
-    const dist = Math.abs(pageCenter - viewportCenter);
+  // Binary search for approximate location, then linear scan nearby
+  const approx = binarySearchFirstVisible(viewport.scrollTop);
+  const lo = Math.max(1, approx - 3);
+  const hi = Math.min(pdfDoc.numPages, approx + 5);
+  for (let i = lo; i <= hi; i++) {
+    const geo = pageGeometry[i];
+    const pageCenter = geo.offsetTop + geo.cssHeight / 2;
+    const dist = Math.abs(pageCenter - viewCenter);
     if (dist < closestDist) {
       closestDist = dist;
-      closestPage = pageNum;
+      closestPage = i;
     }
   }
 
@@ -2631,16 +2670,16 @@ pageInfo.addEventListener('click', () => {
 });
 
 function scrollToPage(pageNum, instant = false) {
-  if (!pdfDoc) return;
+  if (!pdfDoc || pageGeometry.length <= 1) return;
   const clamped = Math.max(1, Math.min(pageNum, pdfDoc.numPages));
-  const slot = pageSlots.get(clamped);
-  if (!slot) return;
+  const geo = pageGeometry[clamped];
+  if (!geo) return;
 
-  // Memory-constrained devices: use instant scroll to avoid
-  // janky smooth animation that gets interrupted on slow GPUs.
-  slot.container.scrollIntoView({
+  // Scroll so the page is centered in the viewport
+  const target = geo.offsetTop - (viewport.clientHeight - geo.cssHeight) / 2;
+  viewport.scrollTo({
+    top: Math.max(0, target),
     behavior: (instant || _isMemoryConstrained) ? 'instant' : 'smooth',
-    block: 'center',
   });
 }
 
@@ -3251,15 +3290,16 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Alt') return;
 
   const slot = pageSlots.get(currentVisiblePage);
-  if (!slot || slot.imageRegionsRaw.length === 0) return;
-  if (slot.mainCanvas.width === 0) return; // page evicted
+  const state = pageRenderState.get(currentVisiblePage);
+  if (!slot || !state || state.imageRegionsRaw.length === 0) return;
+  if (slot.mainCanvas.width === 0) return;
 
   const vertLayer = slot.verticalOcrLayer;
-  if (vertLayer.children.length > 0) return; // already done
+  if (vertLayer.children.length > 0) return;
 
   const dpr = getDpr();
   const myGen = globalGeneration;
-  for (const region of slot.imageRegionsRaw) {
+  for (const region of state.imageRegionsRaw) {
     ocrImageVertical(slot.mainCanvas, vertLayer, region, dpr, myGen);
   }
 });
@@ -3358,6 +3398,7 @@ viewport.addEventListener('scroll', () => {
   if (scrollRAF) return;
   scrollRAF = requestAnimationFrame(() => {
     scrollRAF = 0;
+    reconcileContainers();
     updateCurrentPageFromScroll();
   });
 }, { passive: true });
@@ -3388,12 +3429,9 @@ window.addEventListener('resize', () => {
     rendersSinceReset = 0;
     isResetPending = false;
     await buildPageSlots();
-    setupIntersectionObserver();
     // Restore scroll position to the same page
-    const slot = pageSlots.get(pageToRestore);
-    if (slot) {
-      slot.container.scrollIntoView({ block: 'start' });
-    }
+    scrollToPage(pageToRestore, true);
+    reconcileContainers();
     updateCurrentPageFromScroll();
 
     // Mobile landscape: toolbar is completely hidden — pure reading.

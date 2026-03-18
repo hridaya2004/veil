@@ -474,12 +474,7 @@ body {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 40px;
-  padding: 16px 0;
-  padding-top: 64px; /* space for floating toolbar */
+  position: relative;
   /* Keep viewport below the fixed toolbar in stacking order.
      Without this, overflow:auto can create an implicit stacking
      context that blocks pointer events on the toolbar. */
@@ -931,12 +926,6 @@ body {
    ============================================================ */
 
 @media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
-  #viewport {
-    gap: 20px;
-    padding: 8px 0;
-    padding-top: 52px;
-  }
-
   .page-container {
     box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
   }
