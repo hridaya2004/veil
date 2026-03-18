@@ -29,6 +29,10 @@
   --transition: 200ms ease;
 }
 
+html {
+  background: var(--bg-deep);
+}
+
 body {
   font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: var(--bg-deep);
@@ -180,12 +184,12 @@ body {
 .drop-v-ghost {
   position: absolute;
   left: 0;
-  top: -0.12em;
+  top: -0.15em;
   color: var(--accent);
-  opacity: 0.2;
+  opacity: 0.35;
   z-index: 0;
   pointer-events: none;
-  filter: blur(1px);
+  filter: blur(1.5px);
 }
 
 .drop-eil {
@@ -213,6 +217,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin-top: 12px;
   padding: 12px 28px;
   border-radius: 50px;
   font-family: inherit;
@@ -326,12 +331,12 @@ body {
 .nav-v-ghost {
   position: absolute;
   left: 0;
-  top: -0.12em;
+  top: -0.15em;
   color: var(--accent);
-  opacity: 0.2;
+  opacity: 0.35;
   z-index: 0;
   pointer-events: none;
-  filter: blur(0.5px);
+  filter: blur(0.3px);
 }
 .nav-eil {
   position: relative;
@@ -375,6 +380,7 @@ body {
   min-width: 48px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   cursor: pointer;
   padding: 2px 6px;
   border-radius: 4px;
@@ -452,6 +458,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: var(--bg-deep);
 }
 
 /* ============================================================
@@ -468,7 +475,31 @@ body {
   gap: 40px;
   padding: 16px 0;
   padding-top: 64px; /* space for floating toolbar */
-  position: relative;
+  /* Keep viewport below the fixed toolbar in stacking order.
+     Without this, overflow:auto can create an implicit stacking
+     context that blocks pointer events on the toolbar. */
+  z-index: 0;
+
+  /* Native scrollbar — visible on desktop & Android */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(212, 163, 115, 0.25) transparent;
+}
+
+#viewport::-webkit-scrollbar {
+  width: 6px;
+}
+
+#viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#viewport::-webkit-scrollbar-thumb {
+  background: rgba(212, 163, 115, 0.25);
+  border-radius: 3px;
+}
+
+#viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 163, 115, 0.4);
 }
 
 
@@ -861,6 +892,31 @@ body {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ============================================================
+   Mobile Landscape — Fit-to-Width Mode
+
+   On phone screens held sideways, the viewport is very short
+   (~350px) but wide. Fit-to-page would shrink text to illeggible
+   size. Instead, we fit to width and let the user scroll vertically
+   within each page — turning landscape into a natural magnifier.
+
+   Tighter padding and reduced gap maximize the precious vertical
+   space. The toolbar hides on scroll down via JS (see app.js
+   isMobileLandscape + scroll listener).
+   ============================================================ */
+
+@media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
+  #viewport {
+    gap: 20px;
+    padding: 8px 0;
+    padding-top: 52px;
+  }
+
+  .page-container {
+    box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
+  }
 }
 
 [hidden] {

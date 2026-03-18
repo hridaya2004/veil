@@ -188,6 +188,24 @@ describe('calculateScale', () => {
     // min(1.596, 1.366, 3) ≈ 1.366
     expect(scale).toBeCloseTo(836 / 612, 2);
   });
+
+  it('fitToWidth ignores height constraint', () => {
+    // Simulate mobile landscape: wide but very short screen
+    // US Letter (612x792) in a 844x390 viewport (iPhone landscape)
+    const scale = calculateScale(612, 792, 844, 390, 48, 16, true);
+    // availW = 844 - 16 = 828
+    // fitToWidth → only width matters: 828 / 612 ≈ 1.353
+    const expected = (844 - 16) / 612;
+    expect(scale).toBeCloseTo(expected, 2);
+    // Without fitToWidth, height would constrain: (390-48-16)/792 ≈ 0.411
+    const fitPage = calculateScale(612, 792, 844, 390, 48, 16, false);
+    expect(fitPage).toBeLessThan(scale);
+  });
+
+  it('fitToWidth still respects 3x cap', () => {
+    const scale = calculateScale(100, 100, 844, 390, 48, 16, true);
+    expect(scale).toBe(3);
+  });
 });
 
 // ============================================================

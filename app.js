@@ -81,8 +81,11 @@ const OPS_MAP = {
   paintImageXObjectRepeat: OPS.paintImageXObjectRepeat,
 };
 
-// How many pages around the visible area to pre-render
-const PRERENDER_MARGIN = 2;
+// How many pages around the visible area to pre-render.
+// Mobile: 1 page ahead only — iOS Safari kills tabs that exceed
+// its memory budget, and each pre-rendered page holds canvas
+// backing stores + PDF.js internal caches.
+const PRERENDER_MARGIN = window.matchMedia('(pointer: coarse)').matches ? 1 : 2;
 
 // Minimum PDF.js render scale for Tesseract OCR.
 // PDF standard is 72 points/inch. At scale 3, a page is rendered
@@ -462,6 +465,9 @@ function enterFocusMode() {
 }
 
 function exitFocusMode() {
+  // Mobile landscape: toolbar stays hidden unconditionally.
+  // The user rotates to portrait to access toolbar actions.
+  if (isMobileLandscape()) return;
   toolbar.classList.remove('toolbar-hidden');
   resetFocusTimer();
 }
@@ -510,11 +516,13 @@ document.addEventListener('mousemove', (e) => {
   }
 }, { passive: true });
 
-// Touch: tap in the top zone when toolbar is hidden reveals it
-// without letting the tap pass through to the document.
+// Touch: tap in the top zone when toolbar is hidden reveals it.
+// In mobile landscape the toolbar is completely hidden (no reveal
+// mechanism) — the user rotates to portrait for toolbar actions.
 document.addEventListener('touchstart', (e) => {
   if (!readerEl || readerEl.hidden) return;
   if (!toolbar.classList.contains('toolbar-hidden')) return;
+  if (isMobileLandscape()) return;
 
   const touch = e.touches[0];
   if (touch && touch.clientY <= TOOLBAR_TRIGGER_ZONE * 2) {
@@ -594,9 +602,11 @@ async function loadPDF(data) {
     // Clear OCR caches — new document, old results are invalid
     ocrCache.clear();
     ocrFingerprints.clear();
-    // Cancel all pending OCR jobs from previous document
+    // Cancel all pending render and OCR jobs from previous document
+    renderQueue.length = 0;
     ocrQueue.forEach(j => { j.cancelled = true; });
     ocrQueue.length = 0;
+    isScrollingFast = false;
 
     // Show the reader behind the drop zone, then animate the veil open.
     // The veil layers slide right while the reader renders underneath.
@@ -1328,9 +1338,19 @@ function cleanup() {
 // Scale Calculation
 // ============================================================
 
+function isMobileLandscape() {
+  return window.matchMedia('(pointer: coarse)').matches &&
+    window.matchMedia('(orientation: landscape)').matches &&
+    window.innerHeight < 500;
+}
+
 function calculateScale(page) {
   const vp = page.getViewport({ scale: 1 });
-  return _calculateScale(vp.width, vp.height, window.innerWidth, window.innerHeight);
+  return _calculateScale(
+    vp.width, vp.height,
+    window.innerWidth, window.innerHeight,
+    48, 16, isMobileLandscape()
+  );
 }
 
 // ============================================================
@@ -1419,6 +1439,7 @@ async function buildPageSlots() {
       ocrInProgress: false,       // true while Tesseract is processing this page
       imageRegionsCss: [],        // [{x,y,w,h}] in CSS px — for loading indicator hit-testing
       imageRegionsRaw: [],        // raw regions in canvas px — for on-demand vertical OCR
+      _renderTask: null,          // PDF.js RenderTask — cancelled on eviction
     });
   }
 
@@ -1439,7 +1460,13 @@ let evictionObserver = null;
 // How far from the viewport (in %) a page must be before its
 // canvas memory is released. Must be larger than the render
 // margin (200%) so pages are re-rendered before becoming visible.
-const EVICTION_MARGIN = '600%';
+// Render margin: how far ahead the IntersectionObserver starts rendering.
+// Eviction margin: how far away before memory is released. Must be wider
+// than the render margin so pages re-render before becoming visible.
+// Mobile: tighter margins to keep fewer pages in memory at once.
+const _isMobileDevice = window.matchMedia('(pointer: coarse)').matches;
+const RENDER_IO_MARGIN = _isMobileDevice ? '100%' : '200%';
+const EVICTION_MARGIN = _isMobileDevice ? '300%' : '600%';
 
 function setupIntersectionObserver() {
   if (scrollObserver) scrollObserver.disconnect();
@@ -1454,11 +1481,26 @@ function setupIntersectionObserver() {
         if (!slot) continue;
 
         if (entry.isIntersecting) {
-          renderPageIfNeeded(pageNum);
-          // Pre-render adjacent pages
+          // Visible page goes through the render queue (respects
+          // velocity detection and concurrency limit).
+          enqueueRender(pageNum);
+          // Pre-render adjacent pages via requestIdleCallback —
+          // they render only when the browser is idle, not during
+          // fast scroll or heavy rendering. During normal reading
+          // the browser is idle immediately after the visible page
+          // renders, so the delay is imperceptible.
           for (let offset = 1; offset <= PRERENDER_MARGIN; offset++) {
-            renderPageIfNeeded(pageNum + offset);
-            renderPageIfNeeded(pageNum - offset);
+            const ahead = pageNum + offset;
+            const behind = pageNum - offset;
+            // Use requestIdleCallback where available — pre-renders only
+            // happen when the browser is idle, not during fast scroll.
+            // In automated test environments (webdriver), rIC can stall
+            // indefinitely in headless mode, so we fall back to setTimeout.
+            const schedulePrerender = (typeof requestIdleCallback === 'function' && !navigator.webdriver)
+              ? requestIdleCallback
+              : (fn) => setTimeout(fn, 50);
+            schedulePrerender(() => { enqueueRender(ahead); });
+            schedulePrerender(() => { enqueueRender(behind); });
           }
         }
       }
@@ -1467,7 +1509,7 @@ function setupIntersectionObserver() {
     },
     {
       root: viewport,
-      rootMargin: '200% 0px', // Start rendering well before visible
+      rootMargin: RENDER_IO_MARGIN + ' 0px',
       threshold: 0,
     }
   );
@@ -1486,8 +1528,16 @@ function setupIntersectionObserver() {
         const slot = pageSlots.get(pageNum);
         if (!slot || !slot.rendered) continue;
 
-        // Cancel any pending OCR jobs for this page (saves CPU)
+        // Cancel any pending render or OCR for this page
+        cancelQueuedRender(pageNum);
         cancelOcrJobsForPage(pageNum);
+        // Cancel in-flight PDF.js render task — frees GPU memory immediately
+        // instead of waiting for the render to complete on a page the user
+        // has already scrolled past.
+        if (slot._renderTask) {
+          slot._renderTask.cancel();
+          slot._renderTask = null;
+        }
 
         // Release canvas memory
         slot.mainCanvas.width = 0;
@@ -1502,6 +1552,9 @@ function setupIntersectionObserver() {
         slot.container.querySelectorAll('.link-annot').forEach(el => el.remove());
         slot.container.querySelectorAll('[data-ocr-loading]').forEach(el => el.remove());
         slot.container.classList.remove('ocr-loading', 'ocr-done');
+
+        // Release PDF.js internal caches for this page
+        pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
 
         // Mark as unrendered so the render observer will redo it
         slot.rendered = false;
@@ -1525,8 +1578,60 @@ function setupIntersectionObserver() {
 }
 
 // ============================================================
-// Page Rendering
+// Scroll Velocity Detection
+//
+// Measures scroll speed to distinguish reading (slow) from
+// seeking (fast). During fast scroll, page rendering is deferred
+// to avoid allocating dozens of canvas backing stores that
+// overwhelm iOS WebKit's lazy GC — the #1 cause of Jetsam kills.
+//
+// Pattern: Instagram/Twitter infinite scroll, iOS UIScrollView
+// scrollViewDidEndDecelerating.
 // ============================================================
+
+let isScrollingFast = false;
+let lastScrollTop = 0;
+let lastScrollTime = 0;
+let scrollVelocityTimer = null;
+const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
+
+viewport.addEventListener('scroll', () => {
+  const now = performance.now();
+  const dt = now - lastScrollTime;
+  const scrollTop = viewport.scrollTop;
+  if (dt > 0 && lastScrollTime > 0) {
+    const dy = Math.abs(scrollTop - lastScrollTop);
+    const velocity = (dy / dt) * 1000; // px/sec
+    isScrollingFast = velocity > SCROLL_FAST_THRESHOLD;
+  }
+  lastScrollTop = scrollTop;
+  lastScrollTime = now;
+
+  // When scroll stops, mark as slow after a brief settle
+  clearTimeout(scrollVelocityTimer);
+  scrollVelocityTimer = setTimeout(() => {
+    isScrollingFast = false;
+    // Flush any deferred renders now that scroll has settled
+    flushRenderQueue();
+  }, 150);
+}, { passive: true });
+
+// ============================================================
+// Canvas Pool
+//
+// Reusable offscreen canvases for PDF.js rendering. Instead of
+// creating/destroying a canvas per page (which thrashes iOS
+// WebKit's lazy GC of GPU backing stores), we maintain a small
+// pool. A canvas is borrowed for rendering, then returned.
+//
+// Pool size matches the concurrency limit — we never need more
+// canvases than concurrent renders.
+// ============================================================
+
+// Mobile: 1 concurrent render to stay within iOS Safari's memory budget.
+// Playwright: 1 to avoid Tesseract contention in headless Chromium.
+// Desktop: 3 for fast parallel rendering.
+let MAX_CONCURRENT_RENDERS = (_isMobileDevice || navigator.webdriver) ? 1 : 3;
 
 function createOffscreenCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -1534,6 +1639,89 @@ function createOffscreenCanvas(w, h) {
   c.height = h;
   return c;
 }
+
+const canvasPool = [];
+
+function borrowCanvas(w, h) {
+  const c = canvasPool.pop() || document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  return c;
+}
+
+function returnCanvas(c) {
+  // Clear but keep the backing store for reuse
+  c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  if (canvasPool.length < MAX_CONCURRENT_RENDERS + 1) {
+    canvasPool.push(c);
+  } else {
+    // Pool full — release this one
+    c.width = 0;
+  }
+}
+
+// ============================================================
+// Render Queue with Concurrency Limit
+//
+// Pages don't render directly — they enter a queue sorted by
+// distance from the viewport center. At most MAX_CONCURRENT_RENDERS
+// can run simultaneously. If a queued page is evicted before
+// rendering starts, it's silently dropped.
+//
+// During fast scroll, the queue accepts entries but doesn't
+// process them until scroll settles (flushRenderQueue).
+// ============================================================
+
+const renderQueue = [];
+let activeRenders = 0;
+
+function enqueueRender(pageNum) {
+  if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+  const slot = pageSlots.get(pageNum);
+  if (!slot || slot.rendered || slot.rendering) return;
+
+  // Don't duplicate
+  if (renderQueue.includes(pageNum)) return;
+
+  renderQueue.push(pageNum);
+  processRenderQueue();
+}
+
+function processRenderQueue() {
+  if (isScrollingFast) return; // wait for scroll to settle
+
+  while (activeRenders < MAX_CONCURRENT_RENDERS && renderQueue.length > 0) {
+    // Sort by distance from current visible page (closest first)
+    const visPage = currentVisiblePage || 1;
+    renderQueue.sort((a, b) => Math.abs(a - visPage) - Math.abs(b - visPage));
+
+    const pageNum = renderQueue.shift();
+    const slot = pageSlots.get(pageNum);
+
+    // Skip if already rendered, evicted, or stale
+    if (!slot || slot.rendered || slot.rendering) continue;
+
+    activeRenders++;
+    renderPageIfNeeded(pageNum).finally(() => {
+      activeRenders--;
+      processRenderQueue(); // pick up next in queue
+    });
+  }
+}
+
+function flushRenderQueue() {
+  processRenderQueue();
+}
+
+// Cancel queued renders for a specific page (called by eviction observer)
+function cancelQueuedRender(pageNum) {
+  const idx = renderQueue.indexOf(pageNum);
+  if (idx !== -1) renderQueue.splice(idx, 1);
+}
+
+// ============================================================
+// Page Rendering
+// ============================================================
 
 async function renderPageIfNeeded(pageNum) {
   if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
@@ -1554,13 +1742,20 @@ async function renderPageIfNeeded(pageNum) {
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
 
-    // Render + get operator list (+ text content for native PDFs)
-    const renderCanvas = createOffscreenCanvas(w, h);
+    // Borrow a canvas from the pool instead of creating a new one.
+    // This avoids thrashing iOS WebKit's lazy GC of GPU backing stores.
+    const renderCanvas = borrowCanvas(w, h);
+
+    // Render + get operator list (+ text content for native PDFs).
+    // Store the RenderTask so we can cancel it if the page is evicted.
+    const renderTask = page.render({
+      canvasContext: renderCanvas.getContext('2d'),
+      viewport: scaledViewport,
+    });
+    slot._renderTask = renderTask;
+
     const parallelTasks = [
-      page.render({
-        canvasContext: renderCanvas.getContext('2d'),
-        viewport: scaledViewport,
-      }).promise,
+      renderTask.promise,
       page.getOperatorList(),
     ];
     // Skip getTextContent for scanned docs — it returns nothing useful
@@ -1662,7 +1857,7 @@ async function renderPageIfNeeded(pageNum) {
       }
     } else {
       buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
-      renderCanvas.width = 0; // release temp canvas
+      returnCanvas(renderCanvas);
 
       // OCR on images within native PDFs — scheduled through the queue.
       if (regions.length > 0) {
@@ -1709,12 +1904,24 @@ async function renderPageIfNeeded(pageNum) {
     } catch (_) { /* some pages have no annotations */ }
 
     slot.rendered = true;
+    slot._renderTask = null;
     applyDarkModeToPage(pageNum);
+
+    // Release PDF.js internal caches (decompressed images, fonts, operator
+    // list). On iOS Safari this is critical — without it, each rendered page
+    // keeps ~30-80MB of decompressed data in memory, and 4-5 pages trigger
+    // a jetsam kill (tab crash). The page object remains valid — PDF.js will
+    // transparently reload data from the stream if the page is re-rendered.
+    page.cleanup();
   } catch (err) {
     if (globalGeneration !== myGen) return;
-    console.error(`Render page ${pageNum} failed:`, err);
+    // RenderTask.cancel() throws — don't log that as an error
+    if (err?.name !== 'RenderingCancelledException' && err?.message !== 'Rendering cancelled') {
+      console.error(`Render page ${pageNum} failed:`, err);
+    }
   } finally {
     slot.rendering = false;
+    slot._renderTask = null;
   }
 }
 
@@ -2877,11 +3084,13 @@ window.addEventListener('resize', () => {
     if (!pdfDoc) return;
     const pageToRestore = currentVisiblePage;
     globalGeneration++;
-    // Cancel pending OCR — scale changed, coordinates are stale
+    // Cancel pending render and OCR — scale changed, coordinates are stale
+    renderQueue.length = 0;
     ocrCache.clear();
     ocrFingerprints.clear();
     ocrQueue.forEach(j => { j.cancelled = true; });
     ocrQueue.length = 0;
+    isScrollingFast = false;
     await buildPageSlots();
     setupIntersectionObserver();
     // Restore scroll position to the same page
@@ -2890,6 +3099,15 @@ window.addEventListener('resize', () => {
       slot.container.scrollIntoView({ block: 'start' });
     }
     updateCurrentPageFromScroll();
+
+    // Mobile landscape: toolbar is completely hidden — pure reading.
+    // Rotating back to portrait restores normal focus mode behavior.
+    if (isMobileLandscape()) {
+      clearTimeout(focusTimer);
+      enterFocusMode();
+    } else {
+      exitFocusMode();
+    }
   }, 200);
 });
 

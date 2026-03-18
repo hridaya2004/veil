@@ -64,9 +64,9 @@ nav.scrolled {
 @media (min-width: 700px) { .nav-wordmark { font-size: 16px; } }
 .nav-v { position: relative; z-index: 1; }
 .nav-v-ghost {
-  position: absolute; left: 0; top: -0.12em;
-  color: #D4A373; opacity: 0.2; z-index: 0;
-  pointer-events: none; filter: blur(0.5px);
+  position: absolute; left: 0; top: -0.15em;
+  color: #D4A373; opacity: 0.35; z-index: 0;
+  pointer-events: none; filter: blur(0.3px);
 }
 .nav-eil { position: relative; z-index: 1; }
 .nav-divider { width: 1px; height: 14px; background: rgba(212,163,115,0.12); }
@@ -176,7 +176,7 @@ h1 {
 .ba-label-others {
   position: absolute; top: 10px; right: 18px;
   font-size: 10px; font-weight: 600; letter-spacing: 0.1em;
-  color: #ef6b6b; text-transform: uppercase;
+  color: #6b5d50; text-transform: uppercase;
 }
 .ba-label-veil {
   position: absolute; bottom: 10px; left: 18px;
@@ -340,8 +340,8 @@ h1 {
 }
 @media (max-width: 699px) { .layers-result { font-size: 9px; } }
 
-.section-spacer { height: 20px; }
-@media (min-width: 700px) { .section-spacer { height: 40px; } }
+.section-spacer { height: 0; }
+@media (min-width: 700px) { .section-spacer { height: 10px; } }
 
 /* ═══ OCR ═══ */
 .ocr-section {
@@ -455,8 +455,21 @@ footer {
   gap: 10px; flex-wrap: wrap; font-size: 11px; color: #6b5d50;
 }
 @media (min-width: 700px) { .footer-credits { gap: 14px; } }
-.footer-logo { display: flex; align-items: center; gap: 5px; }
-.footer-logo span { font-weight: 600; color: #7a6b5e; }
+.footer-logo { display: flex; align-items: center; }
+.footer-wordmark {
+  position: relative;
+  font-family: 'IBM Plex Sans', sans-serif;
+  font-size: 13px; font-weight: 700;
+  letter-spacing: -0.04em; line-height: 1;
+  color: #7a6b5e;
+}
+.footer-v { position: relative; z-index: 1; }
+.footer-v-ghost {
+  position: absolute; left: 0; top: -0.15em;
+  color: #D4A373; opacity: 0.35; z-index: 0;
+  pointer-events: none; filter: blur(0.3px);
+}
+.footer-eil { position: relative; z-index: 1; }
 .footer-slash { color: #4a3e35; }
 .footer-credits a {
   color: #7a6b5e; text-decoration: none; transition: color 0.2s;

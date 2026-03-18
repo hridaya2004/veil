@@ -80,6 +80,9 @@ test.describe('OCR text layer with real content', () => {
 });
 
 test.describe('OCR text layer with real scanned PDF', () => {
+  // Real scanned PDFs go through the render queue + OCR pipeline,
+  // which takes longer with concurrency limits in place.
+  test.setTimeout(180000);
 
   test('real scanned PDF produces OCR text layer with spans inside page bounds', async ({ page }) => {
     await page.goto(READER_URL);
