@@ -875,6 +875,16 @@ body {
   transition: opacity 0.6s ease;
 }
 
+/* Full-page OCR (scanned docs): subtler to avoid distraction during reading */
+.page-container.ocr-loading::before {
+  opacity: 0.45;
+}
+
+/* Image OCR: add dark shadow so the amber line is visible on white backgrounds */
+div.ocr-loading:not(.page-container)::before {
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.4);
+}
+
 /* Graceful fade-out when OCR completes */
 .ocr-loading.ocr-done::before {
   opacity: 0;

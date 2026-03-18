@@ -607,7 +607,7 @@ if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
       _zoomSettleTimer = setTimeout(() => {
         if (_zoomHintShown) return;
         _zoomHintShown = true;
-        showInfo('For best visual quality, try landscape mode.');
+        showInfo('For best visual quality, try landscape mode \u21BB');
       }, 500);
     }
   });
