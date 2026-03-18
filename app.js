@@ -82,10 +82,13 @@ const OPS_MAP = {
 };
 
 // How many pages around the visible area to pre-render.
-// Mobile: 1 page ahead only — iOS Safari kills tabs that exceed
-// its memory budget, and each pre-rendered page holds canvas
-// backing stores + PDF.js internal caches.
-const PRERENDER_MARGIN = window.matchMedia('(pointer: coarse)').matches ? 1 : 2;
+// Memory-constrained (iOS, budget Android ≤4GB): 1 page.
+// Other devices: 2 pages.
+const _memConstrainedEarly = (
+  window.matchMedia('(pointer: coarse)').matches &&
+  (/iPad|iPhone/.test(navigator.userAgent) || (navigator.deviceMemory && navigator.deviceMemory <= 4))
+);
+const PRERENDER_MARGIN = _memConstrainedEarly ? 1 : 2;
 
 // Minimum PDF.js render scale for Tesseract OCR.
 // PDF standard is 72 points/inch. At scale 3, a page is rendered
@@ -199,6 +202,8 @@ const BASELINE_RATIO = (() => {
 
 let pdfDoc = null;
 let currentScale = 0;
+// Original PDF bytes — kept for iOS document recreation (see resetPdfEngine).
+let _pdfBuffer = null;
 
 // Each page can be in one of these dark-mode states:
 //   'auto'  – use already-dark detection result
@@ -424,6 +429,8 @@ const exportProgressFill = document.querySelector('.export-progress-fill');
 const exportProgressText = document.querySelector('.export-progress-text');
 const exportCancelBtn = document.getElementById('export-cancel');
 const errorBanner = document.getElementById('error-banner');
+const infoBanner = document.getElementById('info-banner');
+const infoMessage = document.getElementById('info-message');
 const iosWarnEl = document.getElementById('ios-export-warn');
 const iosWarnText = document.getElementById('ios-export-warn-text');
 const iosWarnTry = document.getElementById('ios-export-try');
@@ -564,6 +571,39 @@ errorDismiss.addEventListener('click', () => {
   if (errorTimeout) clearTimeout(errorTimeout);
 });
 
+let infoTimeout = null;
+
+function showInfo(msg, duration = 6000) {
+  infoMessage.textContent = msg;
+  infoBanner.hidden = false;
+  if (infoTimeout) clearTimeout(infoTimeout);
+  if (duration > 0) {
+    infoTimeout = setTimeout(() => { infoBanner.hidden = true; }, duration);
+  }
+}
+
+// Dismiss info banner on tap (mobile)
+infoBanner.addEventListener('click', () => {
+  infoBanner.hidden = true;
+  if (infoTimeout) clearTimeout(infoTimeout);
+});
+
+// Pinch-to-zoom hint: on mobile, portrait pages are rendered at
+// a lower scale than landscape (fit-to-page vs fit-to-width).
+// When the user zooms in for the first time, the pixel density
+// becomes noticeable. Suggest landscape where pages render at
+// full width with more pixels per point. Shown once per session.
+let _zoomHintShown = false;
+if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    if (_zoomHintShown || !pdfDoc) return;
+    if (window.visualViewport.scale > 1.2) {
+      _zoomHintShown = true;
+      showInfo('For best visual quality, try landscape mode.');
+    }
+  });
+}
+
 // ============================================================
 // File Handling
 // ============================================================
@@ -593,7 +633,11 @@ async function loadPDF(data) {
     if (pdfDoc) pdfDoc.destroy();
     cleanup();
 
+    // Keep the original bytes for iOS document recreation.
+    // PDF.js may transfer the buffer, so we keep our own copy.
+    _pdfBuffer = data.slice(0);
     pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+    _isLargeDocConstrained = _isMemoryConstrained && pdfDoc.numPages > LARGE_DOC_THRESHOLD;
     pageDarkOverride.clear();
     pageAlreadyDark.clear();
     isScannedDocument = false;
@@ -607,6 +651,8 @@ async function loadPDF(data) {
     ocrQueue.forEach(j => { j.cancelled = true; });
     ocrQueue.length = 0;
     isScrollingFast = false;
+    rendersSinceReset = 0;
+    isResetPending = false;
 
     // Show the reader behind the drop zone, then animate the veil open.
     // The veil layers slide right while the reader renders underneath.
@@ -626,6 +672,7 @@ async function loadPDF(data) {
     // Center the first page in the viewport immediately (no animation)
     scrollToPage(1, true);
     updateCurrentPageFromScroll();
+
   } catch (err) {
     console.error('Failed to load PDF:', err);
     if (err?.name === 'PasswordException') {
@@ -1109,9 +1156,17 @@ document.addEventListener('selectionchange', () => {
   if (slot) cleanupOcrIndicators(slot);
 });
 
-// Listen for selection attempts on pages with pending OCR
-document.addEventListener('pointerdown', (e) => {
-  // Find the page container the user clicked on
+// Listen for selection attempts on pages with pending OCR.
+// On touch: require a long press (350ms hold without movement) to
+// distinguish "trying to select text" from "scrolling past".
+// On mouse/pen: trigger immediately (no ambiguity with scroll).
+let _ocrPressTimer = null;
+let _ocrPressStartX = 0;
+let _ocrPressStartY = 0;
+const OCR_PRESS_DELAY = 350; // ms — shorter than iOS native long press (500ms)
+const OCR_PRESS_MOVE_TOLERANCE = 10; // px — finger jitter allowance
+
+function triggerOcrIndicator(e) {
   const container = e.target.closest('.page-container');
   if (!container) return;
 
@@ -1119,20 +1174,57 @@ document.addEventListener('pointerdown', (e) => {
   const slot = pageSlots.get(pageNum);
   if (!slot || !slot.ocrInProgress) return;
 
-  // Calculate click position relative to the page container
   const rect = container.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
 
   if (isScannedDocument) {
-    // Entire page needs OCR — any click triggers the indicator
     showOcrLoading(slot, null);
   } else {
-    // Native PDF — only clicks on image regions trigger it
     const region = hitTestImageRegion(slot, x, y);
     if (region) {
       showOcrLoading(slot, region);
     }
+  }
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') {
+    // Touch: start long press timer
+    _ocrPressStartX = e.clientX;
+    _ocrPressStartY = e.clientY;
+    if (_ocrPressTimer) clearTimeout(_ocrPressTimer);
+    _ocrPressTimer = setTimeout(() => {
+      _ocrPressTimer = null;
+      triggerOcrIndicator(e);
+    }, OCR_PRESS_DELAY);
+  } else {
+    // Mouse/pen: immediate
+    triggerOcrIndicator(e);
+  }
+});
+
+document.addEventListener('pointermove', (e) => {
+  if (!_ocrPressTimer || e.pointerType !== 'touch') return;
+  const dx = e.clientX - _ocrPressStartX;
+  const dy = e.clientY - _ocrPressStartY;
+  if (dx * dx + dy * dy > OCR_PRESS_MOVE_TOLERANCE * OCR_PRESS_MOVE_TOLERANCE) {
+    clearTimeout(_ocrPressTimer);
+    _ocrPressTimer = null;
+  }
+}, { passive: true });
+
+document.addEventListener('pointerup', () => {
+  if (_ocrPressTimer) {
+    clearTimeout(_ocrPressTimer);
+    _ocrPressTimer = null;
+  }
+});
+
+document.addEventListener('pointercancel', () => {
+  if (_ocrPressTimer) {
+    clearTimeout(_ocrPressTimer);
+    _ocrPressTimer = null;
   }
 });
 
@@ -1370,7 +1462,7 @@ async function buildPageSlots() {
   const firstPage = await pdfDoc.getPage(1);
   const scale = calculateScale(firstPage);
   currentScale = scale;
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = getDpr();
 
   // Batch DOM insertion with DocumentFragment
   const fragment = document.createDocumentFragment();
@@ -1465,8 +1557,46 @@ let evictionObserver = null;
 // than the render margin so pages re-render before becoming visible.
 // Mobile: tighter margins to keep fewer pages in memory at once.
 const _isMobileDevice = window.matchMedia('(pointer: coarse)').matches;
-const RENDER_IO_MARGIN = _isMobileDevice ? '100%' : '200%';
-const EVICTION_MARGIN = _isMobileDevice ? '300%' : '600%';
+
+// iOS/iPadOS detection: WebKit is the only engine allowed on iOS.
+// Safari, Chrome iOS, Firefox iOS — all use WebKit under the hood.
+const _isIOS = _isMobileDevice && /iPad|iPhone/.test(navigator.userAgent);
+
+// Memory-constrained device: iOS (jetsam at ~300MB, no swap) or any
+// mobile device with ≤ 4GB RAM (budget Android tablets, older phones).
+// navigator.deviceMemory is Chrome 63+ (returns approximate GB).
+// When unavailable on a mobile device, assume constrained (safe default).
+const _deviceMemoryGB = navigator.deviceMemory || 0;
+const _isMemoryConstrained = _isIOS || (_isMobileDevice && (_deviceMemoryGB > 0 ? _deviceMemoryGB <= 4 : false));
+
+// Large documents on memory-constrained devices need even more
+// aggressive management. At 150+ pages, canvas backing stores plus
+// PDF.js worker state can exhaust the memory budget.
+const LARGE_DOC_THRESHOLD = 150;
+let _isLargeDocConstrained = false;
+
+function getDpr() {
+  const raw = window.devicePixelRatio || 1;
+  return _isLargeDocConstrained ? Math.min(raw, 2) : raw;
+}
+
+// Margins adapt based on device and document size.
+// iOS + large doc: ultra-tight margins to minimize pages in memory.
+// Mobile: moderate margins for smooth scrolling.
+// Desktop: generous margins for instant page transitions.
+function getRenderMargin() {
+  if (_isLargeDocConstrained) return '80%';
+  if (_isMemoryConstrained) return '100%';
+  if (_isMobileDevice) return '150%';
+  return '200%';
+}
+
+function getEvictionMargin() {
+  if (_isLargeDocConstrained) return '150%';
+  if (_isMemoryConstrained) return '300%';
+  if (_isMobileDevice) return '400%';
+  return '600%';
+}
 
 function setupIntersectionObserver() {
   if (scrollObserver) scrollObserver.disconnect();
@@ -1509,7 +1639,7 @@ function setupIntersectionObserver() {
     },
     {
       root: viewport,
-      rootMargin: RENDER_IO_MARGIN + ' 0px',
+      rootMargin: getRenderMargin() + ' 0px',
       threshold: 0,
     }
   );
@@ -1539,12 +1669,26 @@ function setupIntersectionObserver() {
           slot._renderTask = null;
         }
 
-        // Release canvas memory
-        slot.mainCanvas.width = 0;
-        slot.mainCanvas.height = 0;
-        slot.overlayCanvas.width = 0;
-        slot.overlayCanvas.height = 0;
+        // Release canvas memory. On iOS, zero the dimensions to free
+        // GPU backing stores (critical for jetsam). On desktop/Android,
+        // just clear the content — keeps the backing store allocated
+        // (avoids flash on re-render) and memory is not an issue.
+        if (_isMemoryConstrained) {
+          slot.mainCanvas.width = 0;
+          slot.mainCanvas.height = 0;
+          slot.overlayCanvas.width = 0;
+          slot.overlayCanvas.height = 0;
+        } else {
+          const mc = slot.mainCanvas;
+          const oc = slot.overlayCanvas;
+          if (mc.width > 0) mc.getContext('2d').clearRect(0, 0, mc.width, mc.height);
+          if (oc.width > 0) oc.getContext('2d').clearRect(0, 0, oc.width, oc.height);
+        }
         slot.overlayCanvas.classList.remove('overlay-visible');
+        // Remove dark mode filter so the CSS background (#1e1e1e) shows
+        // correctly as a dark placeholder — without this, invert(0.86)
+        // turns #1e1e1e into #c3c3c3 (light gray).
+        slot.mainCanvas.classList.remove('dark-active');
 
         // Clear text layers, link annotations, and OCR loading indicators
         slot.textLayer.innerHTML = '';
@@ -1553,8 +1697,11 @@ function setupIntersectionObserver() {
         slot.container.querySelectorAll('[data-ocr-loading]').forEach(el => el.remove());
         slot.container.classList.remove('ocr-loading', 'ocr-done');
 
-        // Release PDF.js internal caches for this page
-        pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
+        // Release PDF.js internal caches for this page.
+        // Only on memory-constrained devices. Guard against engine reset.
+        if (_isMemoryConstrained && pdfDoc && !isResetting) {
+          pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
+        }
 
         // Mark as unrendered so the render observer will redo it
         slot.rendered = false;
@@ -1566,7 +1713,7 @@ function setupIntersectionObserver() {
     },
     {
       root: viewport,
-      rootMargin: EVICTION_MARGIN + ' 0px',
+      rootMargin: getEvictionMargin() + ' 0px',
       threshold: 0,
     }
   );
@@ -1631,7 +1778,9 @@ viewport.addEventListener('scroll', () => {
 // Mobile: 1 concurrent render to stay within iOS Safari's memory budget.
 // Playwright: 1 to avoid Tesseract contention in headless Chromium.
 // Desktop: 3 for fast parallel rendering.
-let MAX_CONCURRENT_RENDERS = (_isMobileDevice || navigator.webdriver) ? 1 : 3;
+// Memory-constrained: 1 (iOS, budget Android). Other mobile: 2. Desktop: 3.
+// Playwright: 1 (avoid Tesseract contention in headless Chromium).
+let MAX_CONCURRENT_RENDERS = navigator.webdriver ? 1 : _isMemoryConstrained ? 1 : _isMobileDevice ? 2 : 3;
 
 function createOffscreenCanvas(w, h) {
   const c = document.createElement('canvas');
@@ -1675,6 +1824,108 @@ function returnCanvas(c) {
 const renderQueue = [];
 let activeRenders = 0;
 
+// ============================================================
+// iOS PDF Engine Reset (Compartment Seal)
+//
+// PDF.js runs a web worker that accumulates internal state:
+// parsed XRef tables, decoded font programs, stream decoder
+// caches, shared objects. page.cleanup() releases per-page
+// data; pdfDoc.cleanup() releases some shared resources. But
+// the worker thread retains structures that neither cleanup
+// method fully releases. After ~400 getPage() calls, this
+// accumulated state alone can reach 200-300MB — triggering
+// iOS Safari's jetsam kill (tab crash).
+//
+// The solution: periodically destroy the entire PDF.js instance
+// (main thread + worker thread) and recreate it from the
+// original ArrayBuffer. This is a full reset — zero residual
+// state, zero accumulation. The cost is ~200-400ms to
+// reinitialize the document, scheduled during idle time so the
+// user never notices.
+//
+// Pages already painted on canvas are unaffected — the pixels
+// live in the DOM, not in PDF.js. Only the next page the user
+// scrolls to will use the fresh instance.
+//
+// Non-iOS devices skip this entirely — Android Chrome and
+// desktop browsers have real swap/compression and don't need it.
+// ============================================================
+
+// Large iOS documents reset more aggressively (15) to keep the
+// worker thread's accumulated state well under the jetsam limit.
+// Normal mobile documents get a relaxed threshold (40) for
+// smoother scrolling and less CPU heat.
+function getEngineResetThreshold() {
+  if (_isLargeDocConstrained) return 15;
+  return 40;
+}
+let rendersSinceReset = 0;
+let isResetPending = false;
+let isResetting = false; // true during async destroy/recreate
+
+// Safari's requestIdleCallback support is incomplete — use rAF + setTimeout
+// as a reliable fallback that still defers to an idle moment.
+const scheduleIdle = typeof requestIdleCallback === 'function'
+  ? requestIdleCallback
+  : (fn) => requestAnimationFrame(() => setTimeout(fn, 0));
+
+async function resetPdfEngine() {
+  if (!pdfDoc || !_pdfBuffer || isResetting) return;
+
+  isResetting = true;
+  const gen = ++globalGeneration;
+
+  // Cancel all in-flight and queued work — they hold page
+  // references from the old instance that will become invalid.
+  renderQueue.length = 0;
+  ocrQueue.forEach(j => { j.cancelled = true; });
+  ocrQueue.length = 0;
+
+  try {
+    // Destroy the old instance (main thread + worker thread).
+    // This releases ALL accumulated state.
+    await pdfDoc.destroy();
+
+    // Recreate from the original buffer. PDF.js may transfer
+    // ArrayBuffers internally, so we always pass a fresh copy.
+    pdfDoc = await pdfjsLib.getDocument({
+      data: _pdfBuffer.slice(0),
+    }).promise;
+
+    rendersSinceReset = 0;
+    isResetPending = false;
+
+    // Stale check: if a new document was loaded during the await,
+    // globalGeneration will have changed — abandon this reset.
+    if (globalGeneration !== gen) return;
+
+    // Re-trigger rendering for pages currently near the viewport.
+    // Their canvases still have pixels — this is a no-op for
+    // slot.rendered === true pages. Only evicted-then-revisited
+    // pages will actually re-render.
+    flushRenderQueue();
+  } catch (err) {
+    // If destroy/recreate fails (e.g., corrupt buffer), log but
+    // don't crash — the old pdfDoc is already destroyed, so we
+    // can't recover. The user will need to re-open the file.
+    console.warn('PDF engine reset failed:', err);
+  } finally {
+    isResetting = false;
+  }
+}
+
+function maybeScheduleEngineReset() {
+  if (!_isMemoryConstrained || !isResetPending || !pdfDoc) return;
+  if (activeRenders > 0 || isResetting) return;
+
+  scheduleIdle(() => {
+    // Re-check after yielding to the event loop — a render
+    // may have started, or a new document may have been loaded.
+    if (!pdfDoc || activeRenders > 0 || isResetting || !isResetPending) return;
+    resetPdfEngine();
+  });
+}
+
 function enqueueRender(pageNum) {
   if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
   const slot = pageSlots.get(pageNum);
@@ -1688,7 +1939,7 @@ function enqueueRender(pageNum) {
 }
 
 function processRenderQueue() {
-  if (isScrollingFast) return; // wait for scroll to settle
+  if (isScrollingFast || isResetting) return; // wait for scroll to settle / engine reset
 
   while (activeRenders < MAX_CONCURRENT_RENDERS && renderQueue.length > 0) {
     // Sort by distance from current visible page (closest first)
@@ -1704,6 +1955,22 @@ function processRenderQueue() {
     activeRenders++;
     renderPageIfNeeded(pageNum).finally(() => {
       activeRenders--;
+
+      // Track memory pressure from accumulated renders.
+      // On iOS, trigger a full engine reset every N pages to
+      // prevent the PDF.js worker from accumulating fatal levels
+      // of cached state (fonts, XRef, stream decoders).
+      rendersSinceReset++;
+      if (rendersSinceReset >= getEngineResetThreshold()) {
+        isResetPending = true;
+      }
+
+      // If queue is empty and a reset is pending, this is the
+      // quiet moment — schedule it before picking up more work.
+      if (activeRenders === 0 && isResetPending) {
+        maybeScheduleEngineReset();
+      }
+
       processRenderQueue(); // pick up next in queue
     });
   }
@@ -1737,7 +2004,7 @@ async function renderPageIfNeeded(pageNum) {
     const page = await pdfDoc.getPage(pageNum);
     if (globalGeneration !== myGen) return;
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = getDpr();
     const scaledViewport = page.getViewport({ scale: currentScale * dpr });
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
@@ -1778,13 +2045,22 @@ async function renderPageIfNeeded(pageNum) {
       ? []
       : extractImageRegions(opList, scaledViewport.transform);
 
-    // --- Paint main canvas ---
+    // --- Compose page behind placeholder, then reveal ---
+    // Hide the canvas during composition so the user sees the
+    // dark placeholder (#1e1e1e) until everything is ready:
+    // content painted + dark mode filter + overlay. This eliminates
+    // the light→dark flash on page transitions. The visibility
+    // toggle is a compositing-only operation (GPU flag, no reflow).
+    slot.mainCanvas.style.visibility = 'hidden';
+    slot.overlayCanvas.style.visibility = 'hidden';
+
+    // Paint main canvas
     slot.mainCanvas.width = w;
     slot.mainCanvas.height = h;
     const mainCtx = slot.mainCanvas.getContext('2d');
     mainCtx.drawImage(renderCanvas, 0, 0);
 
-    // --- Paint overlay canvas ---
+    // Paint overlay canvas
     slot.overlayCanvas.width = w;
     slot.overlayCanvas.height = h;
     if (regions.length > 0) {
@@ -1907,12 +2183,15 @@ async function renderPageIfNeeded(pageNum) {
     slot._renderTask = null;
     applyDarkModeToPage(pageNum);
 
-    // Release PDF.js internal caches (decompressed images, fonts, operator
-    // list). On iOS Safari this is critical — without it, each rendered page
-    // keeps ~30-80MB of decompressed data in memory, and 4-5 pages trigger
-    // a jetsam kill (tab crash). The page object remains valid — PDF.js will
-    // transparently reload data from the stream if the page is re-rendered.
-    page.cleanup();
+    // Everything is ready — reveal both canvases in one compositing frame.
+    // The user transitions directly from placeholder to final page.
+    slot.mainCanvas.style.visibility = '';
+    slot.overlayCanvas.style.visibility = '';
+
+    // On iOS, release PDF.js internal caches (decompressed images, fonts,
+    // operator list). Each rendered page keeps ~30-80MB; 4-5 pages trigger
+    // a jetsam kill. Desktop/Android skip this — they benefit from the cache.
+    if (_isMemoryConstrained) page.cleanup();
   } catch (err) {
     if (globalGeneration !== myGen) return;
     // RenderTask.cancel() throws — don't log that as an error
@@ -2331,9 +2610,14 @@ pageInfo.addEventListener('click', () => {
   }
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    // Android virtual keyboards may send keyCode 13 without key='Enter',
+    // or fire 'Go'/'Done' as an unidentified key. Check both.
+    if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); commit(); }
     if (e.key === 'Escape') { e.preventDefault(); restore(); }
   });
+
+  // Some Android IMEs fire 'change' instead of keydown on submit.
+  input.addEventListener('change', () => { commit(); });
 
   // On mobile, blur fires when the keyboard dismisses.
   // Commit if the value changed, otherwise just restore.
@@ -2352,8 +2636,10 @@ function scrollToPage(pageNum, instant = false) {
   const slot = pageSlots.get(clamped);
   if (!slot) return;
 
+  // Memory-constrained devices: use instant scroll to avoid
+  // janky smooth animation that gets interrupted on slow GPUs.
   slot.container.scrollIntoView({
-    behavior: instant ? 'instant' : 'smooth',
+    behavior: (instant || _isMemoryConstrained) ? 'instant' : 'smooth',
     block: 'center',
   });
 }
@@ -2971,7 +3257,7 @@ document.addEventListener('keydown', (e) => {
   const vertLayer = slot.verticalOcrLayer;
   if (vertLayer.children.length > 0) return; // already done
 
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = getDpr();
   const myGen = globalGeneration;
   for (const region of slot.imageRegionsRaw) {
     ocrImageVertical(slot.mainCanvas, vertLayer, region, dpr, myGen);
@@ -3077,11 +3363,19 @@ viewport.addEventListener('scroll', () => {
 }, { passive: true });
 
 // --- Resize: rebuild all pages at new scale ---
+// Only rebuild when the WIDTH changes. Height-only changes happen
+// constantly on mobile (Android chrome UI hide/show, iOS address
+// bar, virtual keyboard open/close) and don't affect the page
+// scale (which is determined by width). Rebuilding on height-only
+// changes causes scroll snap, DOM churn, and kills the page input.
 let resizeTimer;
+let _lastResizeWidth = window.innerWidth;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(async () => {
     if (!pdfDoc) return;
+    if (window.innerWidth === _lastResizeWidth) return; // height-only change
+    _lastResizeWidth = window.innerWidth;
     const pageToRestore = currentVisiblePage;
     globalGeneration++;
     // Cancel pending render and OCR — scale changed, coordinates are stale
@@ -3091,6 +3385,8 @@ window.addEventListener('resize', () => {
     ocrQueue.forEach(j => { j.cancelled = true; });
     ocrQueue.length = 0;
     isScrollingFast = false;
+    rendersSinceReset = 0;
+    isResetPending = false;
     await buildPageSlots();
     setupIntersectionObserver();
     // Restore scroll position to the same page

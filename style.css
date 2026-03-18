@@ -62,8 +62,12 @@ body {
   #drop-zone { cursor: default; }
 }
 
-/* Drag-over: dashed border — Jakob's Law.
-   Users universally recognize this as "drop here". */
+/* Drag-over: the top veil layer lightens subtly to acknowledge
+   the drag, and a dashed border confirms "drop here". */
+#drop-zone.drag-over .veil-layer-1 {
+  background: #161210;
+}
+
 #drop-zone.drag-over::after {
   content: '';
   position: absolute;
@@ -71,6 +75,7 @@ body {
   border: 2px dashed rgba(212, 163, 115, 0.4);
   border-radius: 16px;
   pointer-events: none;
+  z-index: 4;
   animation: drag-border-fade-in 0.2s ease;
 }
 
@@ -96,7 +101,7 @@ body {
 .veil-layer-1 {
   background: #0a0806;
   z-index: 3;
-  transition: transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background 0.3s ease, transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .veil-layer-2 {
@@ -513,13 +518,13 @@ body {
   border-radius: 2px;
   line-height: 0;
   flex-shrink: 0;
-  background: var(--bg-surface);
+  background: #1e1e1e;
 }
 
 .page-canvas {
   display: block;
   border-radius: 2px;
-  background: var(--bg-surface);
+  background: #1e1e1e;
 }
 
 .page-overlay {
@@ -627,7 +632,8 @@ body {
    Error Banner
    ============================================================ */
 
-#error-banner {
+#error-banner,
+#info-banner {
   position: fixed;
   bottom: 24px;
   left: 50%;
@@ -636,18 +642,35 @@ body {
   align-items: center;
   gap: 12px;
   padding: 10px 20px;
-  background: rgba(42, 26, 26, 0.9);
   backdrop-filter: blur(12px);
-  border: 1px solid rgba(200, 100, 100, 0.15);
   border-radius: 50px;
   z-index: 60;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
   max-width: 90vw;
 }
 
+#error-banner {
+  background: rgba(42, 26, 26, 0.9);
+  border: 1px solid rgba(200, 100, 100, 0.15);
+}
+
+#info-banner {
+  background: rgba(26, 32, 42, 0.9);
+  border: 1px solid rgba(115, 163, 212, 0.15);
+  transition: opacity 0.4s ease;
+}
+
 #error-message {
   font-size: 13px;
   color: #e8a0a0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#info-message {
+  font-size: 13px;
+  color: #a0c8e8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
