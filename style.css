@@ -868,7 +868,7 @@ body {
     linear-gradient(#fff 0 0);
   mask-composite: exclude;
   padding: 2px;
-  animation: ocr-sweep 1.8s linear infinite;
+  animation: ocr-sweep 3s linear infinite;
   z-index: 12;
   pointer-events: none;
   opacity: 1;
@@ -880,9 +880,10 @@ body {
   opacity: 0.45;
 }
 
-/* Image OCR: add dark shadow so the amber line is visible on white backgrounds */
+/* Image OCR: thicker line + dark shadow for visibility on white backgrounds */
 div.ocr-loading:not(.page-container)::before {
-  box-shadow: 0 0 3px rgba(0, 0, 0, 0.4);
+  padding: 3px;
+  box-shadow: 0 0 5px rgba(0, 0, 0, 0.5), inset 0 0 5px rgba(0, 0, 0, 0.15);
 }
 
 /* Graceful fade-out when OCR completes */

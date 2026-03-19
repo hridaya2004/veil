@@ -137,7 +137,7 @@ h1 {
   margin-top: 14px; display: flex; flex-direction: column;
   align-items: center; gap: 3px;
 }
-.hero-meta p { font-size: 11px; color: #6b5d50; margin: 0; }
+.hero-meta p { font-size: 11px; color: #8a7a6a; margin: 0; }
 
 /* ═══ BEFORE/AFTER ═══ */
 .ba-wrap { margin-top: 40px; width: 100%; max-width: 380px; }
@@ -366,11 +366,11 @@ h1 {
   font-size: 11px; font-weight: 600; color: #D4A373;
   letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 16px;
 }
-.ocr-section h3 {
+.ocr-section h2 {
   font-size: 20px; font-weight: 700; color: #f5efe2;
   margin: 0 0 12px; letter-spacing: -0.01em; line-height: 1.2;
 }
-@media (min-width: 700px) { .ocr-section h3 { font-size: 24px; } }
+@media (min-width: 700px) { .ocr-section h2 { font-size: 24px; } }
 .ocr-desc { font-size: 13px; color: #9a8878; line-height: 1.65; margin: 0 0 20px; max-width: 520px; }
 @media (min-width: 700px) { .ocr-desc { font-size: 15px; } }
 .ocr-highlight { font-size: 13px; color: #c4b5a3; line-height: 1.65; margin: 0; max-width: 520px; }
@@ -389,11 +389,11 @@ h1 {
 }
 @media (min-width: 700px) { .workflow-section { padding: 20px 24px 60px; } }
 .workflow-header { text-align: center; margin-bottom: 32px; }
-.workflow-header h3 {
+.workflow-header h2 {
   font-size: 20px; font-weight: 700; color: #f5efe2;
   margin: 0 0 12px; letter-spacing: -0.01em;
 }
-@media (min-width: 700px) { .workflow-header h3 { font-size: 24px; } }
+@media (min-width: 700px) { .workflow-header h2 { font-size: 24px; } }
 .workflow-header p {
   font-size: 13px; color: #9a8878; line-height: 1.65; margin: 0 auto; max-width: 480px;
 }
