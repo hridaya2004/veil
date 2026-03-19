@@ -1,0 +1,18 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- V above the wave: muted, with depth layers -->
+<mask id="vl-above" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="-12" y="-11" width="56" height="30">
+<path d="M-11.9551 -10.3901H43.955V7.5417C34.6366 15.4616 25.3183 17.2816 15.9999 13.0017C6.6816 5.7217 -2.63674 7.5417 -11.9551 18.4616V-10.3901Z" fill="white"/>
+</mask>
+<g mask="url(#vl-above)">
+<path d="M20.8775 29.6899H12.0367L3.39683 3.31831H10.7307L13.9957 13.9674L16.4571 23.5114H16.8589L19.3203 13.9674L22.4849 3.31831H29.5173L20.8775 29.6899Z" fill="#595045" fill-opacity="0.1"/>
+<path d="M20.1944 28.7476H12.1224L4.23387 4.66912H10.93L13.9111 14.3922L16.1584 23.1063H16.5253L18.7727 14.3922L21.6621 4.66912H28.083L20.1944 28.7476Z" fill="#595045" fill-opacity="0.2"/>
+<path d="M19.9843 27.8052H12.6811L5.5438 6.01992H11.6022L14.2994 14.817L16.3327 22.7012H16.6647L18.6979 14.817L21.3122 6.01992H27.1216L19.9843 27.8052Z" fill="#5A4E43"/>
+</g>
+<!-- V below the wave: amber -->
+<mask id="vl-below" style="mask-type:luminance" maskUnits="userSpaceOnUse" x="-12" y="5" width="56" height="41">
+<path d="M-11.9551 18.4614C-2.63674 7.5415 6.6816 5.7215 15.9999 13.0015C25.3183 17.2814 34.6366 15.4614 43.955 7.5415V45.5197H-11.9551V18.4614Z" fill="white"/>
+</mask>
+<g mask="url(#vl-below)">
+<path d="M19.9843 27.8052H12.6811L5.5438 6.01992H11.6022L14.2994 14.817L16.3327 22.7012H16.6647L18.6979 14.817L21.3122 6.01992H27.1216L19.9843 27.8052Z" fill="#D4A373"/>
+</g>
+</svg>

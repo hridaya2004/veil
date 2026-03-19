@@ -8,8 +8,9 @@
   <meta name="color-scheme" content="dark">
   <meta name="mobile-web-app-capable" content="yes">
   <link rel="manifest" href="manifest.json">
-  <link rel="icon" href="icon-192.png" type="image/png">
-  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="icon" type="image/svg+xml" href="icon/favicon.svg">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon/manifest-icon.png">
+  <link rel="apple-touch-icon" href="icon/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -24,7 +25,6 @@
     <a href="index.html" class="drop-about">What is veil?</a>
 
     <div class="drop-hero">
-      <!-- Double-layer wordmark: ghost v behind the real v -->
       <div class="drop-wordmark" aria-label="veil">
         <span class="drop-v-ghost" aria-hidden="true">v</span>
         <span class="drop-v">v</span><span class="drop-eil">eil</span>
@@ -45,7 +45,7 @@
   <!-- Reader -->
   <div id="reader" hidden>
     <header id="toolbar">
-      <a href="reader.html" class="toolbar-logo" title="Open another file">
+      <a href="#" class="toolbar-logo" title="Open another file" id="btn-home">
         <span class="nav-wordmark" aria-label="veil">
           <span class="nav-v-ghost" aria-hidden="true">v</span>
           <span class="nav-v">v</span><span class="nav-eil">eil</span>

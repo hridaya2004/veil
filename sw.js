@@ -26,8 +26,10 @@ const PRECACHE_URLS = [
   '/landing.css',
   '/landing.js',
   '/manifest.json',
-  '/icon-192.png',
-  '/icon-512.png',
+  '/icon/favicon.svg',
+  '/icon/manifest-icon.png',
+  '/icon/manifest.png',
+  '/icon/apple-touch-icon.png',
 ];
 
 // CDN resources: cached on first use (cache-first strategy).

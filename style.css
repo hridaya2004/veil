@@ -181,11 +181,11 @@ body {
   .drop-wordmark { font-size: 96px; }
 }
 
+
 .drop-v {
   position: relative;
   z-index: 1;
 }
-
 .drop-v-ghost {
   position: absolute;
   left: 0;
@@ -196,7 +196,6 @@ body {
   pointer-events: none;
   filter: blur(1.5px);
 }
-
 .drop-eil {
   position: relative;
   z-index: 1;
@@ -313,6 +312,7 @@ body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
+  touch-action: manipulation;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -421,8 +421,10 @@ body {
   border-radius: 4px;
   transition: background var(--transition);
 }
-#page-info:hover {
-  background: rgba(212, 163, 115, 0.08);
+@media (hover: hover) {
+  #page-info:hover {
+    background: rgba(212, 163, 115, 0.08);
+  }
 }
 @media (min-width: 700px) {
   #page-info { font-size: 12px; min-width: 56px; }
@@ -463,9 +465,11 @@ body {
   #toolbar button { width: 32px; height: 32px; }
 }
 
-#toolbar button:hover:not(:disabled) {
-  background: rgba(212, 163, 115, 0.08);
-  color: var(--text-primary);
+@media (hover: hover) {
+  #toolbar button:hover:not(:disabled) {
+    background: rgba(212, 163, 115, 0.08);
+    color: var(--text-primary);
+  }
 }
 
 #toolbar button:active:not(:disabled) {
@@ -477,12 +481,15 @@ body {
   cursor: default;
 }
 
+
 #toolbar button.toggle-active {
   color: var(--accent);
 }
 
-#toolbar button.toggle-active:hover {
-  color: var(--accent-hover);
+@media (hover: hover) {
+  #toolbar button.toggle-active:hover {
+    color: var(--accent-hover);
+  }
 }
 
 /* ============================================================

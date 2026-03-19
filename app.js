@@ -222,8 +222,10 @@ const pageAlreadyDark = new Map();
 const pageSlots = new Map(); // Map<pageNum, poolSlot>
 const pageRenderState = new Map(); // Map<pageNum, { rendered, rendering, ... }>
 let pageGeometry = []; // [{cssWidth, cssHeight, offsetTop}] indexed by pageNum (1-based, index 0 unused)
-const POOL_SIZE = 7;
-const VIRTUAL_BUFFER = 2; // pages above/below viewport to pre-assign
+// Desktop: generous pool for fluid scrolling (RAM is abundant).
+// Mobile: tight pool to minimize canvas context memory pressure.
+const POOL_SIZE = _memConstrainedEarly ? 5 : window.matchMedia('(pointer: fine)').matches ? 15 : 7;
+const VIRTUAL_BUFFER = _memConstrainedEarly ? 1 : window.matchMedia('(pointer: fine)').matches ? 5 : 2;
 const PAGE_GAP = 40; // px between pages (matches CSS gap)
 const VIEWPORT_PADDING_TOP = 64; // space for floating toolbar
 
@@ -421,6 +423,7 @@ let originalFileName = 'document';
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const readerEl = document.getElementById('reader');
+const btnHome = document.getElementById('btn-home');
 const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
 const btnToggle = document.getElementById('btn-toggle');
@@ -446,6 +449,17 @@ const iosWarnCancel = document.getElementById('ios-export-cancel');
 // the device, not the browser engine.
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// Detect true mobile OS (phones and tablets, not 2-in-1 laptops).
+// Surface Pro / Chromebook with touch pass through — they have
+// desktop-class RAM and browser capabilities for export.
+const isMobileOS = isIOS || /Android|HarmonyOS|Mobile|Opera Mini/i.test(navigator.userAgent);
+
+// Hide export on mobile — browser sandbox memory limits make
+// Tesseract OCR + PDF generation crash on documents over ~50 pages.
+if (isMobileOS) {
+  btnExport.style.display = 'none';
+}
+
 const errorMessage = document.getElementById('error-message');
 const errorDismiss = document.getElementById('error-dismiss');
 const fileNameEl = document.getElementById('file-name');
@@ -594,21 +608,22 @@ infoBanner.addEventListener('click', () => {
 });
 
 // Pinch-to-zoom hint: on mobile, portrait pages are rendered at
-// a lower scale than landscape. When the user zooms in, suggest
-// landscape for better quality. Shown once per session, after the
-// zoom gesture settles (500ms debounce) so the banner is visible.
+// a lower scale than landscape. When the user zooms in and then
+// back out, suggest landscape. Shown once per session, triggered
+// on zoom-out — the moment the user realizes the quality isn't
+// enough and returns to normal view.
 let _zoomHintShown = false;
-let _zoomSettleTimer = null;
+let _hasZoomedIn = false;
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
     if (_zoomHintShown || !pdfDoc) return;
-    if (window.visualViewport.scale > 1.2) {
-      clearTimeout(_zoomSettleTimer);
-      _zoomSettleTimer = setTimeout(() => {
-        if (_zoomHintShown) return;
-        _zoomHintShown = true;
-        showInfo('For best visual quality, try landscape mode.');
-      }, 500);
+    const scale = window.visualViewport.scale;
+    if (scale > 1.2) {
+      _hasZoomedIn = true;
+    } else if (_hasZoomedIn && scale < 1.1) {
+      _hasZoomedIn = false;
+      _zoomHintShown = true;
+      showInfo('For best visual quality, try landscape mode.');
     }
   });
 }
@@ -686,11 +701,23 @@ async function clearSession() {
   } catch (_) {}
   localStorage.removeItem('veil-filename');
   localStorage.removeItem('veil-page');
+  localStorage.removeItem('veil-dark-overrides');
 }
 
 function savePagePosition() {
   if (!pdfDoc) return;
   localStorage.setItem('veil-page', String(currentVisiblePage));
+
+  // Persist dark mode overrides (pages manually toggled by the user)
+  const overrides = {};
+  for (const [pageNum, mode] of pageDarkOverride) {
+    if (mode !== 'auto') overrides[pageNum] = mode;
+  }
+  if (Object.keys(overrides).length > 0) {
+    localStorage.setItem('veil-dark-overrides', JSON.stringify(overrides));
+  } else {
+    localStorage.removeItem('veil-dark-overrides');
+  }
 }
 
 // Save page position periodically during reading
@@ -703,20 +730,26 @@ viewport.addEventListener('scroll', () => {
 
 async function persistFile(file, arrayBuffer) {
   const filename = file.name;
-  localStorage.setItem('veil-filename', filename);
-  localStorage.setItem('veil-page', '1');
 
   if (_hasFileSystemAccess && file._handle) {
-    // Desktop: save the lightweight file handle
+    // Desktop: save the lightweight file handle (~30 bytes)
+    localStorage.setItem('veil-filename', filename);
+    localStorage.setItem('veil-page', '1');
     await saveSession({ type: 'handle', handle: file._handle, filename });
   } else if (arrayBuffer.byteLength <= SESSION_MAX_SIZE) {
     // Mobile: save the full ArrayBuffer (LRU 1 slot)
+    localStorage.setItem('veil-filename', filename);
+    localStorage.setItem('veil-page', '1');
     await saveSession({ type: 'buffer', buffer: arrayBuffer, filename });
+  } else {
+    // File too large to persist — clear any stale session so there's
+    // no mismatch between localStorage name and IndexedDB content.
+    await clearSession();
+    showInfo('This file is too large to save for offline reading.');
   }
-  // Files > 120MB: not saved (user will see drop zone on next visit)
 }
 
-async function restoreSession() {
+async function restoreSession(forceButton = false) {
   const loader = document.getElementById('app-loader');
   const savedFilename = localStorage.getItem('veil-filename');
   const savedPage = parseInt(localStorage.getItem('veil-page'), 10) || 1;
@@ -756,7 +789,25 @@ async function restoreSession() {
       });
       return false; // drop zone stays visible (with resume button)
     } else if (sessionData.type === 'buffer') {
-      // Mobile IndexedDB: no permission needed — auto-restore.
+      if (forceButton) {
+        // User explicitly returned to drop zone — show resume button
+        showResumeButton(savedFilename, async () => {
+          try {
+            if (loader) loader.hidden = false;
+            originalFileName = savedFilename.replace(/\.pdf$/i, '');
+            if (fileNameEl) fileNameEl.textContent = savedFilename;
+            document.title = `veil - ${savedFilename}`;
+            await loadPDF(new Uint8Array(sessionData.buffer), savedPage);
+            if (loader) loader.hidden = true;
+          } catch (err) {
+            if (loader) loader.hidden = true;
+            clearSession();
+            hideResumeButton();
+          }
+        });
+        return false;
+      }
+      // Natural reopen — auto-restore without click
       if (loader) loader.hidden = false;
       originalFileName = savedFilename.replace(/\.pdf$/i, '');
       if (fileNameEl) fileNameEl.textContent = savedFilename;
@@ -870,7 +921,22 @@ async function loadPDF(data, resumePage = 1) {
     isScannedDocument = await detectScannedDocument();
 
     await buildPageSlots();
+    // Wait one frame for the browser to reflow the new spacer/pool DOM.
+    // Without this, reconcileContainers() may see stale viewport dimensions
+    // (especially after cleanup → rebuild when returning from reader).
+    await new Promise(r => requestAnimationFrame(r));
     // Scroll to the target page (page 1 for new files, saved page for resume)
+    // Restore dark mode overrides from previous session
+    const savedOverrides = localStorage.getItem('veil-dark-overrides');
+    if (savedOverrides) {
+      try {
+        const overrides = JSON.parse(savedOverrides);
+        for (const [pageNum, mode] of Object.entries(overrides)) {
+          pageDarkOverride.set(parseInt(pageNum, 10), mode);
+        }
+      } catch (_) {}
+    }
+
     scrollToPage(resumePage, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
@@ -1299,6 +1365,11 @@ function showOcrLoading(slot, region) {
   const pageNum = slot.assignedPage;
   const state = pageNum != null ? pageRenderState.get(pageNum) : null;
   if (!state || !state.ocrInProgress) return;
+
+  // Don't show the indicator if OCR started recently (< 500ms ago).
+  // When Tesseract resources are SW-cached, OCR completes in 1-2s.
+  // Flashing the indicator for sub-second OCR is distracting.
+  if (state._ocrStartTime && (Date.now() - state._ocrStartTime) < 500) return;
 
   if (isScannedDocument) {
     if (!slot.element.classList.contains('ocr-loading')) {
@@ -2309,6 +2380,7 @@ async function renderPageIfNeeded(pageNum) {
         );
       } else {
         state.ocrInProgress = true;
+        state._ocrStartTime = Date.now();
         const effectiveScale = currentScale * dpr;
 
         enqueueOcrJob({
@@ -2384,6 +2456,7 @@ async function renderPageIfNeeded(pageNum) {
         const autoOcr = candidates.slice(0, OCR_IMAGE_BUDGET);
         if (autoOcr.length > 0) {
           state.ocrInProgress = true;
+          state._ocrStartTime = Date.now();
 
           enqueueOcrJob({
             id: `img-${pageNum}`,
@@ -2779,6 +2852,8 @@ function toggleDarkMode() {
 
   applyDarkModeToPage(pageNum);
   updateToggleButton();
+  // Persist immediately so the override survives app close
+  savePagePosition();
 }
 
 // ============================================================
@@ -3420,7 +3495,9 @@ async function exportDarkPdf() {
       await embedLinkAnnotations(outPdf, outPage, annotations);
     }
 
-    // --- Save and trigger download ---
+    // --- Stamp metadata and save ---
+    outPdf.setProducer('veil (https://veil.simoneamico.com)');
+    outPdf.setCreator('veil');
     let pdfBytes = await outPdf.save();
     hideExportProgress();
 
@@ -3577,8 +3654,44 @@ fileInput.addEventListener('change', () => {
 });
 
 // --- Toolbar ---
-btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1));
-btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1));
+// "veil" logo: return to drop zone without reloading the page.
+// Session is preserved — the resume button appears so the user
+// can continue reading or open a new file.
+btnHome.addEventListener('click', (e) => {
+  e.preventDefault();
+  if (!pdfDoc) return;
+
+  // Save current page position before leaving
+  savePagePosition();
+
+  // Stop all rendering and OCR
+  globalGeneration++;
+  renderQueue.length = 0;
+  ocrQueue.forEach(j => { j.cancelled = true; });
+  ocrQueue.length = 0;
+
+  // Destroy PDF.js instance to free memory
+  if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
+  _pdfBuffer = null;
+  cleanup();
+
+  // Hide reader, show drop zone with resume button
+  readerEl.hidden = true;
+  dropZone.hidden = false;
+  dropZone.classList.remove('veil-opening');
+  document.title = 'veil';
+
+  // Show resume button if there's a saved session.
+  // Force button mode (no auto-load) — the user explicitly chose
+  // to leave the reader, so they should choose to resume.
+  const savedFilename = localStorage.getItem('veil-filename');
+  if (savedFilename) {
+    restoreSession(true);
+  }
+});
+
+btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1, true));
+btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1, true));
 btnToggle.addEventListener('click', toggleDarkMode);
 btnExport.addEventListener('click', exportDarkPdf);
 exportCancelBtn.addEventListener('click', () => {
@@ -3596,8 +3709,8 @@ exportCancelBtn.addEventListener('click', () => {
 // --- Keyboard ---
 document.addEventListener('keydown', (e) => {
   if (!pdfDoc) return;
-  if (e.key === 'ArrowLeft') scrollToPage(currentVisiblePage - 1);
-  else if (e.key === 'ArrowRight') scrollToPage(currentVisiblePage + 1);
+  if (e.key === 'ArrowLeft') scrollToPage(currentVisiblePage - 1, true);
+  else if (e.key === 'ArrowRight') scrollToPage(currentVisiblePage + 1, true);
   else if (e.key === 'd') toggleDarkMode();
 });
 
@@ -3613,6 +3726,35 @@ viewport.addEventListener('scroll', () => {
   });
 }, { passive: true });
 
+let _lastResizeWidth = window.innerWidth;
+
+// --- iOS Zoom Rotation Fix ---
+// When the user zooms in portrait and rotates to landscape (or vice
+// versa), Safari keeps its internal zoom level from the previous
+// orientation. The layout recalculates for the new width, but Safari
+// magnifies it with the stale zoom factor — breaking the layout
+// completely (pages off-screen, navbar inaccessible).
+//
+// Fix: on orientation change, temporarily inject maximum-scale=1 into
+// the viewport meta tag, forcing Safari to reset its zoom to 1x.
+// After 300ms (during the native rotation animation), restore the
+// original value to allow zooming again. On Android this is a no-op
+// since Chrome resets zoom correctly on rotation.
+if (/iPad|iPhone/.test(navigator.userAgent)) {
+  const vpMeta = document.querySelector('meta[name="viewport"]');
+  if (vpMeta) {
+    const originalContent = vpMeta.getAttribute('content');
+    window.addEventListener('resize', () => {
+      // Only trigger on width changes (rotation), not height (keyboard/chrome UI)
+      if (window.innerWidth === _lastResizeWidth) return;
+      vpMeta.setAttribute('content', originalContent + ', maximum-scale=1');
+      setTimeout(() => {
+        vpMeta.setAttribute('content', originalContent);
+      }, 350);
+    });
+  }
+}
+
 // --- Resize: rebuild all pages at new scale ---
 // Only rebuild when the WIDTH changes. Height-only changes happen
 // constantly on mobile (Android chrome UI hide/show, iOS address
@@ -3620,7 +3762,6 @@ viewport.addEventListener('scroll', () => {
 // scale (which is determined by width). Rebuilding on height-only
 // changes causes scroll snap, DOM churn, and kills the page input.
 let resizeTimer;
-let _lastResizeWidth = window.innerWidth;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(async () => {
