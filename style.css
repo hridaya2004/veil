@@ -242,6 +242,36 @@ body {
   .drop-browse-btn { display: none; }
 }
 
+.drop-resume-btn {
+  display: block;
+  margin-top: 28px;
+  padding: 10px 24px;
+  border-radius: 50px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid rgba(212, 163, 115, 0.3);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+.drop-resume-btn:hover {
+  background: rgba(212, 163, 115, 0.08);
+  border-color: rgba(212, 163, 115, 0.5);
+}
+.drop-resume-btn:active {
+  background: rgba(212, 163, 115, 0.15);
+}
+.drop-resume-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* --- Hint at bottom (desktop only) --- */
 
 .drop-hint {

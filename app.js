@@ -725,32 +725,38 @@ async function restoreSession() {
 
   const sessionData = await loadSession();
   if (!sessionData) {
-    // IndexedDB was cleared (eviction) but localStorage remains
     clearSession();
     return false;
   }
 
   try {
     if (sessionData.type === 'handle') {
-      // Desktop: request permission and read from original file
-      const handle = sessionData.handle;
-      const permission = await handle.requestPermission({ mode: 'read' });
-      if (permission !== 'granted') {
-        clearSession();
-        return false;
-      }
-      const file = await handle.getFile();
-      const buffer = await file.arrayBuffer();
-      // Show loader while loading
-      if (loader) loader.hidden = false;
-      originalFileName = savedFilename.replace(/\.pdf$/i, '');
-      if (fileNameEl) fileNameEl.textContent = savedFilename;
-      document.title = `veil - ${savedFilename}`;
-      await loadPDF(new Uint8Array(buffer), savedPage);
-      if (loader) loader.hidden = true;
-      return true;
+      // Desktop File System Access API: requestPermission() requires
+      // a user gesture (Transient User Activation). We cannot call it
+      // at page load — Chrome silently denies it. Instead, show a
+      // resume button on the drop zone. The user clicks once, the
+      // browser approves, and the file loads from disk.
+      showResumeButton(savedFilename, async () => {
+        try {
+          const permission = await sessionData.handle.requestPermission({ mode: 'read' });
+          if (permission !== 'granted') { clearSession(); return; }
+          const file = await sessionData.handle.getFile();
+          const buffer = await file.arrayBuffer();
+          if (loader) loader.hidden = false;
+          originalFileName = savedFilename.replace(/\.pdf$/i, '');
+          if (fileNameEl) fileNameEl.textContent = savedFilename;
+          document.title = `veil - ${savedFilename}`;
+          await loadPDF(new Uint8Array(buffer), savedPage);
+          if (loader) loader.hidden = true;
+        } catch (err) {
+          if (loader) loader.hidden = true;
+          clearSession();
+          hideResumeButton();
+        }
+      });
+      return false; // drop zone stays visible (with resume button)
     } else if (sessionData.type === 'buffer') {
-      // Mobile: load from saved ArrayBuffer
+      // Mobile IndexedDB: no permission needed — auto-restore.
       if (loader) loader.hidden = false;
       originalFileName = savedFilename.replace(/\.pdf$/i, '');
       if (fileNameEl) fileNameEl.textContent = savedFilename;
@@ -760,7 +766,6 @@ async function restoreSession() {
       return true;
     }
   } catch (err) {
-    // File moved/renamed/deleted (NotFoundError) or corrupt data
     if (loader) loader.hidden = true;
     clearSession();
     return false;
@@ -769,12 +774,38 @@ async function restoreSession() {
   return false;
 }
 
+function showResumeButton(filename, onClick) {
+  // Create a resume button in the drop zone, below the browse button
+  const existing = document.getElementById('resume-btn');
+  if (existing) existing.remove();
+
+  const btn = document.createElement('button');
+  btn.id = 'resume-btn';
+  btn.className = 'drop-resume-btn';
+  btn.textContent = `Resume: ${filename}`;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation(); // don't trigger drop zone click
+    btn.disabled = true;
+    btn.textContent = 'Loading...';
+    onClick();
+  });
+
+  const hero = document.querySelector('.drop-hero');
+  if (hero) hero.appendChild(btn);
+}
+
+function hideResumeButton() {
+  const btn = document.getElementById('resume-btn');
+  if (btn) btn.remove();
+}
+
 // ============================================================
 // File Handling
 // ============================================================
 
 function handleFile(file) {
   if (!file || file.type !== 'application/pdf') return;
+  hideResumeButton();
   originalFileName = file.name.replace(/\.pdf$/i, '');
   if (fileNameEl) fileNameEl.textContent = file.name;
   document.title = `veil - ${file.name}`;
@@ -785,9 +816,12 @@ function handleFile(file) {
   const fr = new FileReader();
   fr.onload = async (e) => {
     const arrayBuffer = e.target.result;
+    // Copy the buffer BEFORE loadPDF — PDF.js may transfer (detach)
+    // the original ArrayBuffer to its worker thread.
+    const bufferCopy = arrayBuffer.slice(0);
     await loadPDF(new Uint8Array(arrayBuffer));
     // Persist file for session resume (async, non-blocking)
-    persistFile(file, arrayBuffer);
+    persistFile(file, bufferCopy);
   };
   fr.readAsArrayBuffer(file);
 }
