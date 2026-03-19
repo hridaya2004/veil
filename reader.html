@@ -8,6 +8,9 @@
   <meta name="color-scheme" content="dark">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -125,6 +128,22 @@
     </div>
   </div>
 
+  <!-- App shell loader: shown while IndexedDB deserializes the saved
+       PDF on mobile. Hardcoded in HTML so it appears instantly from
+       the precache, before any JS executes. Hidden by app.js once
+       the PDF is loaded or the drop zone is shown. -->
+  <div id="app-loader" hidden>
+    <div class="app-loader-wordmark">
+      <span class="app-loader-v">v</span><span>eil</span>
+    </div>
+  </div>
+
   <script type="module" src="app.js"></script>
+  <script>
+    // Register service worker (non-blocking, outside the module)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+  </script>
 </body>
 </html>

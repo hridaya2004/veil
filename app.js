@@ -614,6 +614,162 @@ if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
 }
 
 // ============================================================
+// Session Persistence (PWA Resume)
+//
+// Hybrid architecture:
+// - Desktop (File System Access API): save a file handle (~30 bytes)
+//   in IndexedDB. On resume, the browser asks permission and reads
+//   the original file from disk. Zero duplication.
+// - Mobile (iOS/Android): save the ArrayBuffer in IndexedDB.
+//   LRU 1 slot — only the last PDF is kept. Limit ~120MB to avoid
+//   RAM spike on boot when deserializing.
+// - Both: page number + filename in localStorage (survives SW updates)
+// ============================================================
+
+const SESSION_DB_NAME = 'veil-session';
+const SESSION_DB_VERSION = 1;
+const SESSION_STORE = 'pdf';
+const SESSION_MAX_SIZE = 120 * 1024 * 1024; // 120MB
+const _hasFileSystemAccess = 'showOpenFilePicker' in window;
+
+function openSessionDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SESSION_DB_NAME, SESSION_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(SESSION_STORE)) {
+        db.createObjectStore(SESSION_STORE);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveSession(data) {
+  try {
+    const db = await openSessionDB();
+    const tx = db.transaction(SESSION_STORE, 'readwrite');
+    const store = tx.objectStore(SESSION_STORE);
+    // LRU 1 slot: clear everything before saving
+    store.clear();
+    store.put(data, 'current');
+    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+    db.close();
+  } catch (_) { /* IndexedDB may be unavailable in some contexts */ }
+}
+
+async function loadSession() {
+  try {
+    const db = await openSessionDB();
+    const tx = db.transaction(SESSION_STORE, 'readonly');
+    const store = tx.objectStore(SESSION_STORE);
+    const req = store.get('current');
+    const result = await new Promise((res, rej) => {
+      req.onsuccess = () => res(req.result);
+      req.onerror = rej;
+    });
+    db.close();
+    return result || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function clearSession() {
+  try {
+    const db = await openSessionDB();
+    const tx = db.transaction(SESSION_STORE, 'readwrite');
+    tx.objectStore(SESSION_STORE).clear();
+    await new Promise((res) => { tx.oncomplete = res; });
+    db.close();
+  } catch (_) {}
+  localStorage.removeItem('veil-filename');
+  localStorage.removeItem('veil-page');
+}
+
+function savePagePosition() {
+  if (!pdfDoc) return;
+  localStorage.setItem('veil-page', String(currentVisiblePage));
+}
+
+// Save page position periodically during reading
+let _savePageTimer = null;
+viewport.addEventListener('scroll', () => {
+  if (!pdfDoc) return;
+  clearTimeout(_savePageTimer);
+  _savePageTimer = setTimeout(savePagePosition, 1000);
+}, { passive: true });
+
+async function persistFile(file, arrayBuffer) {
+  const filename = file.name;
+  localStorage.setItem('veil-filename', filename);
+  localStorage.setItem('veil-page', '1');
+
+  if (_hasFileSystemAccess && file._handle) {
+    // Desktop: save the lightweight file handle
+    await saveSession({ type: 'handle', handle: file._handle, filename });
+  } else if (arrayBuffer.byteLength <= SESSION_MAX_SIZE) {
+    // Mobile: save the full ArrayBuffer (LRU 1 slot)
+    await saveSession({ type: 'buffer', buffer: arrayBuffer, filename });
+  }
+  // Files > 120MB: not saved (user will see drop zone on next visit)
+}
+
+async function restoreSession() {
+  const loader = document.getElementById('app-loader');
+  const savedFilename = localStorage.getItem('veil-filename');
+  const savedPage = parseInt(localStorage.getItem('veil-page'), 10) || 1;
+
+  if (!savedFilename) return false;
+
+  const sessionData = await loadSession();
+  if (!sessionData) {
+    // IndexedDB was cleared (eviction) but localStorage remains
+    clearSession();
+    return false;
+  }
+
+  try {
+    if (sessionData.type === 'handle') {
+      // Desktop: request permission and read from original file
+      const handle = sessionData.handle;
+      const permission = await handle.requestPermission({ mode: 'read' });
+      if (permission !== 'granted') {
+        clearSession();
+        return false;
+      }
+      const file = await handle.getFile();
+      const buffer = await file.arrayBuffer();
+      // Show loader while loading
+      if (loader) loader.hidden = false;
+      originalFileName = savedFilename.replace(/\.pdf$/i, '');
+      if (fileNameEl) fileNameEl.textContent = savedFilename;
+      document.title = `veil - ${savedFilename}`;
+      await loadPDF(new Uint8Array(buffer), savedPage);
+      if (loader) loader.hidden = true;
+      return true;
+    } else if (sessionData.type === 'buffer') {
+      // Mobile: load from saved ArrayBuffer
+      if (loader) loader.hidden = false;
+      originalFileName = savedFilename.replace(/\.pdf$/i, '');
+      if (fileNameEl) fileNameEl.textContent = savedFilename;
+      document.title = `veil - ${savedFilename}`;
+      await loadPDF(new Uint8Array(sessionData.buffer), savedPage);
+      if (loader) loader.hidden = true;
+      return true;
+    }
+  } catch (err) {
+    // File moved/renamed/deleted (NotFoundError) or corrupt data
+    if (loader) loader.hidden = true;
+    clearSession();
+    return false;
+  }
+
+  return false;
+}
+
+// ============================================================
 // File Handling
 // ============================================================
 
@@ -628,7 +784,10 @@ function handleFile(file) {
 
   const fr = new FileReader();
   fr.onload = async (e) => {
-    await loadPDF(new Uint8Array(e.target.result));
+    const arrayBuffer = e.target.result;
+    await loadPDF(new Uint8Array(arrayBuffer));
+    // Persist file for session resume (async, non-blocking)
+    persistFile(file, arrayBuffer);
   };
   fr.readAsArrayBuffer(file);
 }
@@ -637,7 +796,7 @@ function handleFile(file) {
 // PDF Loading
 // ============================================================
 
-async function loadPDF(data) {
+async function loadPDF(data, resumePage = 1) {
   try {
     if (pdfDoc) pdfDoc.destroy();
     cleanup();
@@ -677,8 +836,8 @@ async function loadPDF(data) {
     isScannedDocument = await detectScannedDocument();
 
     await buildPageSlots();
-    // Center the first page in the viewport immediately (no animation)
-    scrollToPage(1, true);
+    // Scroll to the target page (page 1 for new files, saved page for resume)
+    scrollToPage(resumePage, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
 
@@ -3342,9 +3501,24 @@ document.addEventListener('mouseup', () => {
 // Desktop: click anywhere on the drop zone to browse.
 // Mobile: only the <label for="file-input"> button triggers the picker
 // (native browser behavior, no JS needed — bypasses iOS restrictions).
-dropZone.addEventListener('click', (e) => {
+dropZone.addEventListener('click', async (e) => {
   if (window.matchMedia('(pointer: coarse)').matches) return;
   if (e.target.closest('a') || e.target.closest('label')) return;
+
+  // Desktop with File System Access API: use showOpenFilePicker
+  // to get a file handle for session resume (zero-copy persistence).
+  if (_hasFileSystemAccess) {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+      const file = await handle.getFile();
+      file._handle = handle; // attach handle for persistFile()
+      handleFile(file);
+    } catch (_) { /* user cancelled picker */ }
+    return;
+  }
+
   fileInput.click();
 });
 
@@ -3454,5 +3628,15 @@ readerEl.addEventListener('drop', (e) => {
   handleFile(e.dataTransfer.files[0]);
 });
 
-// Signal that the app module has fully initialized (used by e2e tests)
-document.documentElement.dataset.appReady = 'true';
+// Attempt to restore the last reading session (PWA resume).
+// If a saved PDF exists in IndexedDB or via File System handle,
+// load it and scroll to the saved page. Otherwise, show the drop zone.
+restoreSession().then((restored) => {
+  if (!restored) {
+    // No saved session — hide the loader (if visible), show drop zone
+    const loader = document.getElementById('app-loader');
+    if (loader) loader.hidden = true;
+  }
+  // Signal that the app module has fully initialized (used by e2e tests)
+  document.documentElement.dataset.appReady = 'true';
+});
