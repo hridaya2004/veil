@@ -2478,115 +2478,7 @@ async function renderPageIfNeeded(pageNum) {
     }
 
     // --- Text layer ---
-    if (isScannedDocument) {
-      // OCR runs in background — text becomes selectable silently
-      const cssW = Math.floor(w / dpr);
-      const cssH = Math.floor(h / dpr);
-
-      // Check cache first — avoids re-OCR when page was evicted and re-rendered
-      const cacheKey = `page-${pageNum}`;
-      const cached = ocrCache.get(cacheKey);
-      if (cached) {
-        buildOcrTextLayerDirect(
-          slot.textLayer, cached, cached._canvasW, cached._canvasH, cssW, cssH
-        );
-      } else {
-        state.ocrInProgress = true;
-        state._ocrStartTime = Date.now();
-        const effectiveScale = currentScale * dpr;
-
-        enqueueOcrJob({
-          id: cacheKey,
-          pageNum,
-          cancelled: false,
-          execute: async () => {
-            if (globalGeneration !== myGen) return;
-
-            let ocrCanvas;
-            if (effectiveScale >= OCR_MIN_SCALE) {
-              ocrCanvas = renderCanvas;
-            } else {
-              // Display canvas is too low-res — render higher resolution for Tesseract
-              renderCanvas.width = 0;
-              const ocrViewport = page.getViewport({ scale: OCR_MIN_SCALE });
-              ocrCanvas = createOffscreenCanvas(
-                Math.floor(ocrViewport.width),
-                Math.floor(ocrViewport.height)
-              );
-              await page.render({
-                canvasContext: ocrCanvas.getContext('2d'),
-                viewport: ocrViewport,
-              }).promise;
-              if (globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
-            }
-
-            const worker = await ensureTesseractWorker();
-            if (!worker || globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
-
-            const processed = preprocessCanvasForOcr(ocrCanvas);
-            ocrCanvas.width = 0;
-
-            const { data } = await worker.recognize(processed);
-            if (globalGeneration !== myGen) { processed.width = 0; return; }
-
-            // Cache the result for re-renders
-            data._canvasW = processed.width;
-            data._canvasH = processed.height;
-            ocrCache.set(cacheKey, data);
-
-            // The slot may have been recycled during OCR — re-lookup
-            const currentSlot = pageSlots.get(pageNum);
-            if (currentSlot) {
-              buildOcrTextLayerDirect(
-                currentSlot.textLayer, data, processed.width, processed.height, cssW, cssH
-              );
-              ocrFinished(currentSlot);
-            }
-          },
-        });
-      }
-    } else {
-      buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
-      returnCanvas(renderCanvas);
-
-      // OCR on images within native PDFs — scheduled through the queue.
-      if (regions.length > 0) {
-        const candidates = regions
-          .filter(r => r.width >= OCR_IMAGE_MIN_SIZE && r.height >= OCR_IMAGE_MIN_SIZE)
-          .sort((a, b) => (b.width * b.height) - (a.width * a.height)); // largest first
-
-        // Store image region bounds for hit-testing and on-demand vertical OCR
-        state.imageRegionsRaw = candidates.map(r => ({ ...r }));
-        state.imageRegionsCss = candidates.map(r => ({
-          x: Math.max(0, r.x) / dpr,
-          y: Math.max(0, r.y) / dpr,
-          w: Math.min(r.width, w - Math.max(0, r.x)) / dpr,
-          h: Math.min(r.height, h - Math.max(0, r.y)) / dpr,
-        }));
-
-        // Only auto-OCR the top N images (budget). Rest are on-demand.
-        const autoOcr = candidates.slice(0, OCR_IMAGE_BUDGET);
-        if (autoOcr.length > 0) {
-          state.ocrInProgress = true;
-          state._ocrStartTime = Date.now();
-
-          enqueueOcrJob({
-            id: `img-${pageNum}`,
-            pageNum,
-            cancelled: false,
-            execute: async () => {
-              const currentSlot = pageSlots.get(pageNum);
-              if (!currentSlot) return;
-              await ocrImageRegions(
-                currentSlot.mainCanvas, currentSlot.textLayer, currentSlot.verticalOcrLayer,
-                autoOcr.map(r => ({ ...r })), dpr, myGen, pageNum
-              );
-              ocrFinished(currentSlot);
-            },
-          });
-        }
-      }
-    }
+    scheduleTextLayer(slot, state, pageNum, page, renderCanvas, textContent, scaledViewport, regions, w, h, dpr, myGen);
 
     // --- Link annotations ---
     try {
@@ -2614,6 +2506,113 @@ async function renderPageIfNeeded(pageNum) {
   } finally {
     state.rendering = false;
     state._renderTask = null;
+  }
+}
+
+function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, textContent, scaledViewport, regions, w, h, dpr, myGen) {
+  const cssW = Math.floor(w / dpr);
+  const cssH = Math.floor(h / dpr);
+
+  if (isScannedDocument) {
+    const cacheKey = `page-${pageNum}`;
+    const cached = ocrCache.get(cacheKey);
+    if (cached) {
+      buildOcrTextLayerDirect(
+        slot.textLayer, cached, cached._canvasW, cached._canvasH, cssW, cssH
+      );
+    } else {
+      state.ocrInProgress = true;
+      state._ocrStartTime = Date.now();
+      const effectiveScale = currentScale * dpr;
+
+      enqueueOcrJob({
+        id: cacheKey,
+        pageNum,
+        cancelled: false,
+        execute: async () => {
+          if (globalGeneration !== myGen) return;
+
+          let ocrCanvas;
+          if (effectiveScale >= OCR_MIN_SCALE) {
+            ocrCanvas = renderCanvas;
+          } else {
+            renderCanvas.width = 0;
+            const ocrViewport = page.getViewport({ scale: OCR_MIN_SCALE });
+            ocrCanvas = createOffscreenCanvas(
+              Math.floor(ocrViewport.width),
+              Math.floor(ocrViewport.height)
+            );
+            await page.render({
+              canvasContext: ocrCanvas.getContext('2d'),
+              viewport: ocrViewport,
+            }).promise;
+            if (globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
+          }
+
+          const worker = await ensureTesseractWorker();
+          if (!worker || globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
+
+          const processed = preprocessCanvasForOcr(ocrCanvas);
+          ocrCanvas.width = 0;
+
+          const { data } = await worker.recognize(processed);
+          if (globalGeneration !== myGen) { processed.width = 0; return; }
+
+          data._canvasW = processed.width;
+          data._canvasH = processed.height;
+          ocrCache.set(cacheKey, data);
+
+          const currentSlot = pageSlots.get(pageNum);
+          if (currentSlot) {
+            buildOcrTextLayerDirect(
+              currentSlot.textLayer, data, processed.width, processed.height, cssW, cssH
+            );
+            ocrFinished(currentSlot);
+          }
+        },
+      });
+    }
+    return;
+  }
+
+  // Native PDF: build text layer from PDF.js textContent
+  buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
+  returnCanvas(renderCanvas);
+
+  // OCR on images within native PDFs
+  if (regions.length > 0) {
+    const candidates = regions
+      .filter(r => r.width >= OCR_IMAGE_MIN_SIZE && r.height >= OCR_IMAGE_MIN_SIZE)
+      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+    state.imageRegionsRaw = candidates.map(r => ({ ...r }));
+    state.imageRegionsCss = candidates.map(r => ({
+      x: Math.max(0, r.x) / dpr,
+      y: Math.max(0, r.y) / dpr,
+      w: Math.min(r.width, w - Math.max(0, r.x)) / dpr,
+      h: Math.min(r.height, h - Math.max(0, r.y)) / dpr,
+    }));
+
+    const autoOcr = candidates.slice(0, OCR_IMAGE_BUDGET);
+    if (autoOcr.length > 0) {
+      state.ocrInProgress = true;
+      state._ocrStartTime = Date.now();
+
+      enqueueOcrJob({
+        id: `img-${pageNum}`,
+        pageNum,
+        cancelled: false,
+        execute: async () => {
+          const currentSlot = pageSlots.get(pageNum);
+          if (!currentSlot) return;
+          await ocrImageRegions(
+            currentSlot.mainCanvas, currentSlot.textLayer, currentSlot.verticalOcrLayer,
+            autoOcr.map(r => ({ ...r })), dpr, myGen, pageNum
+          );
+          ocrFinished(currentSlot);
+        },
+      });
+    }
   }
 }
 
