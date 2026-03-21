@@ -28,6 +28,22 @@ const DEPS = {
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
 
 import {
+  initOcr,
+  resetOcrState,
+  enqueueOcrJob,
+  cancelOcrJobsForPage,
+  ocrCache,
+  ocrFingerprints,
+  ocrQueue,
+  ocrImageRegions,
+  ocrImageVertical,
+  ensureTesseractWorker,
+  preprocessCanvasForOcr,
+  buildOcrTextLayerDirect,
+  scheduleTextLayer,
+} from './ocr.js';
+
+import {
   IDENTITY_MATRIX,
   DARK_LUMINANCE_THRESHOLD,
   SCAN_IMAGE_COVERAGE_THRESHOLD,
@@ -46,8 +62,6 @@ import {
   shouldInsertSpace,
   calculateScale as _calculateScale,
   isScannedPattern,
-  detectLanguageFromText,
-  getNavigatorLanguage,
   isOcrArtifact,
 } from './core.js';
 
@@ -97,87 +111,23 @@ const _memConstrainedEarly = (
 );
 const PRERENDER_MARGIN = _memConstrainedEarly ? 1 : 2;
 
-// Minimum PDF.js render scale for Tesseract OCR.
-// PDF standard is 72 points/inch. At scale 3, a page is rendered
-// at 72 * 3 = 216 DPI — above Tesseract's minimum threshold (~200 DPI).
-// Below this, OCR quality degrades sharply: confidence drops, words are
-// garbled or missed entirely. When the display canvas (currentScale * dpr)
-// is below this threshold, we render a separate higher-res canvas just
-// for Tesseract. The coordinate conversion in buildOcrTextLayerDirect
-// handles the difference automatically via scaleX/scaleY.
-const OCR_MIN_SCALE = 3;
-
-// ============================================================
-// OCR Image Preprocessing
-//
-// Tesseract works best on high-contrast grayscale images.
-// The PDF.js render is full-color with anti-aliased text —
-// great for display, suboptimal for OCR. Converting to
-// grayscale removes color noise, and boosting contrast
-// sharpens character edges, reducing confusions on visually
-// similar glyphs (5/S/$, 9/8, /→7).
-//
-// This is Tesseract's own recommendation #1 for improving
-// quality: https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html
-//
-// The preprocessing creates a temporary canvas, applies CSS
-// filters (GPU-accelerated), and returns it. The caller is
-// responsible for releasing it (canvas.width = 0) after use.
-// ============================================================
-
-const OCR_CONTRAST = 1.4;
-
-// Feature-detect ctx.filter by actually rendering through a filter
-// and checking pixels. Safari iOS reflects the filter string on
-// assignment (so typeof/equality checks pass) but silently ignores
-// the filter during drawImage. Only a pixel test catches this.
+// Feature-detect ctx.filter support (Safari iOS ignores it silently)
 const supportsCtxFilter = (() => {
   try {
     const src = document.createElement('canvas');
     src.width = 1; src.height = 1;
     const srcCtx = src.getContext('2d');
-    srcCtx.fillStyle = '#ff0000'; // pure red
+    srcCtx.fillStyle = '#ff0000';
     srcCtx.fillRect(0, 0, 1, 1);
-
     const dst = document.createElement('canvas');
     dst.width = 1; dst.height = 1;
     const dstCtx = dst.getContext('2d');
     dstCtx.filter = 'invert(1)';
     dstCtx.drawImage(src, 0, 0);
-
-    // If invert worked, red (255,0,0) becomes cyan (0,255,255).
-    // If filter was ignored, the pixel is still red.
     const px = dstCtx.getImageData(0, 0, 1, 1).data;
-    return px[0] < 128 && px[1] > 128; // cyan-ish, not red
+    return px[0] < 128 && px[1] > 128;
   } catch (_) { return false; }
 })();
-
-function preprocessCanvasForOcr(sourceCanvas) {
-  const c = document.createElement('canvas');
-  c.width = sourceCanvas.width;
-  c.height = sourceCanvas.height;
-  const ctx = c.getContext('2d');
-
-  if (supportsCtxFilter) {
-    ctx.filter = `grayscale(1) contrast(${OCR_CONTRAST})`;
-    ctx.drawImage(sourceCanvas, 0, 0);
-  } else {
-    // Manual fallback: grayscale + contrast via pixel manipulation
-    ctx.drawImage(sourceCanvas, 0, 0);
-    const imgData = ctx.getImageData(0, 0, c.width, c.height);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      // Grayscale (BT.601)
-      const grey = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-      // Contrast: (grey - 128) * factor + 128
-      const c1 = (grey - 128) * OCR_CONTRAST + 128;
-      const v = Math.max(0, Math.min(255, c1));
-      d[i] = d[i+1] = d[i+2] = v;
-    }
-    ctx.putImageData(imgData, 0, 0);
-  }
-  return c;
-}
 
 // Baseline offset ratio: measured at runtime via canvas.measureText().
 // Tells us exactly where the browser places the baseline within
@@ -243,170 +193,8 @@ let globalGeneration = 0;
 // When true, image protection is skipped so CSS inversion covers the whole page.
 let isScannedDocument = false;
 
-// Tesseract.js worker — loaded lazily only for scanned documents.
-let tesseractWorker = null;
-let tesseractLoading = false;
 
-// OCR language: determined from navigator.languages at worker creation.
-// No scout pass needed — the worker starts with the right language.
 
-// ============================================================
-// OCR Scheduler — Priority Queue with Viewport Distance
-//
-// Instead of firing OCR calls directly (fire-and-forget), all
-// OCR work goes through a centralized queue. The queue sorts
-// jobs by distance from the currently visible page — closest
-// pages are processed first. When the user scrolls, the queue
-// re-prioritizes automatically.
-//
-// Jobs can be cancelled before they start (e.g. when a page is
-// evicted). Results are cached so re-rendering a page doesn't
-// re-OCR it.
-//
-// The scheduler also implements:
-//   - Per-page image budget (max images per page)
-//   - Image deduplication (skip identical images across pages)
-//   - Text detection heuristic (skip images unlikely to contain text)
-//   - Vertical pass on-demand (only on Option+drag, not eagerly)
-// ============================================================
-
-// Maximum images to OCR per page (horizontal pass only).
-// Sorted by area — largest images are most likely to contain text.
-// Remaining images are OCR'd on-demand when the user clicks them.
-const OCR_IMAGE_BUDGET = 4;
-
-// Cache for OCR results: avoids re-running Tesseract when a page
-// is evicted (memory freed) and later re-rendered (scrolled back).
-// Map<string, ocrData> where key is "page-{pageNum}" for full-page
-// or "img-{pageNum}-{x}-{y}" for image regions.
-// Cleared on new PDF load (globalGeneration++).
-const ocrCache = new Map();
-
-// Image fingerprint cache for deduplication.
-// Map<string, boolean> — true if this fingerprint was already OCR'd.
-const ocrFingerprints = new Map();
-
-// The OCR job queue. Each job: { id, pageNum, type, priority, execute, cancelled }
-const ocrQueue = [];
-let ocrProcessing = false; // true while a job is being processed
-
-/**
- * Fingerprint an image by sampling ~64 evenly-spaced pixels.
- * Fast (~0.5ms) and sufficient to detect repeated logos/headers.
- * Returns null if the canvas is too small to sample.
- */
-function fingerprint(canvas) {
-  if (canvas.width < 8 || canvas.height < 8) return null;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const stepX = Math.floor(canvas.width / 8);
-  const stepY = Math.floor(canvas.height / 8);
-  let hash = '';
-  for (let y = 0; y < 8; y++) {
-    for (let x = 0; x < 8; x++) {
-      const d = ctx.getImageData(x * stepX, y * stepY, 1, 1).data;
-      // Quantize to 4-bit per channel for tolerance
-      hash += ((d[0] >> 4) << 8 | (d[1] >> 4) << 4 | (d[2] >> 4)).toString(36);
-    }
-  }
-  return hash;
-}
-
-/**
- * Heuristic: does this image likely contain text?
- * Checks edge density — text has many high-contrast edges,
- * photos and gradients have few. ~3-5ms per image.
- */
-function likelyContainsText(canvas) {
-  const w = canvas.width;
-  const h = canvas.height;
-  if (w < 50 || h < 50) return false;
-
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  // Sample a grid of pixels and count sharp brightness transitions
-  const step = Math.max(4, Math.floor(Math.min(w, h) / 60));
-  let edges = 0;
-  let samples = 0;
-
-  const data = ctx.getImageData(0, 0, w, h).data;
-  const lum = (i) => data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-
-  for (let y = step; y < h - step; y += step) {
-    for (let x = step; x < w - step; x += step) {
-      const idx = (y * w + x) * 4;
-      const idxR = (y * w + x + step) * 4;
-      const idxD = ((y + step) * w + x) * 4;
-      if (idxR < data.length && idxD < data.length) {
-        const l = lum(idx);
-        const diffH = Math.abs(l - lum(idxR));
-        const diffV = Math.abs(l - lum(idxD));
-        if (diffH > 40 || diffV > 40) edges++;
-        samples++;
-      }
-    }
-  }
-
-  // Text-heavy images typically have >8% edge pixels.
-  // Pure photos or gradients have <3%.
-  return samples > 0 && (edges / samples) > 0.05;
-}
-
-/**
- * Enqueue an OCR job. Jobs are sorted by distance from the
- * currently visible page before each processing cycle.
- */
-function enqueueOcrJob(job) {
-  ocrQueue.push(job);
-  processOcrQueue(); // kick the processor if idle
-}
-
-/**
- * Cancel all queued (not in-flight) OCR jobs for a given page.
- */
-function cancelOcrJobsForPage(pageNum) {
-  for (const job of ocrQueue) {
-    if (job.pageNum === pageNum) {
-      job.cancelled = true;
-    }
-  }
-}
-
-/**
- * Process the OCR queue one job at a time. Sorts by priority
- * (distance from viewport) before picking the next job.
- */
-async function processOcrQueue() {
-  if (ocrProcessing) return; // already running
-  ocrProcessing = true;
-
-  while (ocrQueue.length > 0) {
-    // Sort: closest to current visible page first
-    const visPage = currentVisiblePage || 1;
-    ocrQueue.sort((a, b) => {
-      const da = Math.abs(a.pageNum - visPage);
-      const db = Math.abs(b.pageNum - visPage);
-      return da - db;
-    });
-
-    // Pop the highest-priority non-cancelled job
-    let job = null;
-    while (ocrQueue.length > 0) {
-      const candidate = ocrQueue.shift();
-      if (!candidate.cancelled) {
-        job = candidate;
-        break;
-      }
-    }
-    if (!job) break;
-
-    try {
-      await job.execute();
-    } catch (err) {
-      console.warn('OCR job failed:', err);
-    }
-  }
-
-  ocrProcessing = false;
-}
 
 // pdf-lib module — loaded lazily for export.
 let pdfLibModule = null;
@@ -975,13 +763,9 @@ async function loadPDF(data, resumePage = 1) {
     isScannedDocument = false;
     globalGeneration++;
 
-    // Clear OCR caches — new document, old results are invalid
-    ocrCache.clear();
-    ocrFingerprints.clear();
     // Cancel all pending render and OCR jobs from previous document
+    resetOcrState();
     renderQueue.length = 0;
-    ocrQueue.forEach(j => { j.cancelled = true; });
-    ocrQueue.length = 0;
     isScrollingFast = false;
     rendersSinceReset = 0;
     isResetPending = false;
@@ -1095,291 +879,9 @@ async function detectScannedDocument() {
   return result;
 }
 
-// ============================================================
-// Tesseract.js — Lazy OCR for Scanned Documents
-//
-// Loaded only when a scanned PDF is detected. The worker runs
-// in a separate thread, so OCR never blocks the UI. Text
-// becomes selectable silently once recognition completes.
-// ============================================================
 
-async function ensureTesseractWorker() {
-  if (tesseractWorker) return tesseractWorker;
-  if (tesseractLoading) {
-    // Another call is already loading — wait for it
-    while (tesseractLoading) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-    return tesseractWorker;
-  }
 
-  tesseractLoading = true;
-  try {
-    const mod = await import(DEPS.TESSERACT);
-    // Handle both named export and default export patterns
-    const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
-    if (!createWorker) throw new Error('createWorker not found in Tesseract module');
 
-    // Use navigator.languages to determine the user's primary language.
-    // Creates a dual-model worker (eng+lang) so both the user's language
-    // AND English are recognized in a single pass — no scout needed.
-    const navLang = getNavigatorLanguage();
-    const langs = navLang ? 'eng+' + navLang : 'eng';
-    tesseractWorker = await createWorker(langs, 1, {
-      logger: () => {},
-    });
-    return tesseractWorker;
-  } catch (err) {
-    console.warn('Tesseract.js failed to load:', err);
-    return null;
-  } finally {
-    tesseractLoading = false;
-  }
-}
-
-async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
-  const worker = await ensureTesseractWorker();
-  if (!worker || globalGeneration !== myGen) return;
-
-  try {
-    // Preprocess: grayscale + contrast for sharper character edges.
-    // The processed canvas has the same dimensions as the source,
-    // so coordinate mapping in buildOcrTextLayerDirect is unchanged.
-    const processed = preprocessCanvasForOcr(canvas);
-    canvas.width = 0; // release original immediately
-
-    const { data } = await worker.recognize(processed);
-    if (globalGeneration !== myGen) { processed.width = 0; return; }
-
-    buildOcrTextLayerDirect(
-      textLayerDiv, data, processed.width, processed.height, cssWidth, cssHeight
-    );
-
-    processed.width = 0;
-  } catch (err) {
-    if (globalGeneration !== myGen) return;
-    console.warn('OCR failed for page:', err);
-  }
-}
-
-// ============================================================
-// OCR on Images within Native PDFs
-//
-// In native PDFs, the body text is already selectable. But text
-// inside raster images (chart labels, table photos, code screenshots)
-// is not. This function runs Tesseract on each image region to make
-// that text selectable too.
-//
-// It piggybacks on the existing lazy rendering: runs in background
-// after the native text layer is built, using the same IntersectionObserver
-// lifecycle. When the page is evicted, the OCR spans are cleared with
-// the rest of the text layer.
-//
-// Each image region gets its own absolutely-positioned container div
-// within the text layer. buildOcrTextLayerDirect fills it with the
-// same line/span structure used for full-page scanned OCR.
-// ============================================================
-
-// Minimum image size (canvas pixels) to attempt OCR.
-// Skips icons, decorations, and tiny logos.
-const OCR_IMAGE_MIN_SIZE = 100;
-
-/**
- * Rotates a canvas 90° clockwise.
- * Returns a new canvas with swapped dimensions (W×H → H×W).
- * The source canvas is NOT modified.
- */
-function rotateCanvas90CW(source) {
-  const rotated = document.createElement('canvas');
-  rotated.width = source.height;
-  rotated.height = source.width;
-  const ctx = rotated.getContext('2d');
-  // Translate to new center, rotate, draw
-  ctx.translate(rotated.width, 0);
-  ctx.rotate(Math.PI / 2);
-  ctx.drawImage(source, 0, 0);
-  return rotated;
-}
-
-/**
- * Checks whether OCR data contains meaningful text (after filtering).
- */
-function hasValidOcrWords(data) {
-  return (data.words || []).some(
-    w => w.text && w.text.trim() &&
-         w.confidence >= OCR_CONFIDENCE_THRESHOLD &&
-         !isOcrArtifact(w.text)
-  );
-}
-
-async function ocrImageRegions(mainCanvas, textLayerDiv, _verticalLayerDiv, regions, dpr, myGen, pageNum) {
-  if (regions.length === 0) return;
-
-  const worker = await ensureTesseractWorker();
-  if (!worker || globalGeneration !== myGen) return;
-
-  for (const region of regions) {
-    if (globalGeneration !== myGen) return;
-
-    // --- Extract the image region from the main canvas ---
-    const sx = Math.max(0, region.x);
-    const sy = Math.max(0, region.y);
-    const sw = Math.min(region.width, mainCanvas.width - sx);
-    const sh = Math.min(region.height, mainCanvas.height - sy);
-    if (sw <= 0 || sh <= 0) continue;
-
-    // CSS position of this region
-    const regionCssX = sx / dpr;
-    const regionCssY = sy / dpr;
-    const regionCssW = sw / dpr;
-    const regionCssH = sh / dpr;
-
-    // --- Cache check FIRST ---
-    // When a page is evicted and re-rendered, the OCR result is
-    // already in cache. Using it directly avoids re-extracting
-    // pixels, re-fingerprinting, and re-running the text heuristic.
-    const cacheKey = `img-${pageNum}-${Math.round(sx)}-${Math.round(sy)}`;
-    const cached = ocrCache.get(cacheKey);
-
-    let data;
-    if (cached) {
-      data = cached;
-    } else {
-      // No cache — we need to extract and analyze the image.
-      const regionCanvas = document.createElement('canvas');
-      regionCanvas.width = sw;
-      regionCanvas.height = sh;
-      regionCanvas.getContext('2d').drawImage(
-        mainCanvas, sx, sy, sw, sh, 0, 0, sw, sh
-      );
-
-      // --- Deduplication: skip images we've already OCR'd elsewhere ---
-      // Catches repeated logos, headers, watermarks across pages.
-      // The fingerprint is a lightweight hash of 64 sampled pixels.
-      const fp = fingerprint(regionCanvas);
-      if (fp && ocrFingerprints.has(fp)) {
-        regionCanvas.width = 0;
-        continue;
-      }
-
-      // --- Text heuristic: skip images unlikely to contain text ---
-      // Photos, gradients, and solid fills have few high-contrast edges.
-      if (!likelyContainsText(regionCanvas)) {
-        regionCanvas.width = 0;
-        // Store fingerprint so we don't re-analyze this image
-        // if it appears on another page (same visual = same verdict).
-        if (fp) ocrFingerprints.set(fp, true);
-        continue;
-      }
-
-      // --- OCR: horizontal text (0° — normal orientation) ---
-      const processed0 = preprocessCanvasForOcr(regionCanvas);
-      regionCanvas.width = 0;
-      try {
-        const result = await worker.recognize(processed0);
-        data = result.data;
-        processed0.width = 0;
-        if (globalGeneration !== myGen) return;
-        // Cache the result and record the fingerprint
-        ocrCache.set(cacheKey, data);
-        if (fp) ocrFingerprints.set(fp, true);
-      } catch (err) {
-        processed0.width = 0;
-        if (globalGeneration !== myGen) return;
-        continue;
-      }
-    }
-
-    if (hasValidOcrWords(data)) {
-      const div0 = document.createElement('div');
-      div0.className = 'ocr-image-region';
-      div0.style.position = 'absolute';
-      div0.style.left = regionCssX + 'px';
-      div0.style.top = regionCssY + 'px';
-      div0.style.width = regionCssW + 'px';
-      div0.style.height = regionCssH + 'px';
-      div0.style.overflow = 'hidden';
-
-      buildOcrTextLayerDirect(div0, data, sw, sh, regionCssW, regionCssH);
-
-      if (div0.querySelector('span:not([data-gap])')) {
-        textLayerDiv.appendChild(div0);
-      }
-    }
-
-    if (globalGeneration !== myGen) return;
-  }
-}
-
-// ============================================================
-// Vertical OCR Pass — On-Demand Only
-//
-// The 90° rotation pass is expensive (doubles OCR work per image)
-// and vertical text (axis labels, rotated annotations) is rare.
-// Instead of running it eagerly, it's triggered only when the
-// user holds Option/Alt and drags on an image region.
-// ============================================================
-
-async function ocrImageVertical(mainCanvas, verticalLayerDiv, region, dpr, myGen) {
-  const sx = Math.max(0, region.x);
-  const sy = Math.max(0, region.y);
-  const sw = Math.min(region.width, mainCanvas.width - sx);
-  const sh = Math.min(region.height, mainCanvas.height - sy);
-  if (sw <= 0 || sh <= 0) return;
-
-  const regionCanvas = document.createElement('canvas');
-  regionCanvas.width = sw;
-  regionCanvas.height = sh;
-  regionCanvas.getContext('2d').drawImage(
-    mainCanvas, sx, sy, sw, sh, 0, 0, sw, sh
-  );
-
-  const rotated = rotateCanvas90CW(regionCanvas);
-  regionCanvas.width = 0;
-
-  const worker = await ensureTesseractWorker();
-  if (!worker || globalGeneration !== myGen) { rotated.width = 0; return; }
-
-  const processed90 = preprocessCanvasForOcr(rotated);
-  rotated.width = 0;
-
-  try {
-    const { data } = await worker.recognize(processed90);
-    processed90.width = 0;
-    if (globalGeneration !== myGen) return;
-
-    if (hasValidOcrWords(data)) {
-      const regionCssX = sx / dpr;
-      const regionCssY = sy / dpr;
-      const regionCssW = sw / dpr;
-      const regionCssH = sh / dpr;
-      const rotCssW = regionCssH;
-      const rotCssH = regionCssW;
-
-      const div90 = document.createElement('div');
-      div90.className = 'ocr-image-region ocr-image-region-rotated';
-      div90.style.position = 'absolute';
-
-      const centerX = regionCssX + regionCssW / 2;
-      const centerY = regionCssY + regionCssH / 2;
-      div90.style.left = (centerX - rotCssW / 2) + 'px';
-      div90.style.top = (centerY - rotCssH / 2) + 'px';
-      div90.style.width = rotCssW + 'px';
-      div90.style.height = rotCssH + 'px';
-      div90.style.overflow = 'hidden';
-      div90.style.transform = 'rotate(-90deg)';
-      div90.style.transformOrigin = 'center center';
-
-      buildOcrTextLayerDirect(div90, data, sh, sw, rotCssW, rotCssH);
-
-      if (div90.querySelector('span:not([data-gap])')) {
-        verticalLayerDiv.appendChild(div90);
-      }
-    }
-  } catch (_) {
-    processed90.width = 0;
-  }
-}
 
 // ============================================================
 // OCR Loading Indicator
@@ -1582,185 +1084,6 @@ document.addEventListener('pointercancel', () => {
   }
 });
 
-/**
- * Builds an OCR text layer with flat absolute positioning.
- *
- * Each word becomes an absolutely-positioned span at the exact
- * coordinates Tesseract reports, converted from canvas pixels to
- * CSS pixels. No round-trip PDF, no flow layout, no prevBottom.
- *
- * Key design decisions (informed by 12 failed attempts):
- *   - Absolute positioning: eliminates the Phantom Clamp Theorem
- *     (cumulative errors from flow layout paddingTop)
- *   - line-height: 1 on spans: prevents selection highlight from
- *     expanding beyond the text (the fix for Attempt #1's failure)
- *   - Per-LINE fontSize: all words on the same line share the same
- *     fontSize, preventing PDF.js-style sorting fractures
- *   - Tesseract line.baseline for Y positioning: more accurate than
- *     bbox.y1 (which includes descenders and varies per word)
- *   - No round-trip: eliminates two-source matrix mismatch entirely
- *   - Trailing space in textContent: preserves word spacing in copy/paste
- */
-function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cssW, cssH) {
-  container.innerHTML = '';
-
-  const scaleX = cssW / canvasW;
-  const scaleY = cssH / canvasH;
-
-  const ocrLines = ocrData.lines || [];
-  const flatWords = ocrData.words || [];
-
-  const linesToProcess = ocrLines.length > 0
-    ? ocrLines
-    : [{ words: flatWords, baseline: null }];
-
-  const fragment = document.createDocumentFragment();
-  const measureCtx = document.createElement('canvas').getContext('2d');
-
-  // Two-cursor flow layout (Antigravity's "independent cursors" pattern).
-  //
-  // The dilemma: the div's height determines both the selection
-  // highlight size AND the flow advancement. These need different
-  // values — fontSize for the highlight, medianHeight for the flow.
-  //
-  // Solution: two independent tracking variables:
-  //   - actualDomBottom: where the div's box physically ends in the
-  //     DOM (fontSize). Used to calculate marginTop for the next div.
-  //   - logicalReservedBottom: where the line's "reserved space" ends
-  //     (medianHeight). Used to prevent overlap with the next line.
-  //
-  // marginTop bridges the gap between actualDomBottom (small, tight
-  // around text) and the target position. Since margins are NOT
-  // highlighted during selection, the gap stays invisible.
-  let actualDomBottom = 0;
-  let logicalReservedBottom = 0;
-
-  for (const line of linesToProcess) {
-    const words = (line.words || [])
-      .filter(w => w.text && w.text.trim() && w.confidence >= OCR_CONFIDENCE_THRESHOLD && !isOcrArtifact(w.text));
-
-    if (words.length === 0) continue;
-
-    // Sort words left-to-right
-    words.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-
-    // --- Per-line fontSize from MEDIAN bbox height ---
-    const wordHeights = words.map(w => (w.bbox.y1 - w.bbox.y0) * scaleY);
-    wordHeights.sort((a, b) => a - b);
-    const medianHeight = wordHeights[Math.floor(wordHeights.length / 2)];
-    const fontSize = medianHeight * 0.85;
-
-    if (fontSize < 1) continue;
-
-    // --- Baseline Y from Tesseract ---
-    let baselineY;
-    if (line.baseline && line.baseline.y0 != null) {
-      baselineY = ((line.baseline.y0 + line.baseline.y1) / 2) * scaleY;
-    } else {
-      const medianY0 = words.reduce((s, w) => s + w.bbox.y0, 0) / words.length;
-      baselineY = (medianY0 * scaleY) + medianHeight * 0.78;
-    }
-
-    const lineTop = baselineY - fontSize;
-
-    // --- Flow layout line div ---
-    const lineDiv = document.createElement('div');
-    lineDiv.className = 'text-line';
-    lineDiv.style.fontSize = fontSize + 'px';
-
-    // Target position: respect the logical reserved space of the
-    // previous line (prevents overlap), but don't go above lineTop.
-    const targetTop = Math.max(logicalReservedBottom, lineTop);
-
-    // marginTop: physical distance from the previous div's DOM bottom
-    // to where this div should start. margin is NOT highlighted
-    // during selection, so the gap between lines stays invisible.
-    const margin = targetTop - actualDomBottom;
-    lineDiv.style.marginTop = margin + 'px';
-
-    // height = fontSize ONLY — the div wraps tightly around the text.
-    // No "zoccolo" (extra space below text that gets highlighted).
-    lineDiv.style.height = fontSize + 'px';
-
-    // Update both cursors for the next line:
-    actualDomBottom = targetTop + fontSize;       // where the DOM box ends
-    logicalReservedBottom = targetTop + medianHeight; // where the reserved space ends
-
-    measureCtx.font = `${fontSize}px sans-serif`;
-
-    // Track the right edge of the previous word (in CSS px) to compute
-    // the exact marginLeft for each word. This eliminates the drift
-    // caused by TextNode spaces accumulating tiny width errors across
-    // a long line (the "space accumulation" bug — up to 10px on lines
-    // with 15+ words, enough to cut off 2-6 characters of selection).
-    let prevWordEnd = 0;
-
-    for (let i = 0; i < words.length; i++) {
-      const word = words[i];
-      const wordText = normalizeLigatures(word.text);
-
-      // Zero-width space separator for copy/paste.
-      // A <span> with font-size:0 renders at zero width in the layout,
-      // so it doesn't affect positioning. But the space character IS
-      // part of the DOM text, so getSelection().toString() includes it
-      // when the user copies text — preserving word boundaries.
-      if (i > 0) {
-        const gap = document.createElement('span');
-        gap.textContent = ' ';
-        gap.style.fontSize = '0';
-        gap.dataset.gap = '';
-        lineDiv.appendChild(gap);
-      }
-
-      const span = document.createElement('span');
-      span.textContent = wordText;
-      span.style.fontSize = fontSize + 'px';
-
-      // Position each word at its exact OCR coordinate.
-      // marginLeft = distance from where the flow cursor is (prevWordEnd)
-      // to where this word actually starts (wordLeft from Tesseract bbox).
-      // Since gap spans are zero-width, prevWordEnd IS the flow cursor.
-      const wordLeft = word.bbox.x0 * scaleX;
-      const margin = wordLeft - prevWordEnd;
-      if (Math.abs(margin) > 0.5) {
-        span.style.marginLeft = margin + 'px';
-      }
-
-      // Width: scaleX to match OCR bbox
-      const wordWidth = (word.bbox.x1 - word.bbox.x0) * scaleX;
-      if (wordWidth > 0) {
-        const naturalWidth = measureCtx.measureText(wordText).width;
-        if (naturalWidth > 0) {
-          span.style.display = 'inline-block';
-          span.style.width = wordWidth + 'px';
-          span.style.transform = `scaleX(${wordWidth / naturalWidth})`;
-          span.style.transformOrigin = 'left top';
-        }
-      }
-
-      // Update flow cursor to this word's right edge
-      prevWordEnd = wordLeft + wordWidth;
-
-      lineDiv.appendChild(span);
-    }
-
-    fragment.appendChild(lineDiv);
-  }
-
-  container.appendChild(fragment);
-}
-
-/*
- * buildOcrTextLayerViaRoundTrip has been removed (Fase 31).
- * OCR text now uses buildOcrTextLayerDirect() — flat absolute
- * positioning directly from Tesseract coordinates, no round-trip.
- */
-
-// Previous OCR text layer approaches (Fase 26-30) have been removed:
-// - buildOcrTextLayer (Fase 8-21): manual OCR DOM builder
-// - convertOcrToTextContent (Fase 26): arithmetic conversion to native format
-// - buildOcrTextLayerViaRoundTrip (Fase 27-30): pdf-lib → PDF.js round-trip
-// All replaced by buildOcrTextLayerDirect (Fase 31): flat absolute positioning.
 
 // ============================================================
 // Cleanup
@@ -2285,8 +1608,7 @@ async function resetPdfEngine() {
   // Cancel all in-flight and queued work — they hold page
   // references from the old instance that will become invalid.
   renderQueue.length = 0;
-  ocrQueue.forEach(j => { j.cancelled = true; });
-  ocrQueue.length = 0;
+  resetOcrState();
 
   try {
     // Destroy the old instance (main thread + worker thread).
@@ -2506,113 +1828,6 @@ async function renderPageIfNeeded(pageNum) {
   } finally {
     state.rendering = false;
     state._renderTask = null;
-  }
-}
-
-function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, textContent, scaledViewport, regions, w, h, dpr, myGen) {
-  const cssW = Math.floor(w / dpr);
-  const cssH = Math.floor(h / dpr);
-
-  if (isScannedDocument) {
-    const cacheKey = `page-${pageNum}`;
-    const cached = ocrCache.get(cacheKey);
-    if (cached) {
-      buildOcrTextLayerDirect(
-        slot.textLayer, cached, cached._canvasW, cached._canvasH, cssW, cssH
-      );
-    } else {
-      state.ocrInProgress = true;
-      state._ocrStartTime = Date.now();
-      const effectiveScale = currentScale * dpr;
-
-      enqueueOcrJob({
-        id: cacheKey,
-        pageNum,
-        cancelled: false,
-        execute: async () => {
-          if (globalGeneration !== myGen) return;
-
-          let ocrCanvas;
-          if (effectiveScale >= OCR_MIN_SCALE) {
-            ocrCanvas = renderCanvas;
-          } else {
-            renderCanvas.width = 0;
-            const ocrViewport = page.getViewport({ scale: OCR_MIN_SCALE });
-            ocrCanvas = createOffscreenCanvas(
-              Math.floor(ocrViewport.width),
-              Math.floor(ocrViewport.height)
-            );
-            await page.render({
-              canvasContext: ocrCanvas.getContext('2d'),
-              viewport: ocrViewport,
-            }).promise;
-            if (globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
-          }
-
-          const worker = await ensureTesseractWorker();
-          if (!worker || globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
-
-          const processed = preprocessCanvasForOcr(ocrCanvas);
-          ocrCanvas.width = 0;
-
-          const { data } = await worker.recognize(processed);
-          if (globalGeneration !== myGen) { processed.width = 0; return; }
-
-          data._canvasW = processed.width;
-          data._canvasH = processed.height;
-          ocrCache.set(cacheKey, data);
-
-          const currentSlot = pageSlots.get(pageNum);
-          if (currentSlot) {
-            buildOcrTextLayerDirect(
-              currentSlot.textLayer, data, processed.width, processed.height, cssW, cssH
-            );
-            ocrFinished(currentSlot);
-          }
-        },
-      });
-    }
-    return;
-  }
-
-  // Native PDF: build text layer from PDF.js textContent
-  buildTextLayer(slot.textLayer, textContent, scaledViewport, dpr);
-  returnCanvas(renderCanvas);
-
-  // OCR on images within native PDFs
-  if (regions.length > 0) {
-    const candidates = regions
-      .filter(r => r.width >= OCR_IMAGE_MIN_SIZE && r.height >= OCR_IMAGE_MIN_SIZE)
-      .sort((a, b) => (b.width * b.height) - (a.width * a.height));
-
-    state.imageRegionsRaw = candidates.map(r => ({ ...r }));
-    state.imageRegionsCss = candidates.map(r => ({
-      x: Math.max(0, r.x) / dpr,
-      y: Math.max(0, r.y) / dpr,
-      w: Math.min(r.width, w - Math.max(0, r.x)) / dpr,
-      h: Math.min(r.height, h - Math.max(0, r.y)) / dpr,
-    }));
-
-    const autoOcr = candidates.slice(0, OCR_IMAGE_BUDGET);
-    if (autoOcr.length > 0) {
-      state.ocrInProgress = true;
-      state._ocrStartTime = Date.now();
-
-      enqueueOcrJob({
-        id: `img-${pageNum}`,
-        pageNum,
-        cancelled: false,
-        execute: async () => {
-          const currentSlot = pageSlots.get(pageNum);
-          if (!currentSlot) return;
-          await ocrImageRegions(
-            currentSlot.mainCanvas, currentSlot.textLayer, currentSlot.verticalOcrLayer,
-            autoOcr.map(r => ({ ...r })), dpr, myGen, pageNum
-          );
-          ocrFinished(currentSlot);
-        },
-      });
-    }
   }
 }
 
@@ -3755,8 +2970,7 @@ btnHome.addEventListener('click', (e) => {
   // Stop all rendering and OCR
   globalGeneration++;
   renderQueue.length = 0;
-  ocrQueue.forEach(j => { j.cancelled = true; });
-  ocrQueue.length = 0;
+  resetOcrState();
 
   // Destroy PDF.js instance to free memory
   if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
@@ -3901,10 +3115,7 @@ window.addEventListener('resize', () => {
     globalGeneration++;
     // Cancel pending render and OCR — scale changed, coordinates are stale
     renderQueue.length = 0;
-    ocrCache.clear();
-    ocrFingerprints.clear();
-    ocrQueue.forEach(j => { j.cancelled = true; });
-    ocrQueue.length = 0;
+    resetOcrState();
     isScrollingFast = false;
     rendersSinceReset = 0;
     isResetPending = false;
@@ -3931,6 +3142,20 @@ readerEl.addEventListener('dragover', (e) => e.preventDefault());
 readerEl.addEventListener('drop', (e) => {
   e.preventDefault();
   handleFile(e.dataTransfer.files[0]);
+});
+
+// Initialize OCR module with app context (read-only getters + function refs)
+initOcr({
+  get globalGeneration() { return globalGeneration; },
+  get currentVisiblePage() { return currentVisiblePage; },
+  get currentScale() { return currentScale; },
+  get isScannedDocument() { return isScannedDocument; },
+  get pageSlots() { return pageSlots; },
+  DEPS,
+  createOffscreenCanvas,
+  returnCanvas,
+  buildTextLayer,
+  ocrFinished,
 });
 
 // Attempt to restore the last reading session (PWA resume).
