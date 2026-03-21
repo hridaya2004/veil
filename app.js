@@ -733,7 +733,7 @@ async function loadPDF(data, resumePage = 1) {
         for (const [pageNum, mode] of Object.entries(overrides)) {
           pdfState.darkOverride.set(parseInt(pageNum, 10), mode);
         }
-      } catch (_) {}
+      } catch (e) { console.warn('[Session] Failed to parse dark overrides:', e); }
     }
 
     scrollToPage(resumePage, true);
@@ -2581,6 +2581,7 @@ initOcr({
   get currentScale() { return pdfState.scale; },
   get isScannedDocument() { return pdfState.isScanned; },
   get pageSlots() { return pdfState.slots; },
+  supportsCtxFilter,
   DEPS,
   createOffscreenCanvas,
   returnCanvas,

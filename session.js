@@ -37,7 +37,7 @@ export async function saveSession(data) {
     store.put(data, 'current');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
     db.close();
-  } catch (_) { /* IndexedDB may be unavailable in some contexts */ }
+  } catch (e) { console.warn('[Session] saveSession failed:', e); }
 }
 
 export async function loadSession() {
@@ -52,7 +52,8 @@ export async function loadSession() {
     });
     db.close();
     return result || null;
-  } catch (_) {
+  } catch (e) {
+    console.warn('[Session] loadSession failed:', e);
     return null;
   }
 }
@@ -64,7 +65,7 @@ export async function clearSession() {
     tx.objectStore(SESSION_STORE).clear();
     await new Promise((res) => { tx.oncomplete = res; });
     db.close();
-  } catch (_) {}
+  } catch (e) { console.warn('[Session] clearSession failed:', e); }
   localStorage.removeItem('veil-filename');
   localStorage.removeItem('veil-page');
   localStorage.removeItem('veil-dark-overrides');

@@ -75,29 +75,6 @@ export function cancelOcrJobsForPage(pageNum) {
 }
 
 // ============================================================
-// Feature Detection
-// ============================================================
-
-const supportsCtxFilter = (() => {
-  try {
-    const src = document.createElement('canvas');
-    src.width = 1; src.height = 1;
-    const srcCtx = src.getContext('2d');
-    srcCtx.fillStyle = '#ff0000';
-    srcCtx.fillRect(0, 0, 1, 1);
-
-    const dst = document.createElement('canvas');
-    dst.width = 1; dst.height = 1;
-    const dstCtx = dst.getContext('2d');
-    dstCtx.filter = 'invert(1)';
-    dstCtx.drawImage(src, 0, 0);
-
-    const px = dstCtx.getImageData(0, 0, 1, 1).data;
-    return px[0] < 128 && px[1] > 128;
-  } catch (_) { return false; }
-})();
-
-// ============================================================
 // Preprocessing
 // ============================================================
 
@@ -107,7 +84,7 @@ export function preprocessCanvasForOcr(sourceCanvas) {
   c.height = sourceCanvas.height;
   const ctxC = c.getContext('2d');
 
-  if (supportsCtxFilter) {
+  if (ctx.supportsCtxFilter) {
     ctxC.filter = `grayscale(1) contrast(${OCR_CONTRAST})`;
     ctxC.drawImage(sourceCanvas, 0, 0);
   } else {
@@ -430,7 +407,8 @@ export async function ocrImageVertical(mainCanvas, verticalLayerDiv, region, dpr
         verticalLayerDiv.appendChild(div90);
       }
     }
-  } catch (_) {
+  } catch (e) {
+    console.warn('[OCR] Vertical pass failed:', e);
     processed90.width = 0;
   }
 }
