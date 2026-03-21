@@ -3286,6 +3286,188 @@ function showIosExportWarning(pageCount) {
   });
 }
 
+async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, renderCanvas, finalCanvas, deferredAnnotations, myExportGen, totalPages) {
+  const page = await pdfDoc.getPage(pageNum);
+  const origVp = page.getViewport({ scale: 1 });
+  const renderVp = page.getViewport({ scale: exportScale });
+  const w = Math.floor(renderVp.width);
+  const h = Math.floor(renderVp.height);
+
+  renderCanvas.width = w;
+  renderCanvas.height = h;
+  finalCanvas.width = w;
+  finalCanvas.height = h;
+
+  const tasks = [
+    page.render({
+      canvasContext: renderCanvas.getContext('2d'),
+      viewport: renderVp,
+    }).promise,
+    page.getOperatorList(),
+    page.getAnnotations(),
+  ];
+  if (!isScannedDocument) {
+    tasks.push(page.getTextContent());
+  }
+
+  const results = await Promise.all(tasks);
+  if (exportGeneration !== myExportGen) return;
+
+  const opList = results[1];
+  const annotations = results[2];
+  const textContent = isScannedDocument ? null : results[3];
+
+  // Determine dark mode for this page
+  const isDarkBg = detectAlreadyDark(renderCanvas);
+  const override = pageDarkOverride.get(pageNum);
+  let applyDark;
+  if (override === 'dark') applyDark = true;
+  else if (override === 'light') applyDark = false;
+  else applyDark = !isDarkBg;
+
+  // Compose final image
+  const ctx = finalCanvas.getContext('2d');
+
+  if (applyDark) {
+    if (supportsCtxFilter) {
+      ctx.filter = 'invert(0.86) hue-rotate(180deg)';
+      ctx.drawImage(renderCanvas, 0, 0);
+      ctx.filter = 'none';
+    } else {
+      ctx.drawImage(renderCanvas, 0, 0);
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        let r = d[i]   + 0.86 * (255 - 2 * d[i]);
+        let g = d[i+1] + 0.86 * (255 - 2 * d[i+1]);
+        let b = d[i+2] + 0.86 * (255 - 2 * d[i+2]);
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        r = 2 * lum - r;
+        g = 2 * lum - g;
+        b = 2 * lum - b;
+        d[i]   = Math.max(0, Math.min(255, r));
+        d[i+1] = Math.max(0, Math.min(255, g));
+        d[i+2] = Math.max(0, Math.min(255, b));
+      }
+      ctx.putImageData(imgData, 0, 0);
+    }
+
+    if (!isScannedDocument) {
+      const regions = extractImageRegions(opList, renderVp.transform);
+      if (regions.length > 0) {
+        compositeImageRegions(ctx, renderCanvas, regions, w, h);
+      }
+    }
+  } else {
+    ctx.drawImage(renderCanvas, 0, 0);
+  }
+
+  // Convert to JPEG
+  const jpegBlob = await new Promise(r =>
+    finalCanvas.toBlob(r, 'image/jpeg', 0.85)
+  );
+  const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
+
+  // Add page to output PDF
+  const jpegImage = await outPdf.embedJpg(jpegBytes);
+  const outPage = outPdf.addPage([origVp.width, origVp.height]);
+  outPage.drawImage(jpegImage, {
+    x: 0,
+    y: 0,
+    width: origVp.width,
+    height: origVp.height,
+  });
+
+  // Invisible text layer
+  if (textContent) {
+    for (const item of textContent.items) {
+      if (!item.str || !item.str.trim()) continue;
+      const itemText = normalizeLigatures(item.str);
+      const tx = item.transform;
+      const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
+      if (baseFontSize < 1) continue;
+
+      try {
+        let drawSize = baseFontSize;
+        if (item.width > 0) {
+          const naturalWidth = font.widthOfTextAtSize(itemText, baseFontSize);
+          if (naturalWidth > 0) {
+            drawSize = baseFontSize * (item.width / naturalWidth);
+          }
+        }
+
+        outPage.drawText(itemText, {
+          x: tx[4],
+          y: tx[5],
+          size: drawSize,
+          font,
+          opacity: 0,
+        });
+      } catch (_) {}
+    }
+
+  } else if (isScannedDocument && exportWorker) {
+    const processed = preprocessCanvasForOcr(renderCanvas);
+    const ocrBlob = await new Promise(r =>
+      processed.toBlob(r, 'image/png')
+    );
+    processed.width = 0;
+    const { data } = await exportWorker.recognize(ocrBlob);
+
+    if (data.words) {
+      const sx = origVp.width / w;
+      const sy = origVp.height / h;
+
+      for (const word of data.words) {
+        if (!word.text || !word.text.trim()) continue;
+        if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
+        if (isOcrArtifact(word.text)) continue;
+        const wordText = normalizeLigatures(word.text);
+        const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
+        if (baseFontSize < 1) continue;
+
+        try {
+          const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
+          let drawSize = baseFontSize;
+          if (targetWidth > 0) {
+            const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
+            if (naturalWidth > 0) {
+              drawSize = baseFontSize * (targetWidth / naturalWidth);
+            }
+          }
+
+          outPage.drawText(wordText, {
+            x: word.bbox.x0 * sx,
+            y: origVp.height - word.bbox.y1 * sy,
+            size: drawSize,
+            font,
+            opacity: 0,
+          });
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Collect link annotations for deferred embedding
+  if (annotations.length > 0) {
+    deferredAnnotations.push({ outPage, annotations });
+  }
+
+  page.cleanup();
+  renderCanvas.getContext('2d').clearRect(0, 0, w, h);
+  finalCanvas.getContext('2d').clearRect(0, 0, w, h);
+
+  if (exportGeneration === myExportGen) {
+    showExportProgress(pageNum, totalPages);
+  }
+
+  if (pageNum % 10 === 0) {
+    await new Promise(r => setTimeout(r, 50));
+  } else {
+    await yieldToUI();
+  }
+}
+
 async function exportDarkPdf() {
   if (!pdfDoc || exporting) return;
 
@@ -3366,225 +3548,7 @@ async function exportDarkPdf() {
 
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
       if (exportGeneration !== myExportGen) break;
-
-      const page = await pdfDoc.getPage(pageNum);
-      const origVp = page.getViewport({ scale: 1 });
-      const renderVp = page.getViewport({ scale: exportScale });
-      const w = Math.floor(renderVp.width);
-      const h = Math.floor(renderVp.height);
-
-      // --- Recycle canvases (clears content, reuses backing store) ---
-      renderCanvas.width = w;
-      renderCanvas.height = h;
-      finalCanvas.width = w;
-      finalCanvas.height = h;
-
-      // --- Render + get operator list in parallel ---
-      const tasks = [
-        page.render({
-          canvasContext: renderCanvas.getContext('2d'),
-          viewport: renderVp,
-        }).promise,
-        page.getOperatorList(),
-        page.getAnnotations(),
-      ];
-      if (!isScannedDocument) {
-        tasks.push(page.getTextContent());
-      }
-
-      const results = await Promise.all(tasks);
-      if (exportGeneration !== myExportGen) break;
-
-      const opList = results[1];
-      const annotations = results[2];
-      const textContent = isScannedDocument ? null : results[3];
-
-      // --- Determine dark mode for this page ---
-      const isDarkBg = detectAlreadyDark(renderCanvas);
-      const override = pageDarkOverride.get(pageNum);
-      let applyDark;
-      if (override === 'dark') applyDark = true;
-      else if (override === 'light') applyDark = false;
-      else applyDark = !isDarkBg;
-
-      // --- Compose final image ---
-      const ctx = finalCanvas.getContext('2d');
-
-      if (applyDark) {
-        // Apply inversion matching CSS filter: invert(0.86) hue-rotate(180deg).
-        // Safari iOS doesn't support ctx.filter — fall back to manual pixel manipulation.
-        if (supportsCtxFilter) {
-          ctx.filter = 'invert(0.86) hue-rotate(180deg)';
-          ctx.drawImage(renderCanvas, 0, 0);
-          ctx.filter = 'none';
-        } else {
-          ctx.drawImage(renderCanvas, 0, 0);
-          const imgData = ctx.getImageData(0, 0, w, h);
-          const d = imgData.data;
-          // invert(0.86): newChannel = channel + 0.86 * (255 - 2 * channel)
-          // hue-rotate(180deg): swap R↔(255-R) relative to grey, shift hue
-          // Combined formula (matching CSS spec):
-          //   inverted = ch + 0.86 * (255 - 2*ch)
-          //   then rotate hue 180° by negating chroma in RGB
-          for (let i = 0; i < d.length; i += 4) {
-            // Step 1: invert(0.86)
-            let r = d[i]   + 0.86 * (255 - 2 * d[i]);
-            let g = d[i+1] + 0.86 * (255 - 2 * d[i+1]);
-            let b = d[i+2] + 0.86 * (255 - 2 * d[i+2]);
-            // Step 2: hue-rotate(180deg) — negate chroma around the grey axis
-            const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            r = 2 * lum - r;
-            g = 2 * lum - g;
-            b = 2 * lum - b;
-            d[i]   = Math.max(0, Math.min(255, r));
-            d[i+1] = Math.max(0, Math.min(255, g));
-            d[i+2] = Math.max(0, Math.min(255, b));
-          }
-          ctx.putImageData(imgData, 0, 0);
-        }
-
-        // Restore original images (skip for scanned docs)
-        if (!isScannedDocument) {
-          const regions = extractImageRegions(opList, renderVp.transform);
-          if (regions.length > 0) {
-            compositeImageRegions(ctx, renderCanvas, regions, w, h);
-          }
-        }
-      } else {
-        ctx.drawImage(renderCanvas, 0, 0);
-      }
-
-      // --- Convert to JPEG ---
-      const jpegBlob = await new Promise(r =>
-        finalCanvas.toBlob(r, 'image/jpeg', 0.85)
-      );
-      const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
-
-      // --- Add page to output PDF ---
-      const jpegImage = await outPdf.embedJpg(jpegBytes);
-      const outPage = outPdf.addPage([origVp.width, origVp.height]);
-      outPage.drawImage(jpegImage, {
-        x: 0,
-        y: 0,
-        width: origVp.width,
-        height: origVp.height,
-      });
-
-      // --- Invisible text layer ---
-      //
-      // Each text item is drawn at a fontSize adjusted so the
-      // string's width matches the original PDF width. This is
-      // the PDF-space equivalent of CSS scaleX().
-      //
-      // With Noto Sans (Unicode), virtually all characters are
-      // supported. With Helvetica fallback (WinAnsi), unsupported
-      // characters are silently skipped per-item via try/catch.
-      if (textContent) {
-        // Native PDF: use original text coordinates
-        for (const item of textContent.items) {
-          if (!item.str || !item.str.trim()) continue;
-          const itemText = normalizeLigatures(item.str);
-          const tx = item.transform;
-          const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-          if (baseFontSize < 1) continue;
-
-          try {
-            // Adjust fontSize so font width matches PDF width
-            let drawSize = baseFontSize;
-            if (item.width > 0) {
-              const naturalWidth = font.widthOfTextAtSize(itemText, baseFontSize);
-              if (naturalWidth > 0) {
-                drawSize = baseFontSize * (item.width / naturalWidth);
-              }
-            }
-
-            outPage.drawText(itemText, {
-              x: tx[4],
-              y: tx[5],
-              size: drawSize,
-              font,
-              opacity: 0,
-            });
-          } catch (_) {
-            // Skip characters not encodable in the current font
-          }
-        }
-
-      } else if (isScannedDocument && exportWorker) {
-        // Scanned PDF: full-page OCR using the shared export worker.
-        const processed = preprocessCanvasForOcr(renderCanvas);
-        const ocrBlob = await new Promise(r =>
-          processed.toBlob(r, 'image/png')
-        );
-        processed.width = 0;
-        const { data } = await exportWorker.recognize(ocrBlob);
-
-        if (data.words) {
-          const sx = origVp.width / w;
-          const sy = origVp.height / h;
-
-          for (const word of data.words) {
-            if (!word.text || !word.text.trim()) continue;
-            if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
-            if (isOcrArtifact(word.text)) continue;
-            const wordText = normalizeLigatures(word.text);
-            const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
-            if (baseFontSize < 1) continue;
-
-            try {
-              const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
-              let drawSize = baseFontSize;
-              if (targetWidth > 0) {
-                const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
-                if (naturalWidth > 0) {
-                  drawSize = baseFontSize * (targetWidth / naturalWidth);
-                }
-              }
-
-              outPage.drawText(wordText, {
-                x: word.bbox.x0 * sx,
-                y: origVp.height - word.bbox.y1 * sy,
-                size: drawSize,
-                font,
-                opacity: 0,
-              });
-            } catch (_) {}
-          }
-        }
-      }
-
-      // --- Collect link annotations for deferred embedding ---
-      // (Internal links may reference pages not yet added to outPdf,
-      // so we embed all annotations after all pages are created.)
-      if (annotations.length > 0) {
-        deferredAnnotations.push({ outPage, annotations });
-      }
-
-      // --- Release page resources ---
-      // page.cleanup() tells PDF.js to discard decoded image data,
-      // font caches, and other decompressed resources for this page.
-      // Without this, PDF.js accumulates hundreds of MB of raw image
-      // data across pages — the #1 cause of iOS Safari Jetsam kills.
-      page.cleanup();
-
-      // Clear canvas contents (backing store stays allocated for reuse)
-      renderCanvas.getContext('2d').clearRect(0, 0, w, h);
-      finalCanvas.getContext('2d').clearRect(0, 0, w, h);
-
-      // Only update progress if this export is still the current one
-      if (exportGeneration === myExportGen) {
-        showExportProgress(pageNum, totalPages);
-      }
-
-      // Yield to UI thread. Every 10 pages, give iOS WebKit a real
-      // idle pause (50ms) so the garbage collector can run a deep
-      // sweep and reclaim canvas backing stores and dead Blobs.
-      // On other pages, MessageChannel yield is sufficient.
-      if (pageNum % 10 === 0) {
-        await new Promise(r => setTimeout(r, 50));
-      } else {
-        await yieldToUI();
-      }
+      await exportPage(pageNum, outPdf, font, exportWorker, exportScale, renderCanvas, finalCanvas, deferredAnnotations, myExportGen, totalPages);
     }
 
     // --- Release recycled canvases ---
