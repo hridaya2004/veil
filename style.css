@@ -27,6 +27,18 @@
   --toolbar-height: 48px;
   --radius: 8px;
   --transition: 200ms ease;
+
+  /* Z-index layers */
+  --z-viewport: 0;
+  --z-veil-layer: 1;
+  --z-drop-border: 4;
+  --z-drop-content: 5;
+  --z-toolbar: 50;
+  --z-banner: 60;
+  --z-drop-zone: 100;
+  --z-drop-about: 101;
+  --z-loader: 200;
+  --z-transition: 999;
 }
 
 html {
@@ -47,7 +59,7 @@ body {
    ============================================================ */
 
 .page-transition-overlay {
-  position: fixed; inset: 0; z-index: 999;
+  position: fixed; inset: 0; z-index: var(--z-transition);
   background: #241e18;
   pointer-events: none;
   opacity: 0;
@@ -75,7 +87,7 @@ body {
   padding: 48px 0;
   overflow-y: auto;
   cursor: pointer;
-  z-index: 100;
+  z-index: var(--z-drop-zone);
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -343,7 +355,7 @@ body {
   color: var(--text-secondary);
   text-decoration: none;
   transition: color var(--transition);
-  z-index: 101;
+  z-index: var(--z-drop-about);
   padding: 8px 4px;
 }
 .drop-about:hover {
@@ -412,7 +424,7 @@ body {
   border-radius: 50px;
   background: #0a0806;
   border: 1px solid var(--border);
-  z-index: 50;
+  z-index: var(--z-toolbar);
   transition: opacity 0.4s ease, transform 0.4s ease;
   user-select: none;
 }
@@ -616,7 +628,7 @@ body {
   /* Keep viewport below the fixed toolbar in stacking order.
      Without this, overflow:auto can create an implicit stacking
      context that blocks pointer events on the toolbar. */
-  z-index: 0;
+  z-index: var(--z-viewport);
 
   /* Native scrollbar — visible on desktop & Android */
   scrollbar-width: thin;
@@ -777,7 +789,7 @@ body {
   padding: 10px 20px;
   backdrop-filter: blur(12px);
   border-radius: 50px;
-  z-index: 60;
+  z-index: var(--z-banner);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
   max-width: 90vw;
 }
@@ -842,7 +854,7 @@ body {
   backdrop-filter: blur(12px);
   border: 1px solid rgba(212, 163, 115, 0.15);
   border-radius: 16px;
-  z-index: 60;
+  z-index: var(--z-banner);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
   width: calc(100% - 32px);
   max-width: 400px;
@@ -913,7 +925,7 @@ body {
   backdrop-filter: blur(12px);
   border: 1px solid var(--border);
   border-radius: 50px;
-  z-index: 50;
+  z-index: var(--z-toolbar);
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
 }
 
@@ -1148,7 +1160,7 @@ div.ocr-loading:not(.page-container)::before {
   align-items: center;
   justify-content: center;
   background: var(--bg-deep);
-  z-index: 200;
+  z-index: var(--z-loader);
 }
 
 .app-loader-wordmark {
