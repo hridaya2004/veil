@@ -317,9 +317,10 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
   const jpegBlob = await new Promise(r =>
     finalCanvas.toBlob(r, 'image/jpeg', 0.85)
   );
-  const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
+  let jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
 
   const jpegImage = await outPdf.embedJpg(jpegBytes);
+  jpegBytes = null; // pdf-lib copied the bytes internally
   const outPage = outPdf.addPage([origVp.width, origVp.height]);
   outPage.drawImage(jpegImage, {
     x: 0,
@@ -409,8 +410,8 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
     showExportProgress(pageNum, totalPages);
   }
 
-  if (pageNum % 10 === 0) {
-    await new Promise(r => setTimeout(r, 50));
+  if (pageNum % 5 === 0) {
+    await new Promise(r => setTimeout(r, 100));
   } else {
     await ctx.yieldToUI();
   }
@@ -435,7 +436,7 @@ export async function exportDarkPdf() {
   try {
     const { PDFDocument, StandardFonts } = await ensurePdfLib();
 
-    const outPdf = await PDFDocument.create();
+    let outPdf = await PDFDocument.create();
 
     let font;
     const fontResources = await ensureUnicodeFont();
@@ -494,6 +495,7 @@ export async function exportDarkPdf() {
     for (const { outPage, annotations } of deferredAnnotations) {
       await embedLinkAnnotations(outPdf, outPage, annotations);
     }
+    deferredAnnotations.length = 0; // release annotation refs before heavy save()
 
     outPdf.setProducer('veil (https://veil.simoneamico.com)');
     outPdf.setCreator('veil');
@@ -503,6 +505,7 @@ export async function exportDarkPdf() {
     const filename = `${ctx.originalFileName}-dark.pdf`;
     let blob = new Blob([pdfBytes], { type: 'application/pdf' });
     pdfBytes = null;
+    outPdf = null; // release ~300MB of embedded JPEGs and page dictionaries
 
     if (navigator.share && ctx.isIOS) {
       try {
