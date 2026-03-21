@@ -712,7 +712,7 @@ async function loadPDF(data, resumePage = 1) {
     // Cancel all pending render and OCR jobs from previous document
     resetOcrState();
     renderQueue.length = 0;
-    isScrollingFast = false;
+    scrollState.isFast = false;
     rendersSinceReset = 0;
     isResetPending = false;
 
@@ -1409,28 +1409,34 @@ function getDpr() {
 // scrollViewDidEndDecelerating.
 // ============================================================
 
-let isScrollingFast = false;
-let lastScrollTop = 0;
-let lastScrollTime = 0;
-let scrollVelocityTimer = null;
+const scrollState = {
+  isFast: false,
+  lastTop: 0,
+  lastTime: 0,
+  velocityTimer: null,
+  raf: 0,
+  presentationMode: false,
+  wheelAccum: 0,
+  wheelTimer: null,
+};
 const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
 
 viewport.addEventListener('scroll', () => {
   const now = performance.now();
-  const dt = now - lastScrollTime;
+  const dt = now - scrollState.lastTime;
   const scrollTop = viewport.scrollTop;
-  if (dt > 0 && lastScrollTime > 0) {
-    const dy = Math.abs(scrollTop - lastScrollTop);
+  if (dt > 0 && scrollState.lastTime > 0) {
+    const dy = Math.abs(scrollTop - scrollState.lastTop);
     const velocity = (dy / dt) * 1000; // px/sec
-    isScrollingFast = velocity > SCROLL_FAST_THRESHOLD;
+    scrollState.isFast = velocity > SCROLL_FAST_THRESHOLD;
   }
-  lastScrollTop = scrollTop;
-  lastScrollTime = now;
+  scrollState.lastTop = scrollTop;
+  scrollState.lastTime = now;
 
   // When scroll stops, mark as slow after a brief settle
-  clearTimeout(scrollVelocityTimer);
-  scrollVelocityTimer = setTimeout(() => {
-    isScrollingFast = false;
+  clearTimeout(scrollState.velocityTimer);
+  scrollState.velocityTimer = setTimeout(() => {
+    scrollState.isFast = false;
     // Flush any deferred renders now that scroll has settled
     flushRenderQueue();
   }, 150);
@@ -1612,7 +1618,7 @@ function enqueueRender(pageNum) {
 }
 
 function processRenderQueue() {
-  if (isScrollingFast || isResetting) return; // wait for scroll to settle / engine reset
+  if (scrollState.isFast || isResetting) return; // wait for scroll to settle / engine reset
 
   while (activeRenders < MAX_CONCURRENT_RENDERS && renderQueue.length > 0) {
     // Sort by distance from current visible page (closest first)
@@ -2404,47 +2410,43 @@ document.addEventListener('keydown', (e) => {
 // jump page-by-page — same pattern as Google Slides, PowerPoint Online.
 // Normal documents (papers, books) keep continuous scroll.
 
-let _isPresentationMode = false;
-let _wheelAccumulator = 0;
-let _wheelTimer = null;
 const WHEEL_PAGE_THRESHOLD = 60; // accumulated delta before jumping
 
 function checkPresentationMode() {
   if (!pdfDoc || pageGeometry.length <= 1) {
-    _isPresentationMode = false;
+    scrollState.presentationMode = false;
     return;
   }
   // Presentations have landscape pages (wider than tall).
   // Papers/books have portrait pages — keep normal scroll for those.
   const firstGeo = pageGeometry[1];
-  _isPresentationMode = firstGeo.cssWidth > firstGeo.cssHeight;
+  scrollState.presentationMode = firstGeo.cssWidth > firstGeo.cssHeight;
 }
 
 viewport.addEventListener('wheel', (e) => {
-  if (!_isPresentationMode || !pdfDoc) return;
+  if (!scrollState.presentationMode || !pdfDoc) return;
 
   e.preventDefault();
 
   // Accumulate delta to handle trackpad inertia (many small events)
-  _wheelAccumulator += e.deltaY;
+  scrollState.wheelAccum += e.deltaY;
 
-  clearTimeout(_wheelTimer);
-  _wheelTimer = setTimeout(() => { _wheelAccumulator = 0; }, 200);
+  clearTimeout(scrollState.wheelTimer);
+  scrollState.wheelTimer = setTimeout(() => { scrollState.wheelAccum = 0; }, 200);
 
-  if (Math.abs(_wheelAccumulator) >= WHEEL_PAGE_THRESHOLD) {
-    const direction = _wheelAccumulator > 0 ? 1 : -1;
-    _wheelAccumulator = 0;
+  if (Math.abs(scrollState.wheelAccum) >= WHEEL_PAGE_THRESHOLD) {
+    const direction = scrollState.wheelAccum > 0 ? 1 : -1;
+    scrollState.wheelAccum = 0;
     scrollToPage(currentVisiblePage + direction, true);
   }
 }, { passive: false });
 
 // --- Scroll: update current page indicator (throttled) ---
-let scrollRAF = 0;
 viewport.addEventListener('scroll', () => {
   if (!pdfDoc) return;
-  if (scrollRAF) return;
-  scrollRAF = requestAnimationFrame(() => {
-    scrollRAF = 0;
+  if (scrollState.raf) return;
+  scrollState.raf = requestAnimationFrame(() => {
+    scrollState.raf = 0;
     reconcileContainers();
     updateCurrentPageFromScroll();
   });
@@ -2496,7 +2498,7 @@ window.addEventListener('resize', () => {
     // Cancel pending render and OCR — scale changed, coordinates are stale
     renderQueue.length = 0;
     resetOcrState();
-    isScrollingFast = false;
+    scrollState.isFast = false;
     rendersSinceReset = 0;
     isResetPending = false;
     await buildPageSlots();
