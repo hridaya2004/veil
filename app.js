@@ -14,6 +14,17 @@
 //   then open http://localhost:8000
 // ============================================================
 
+// CDN dependencies — single source of truth for all external library URLs.
+// Update version numbers here only; they propagate to all import sites.
+const DEPS = {
+  PDFJS:        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs',
+  PDFJS_WORKER: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs',
+  TESSERACT:    'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js',
+  PDF_LIB:      'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js',
+  FONTKIT:       'https://esm.sh/@pdf-lib/fontkit@1.1.1',
+  NOTO_SANS:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf',
+};
+
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
 
 import {
@@ -40,8 +51,7 @@ import {
   isOcrArtifact,
 } from './core.js';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.worker.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = DEPS.PDFJS_WORKER;
 
 // ============================================================
 // Constants
@@ -1105,7 +1115,7 @@ async function ensureTesseractWorker() {
 
   tesseractLoading = true;
   try {
-    const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+    const mod = await import(DEPS.TESSERACT);
     // Handle both named export and default export patterns
     const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
     if (!createWorker) throw new Error('createWorker not found in Tesseract module');
@@ -3078,7 +3088,7 @@ function scrollToPage(pageNum, instant = false) {
 
 async function ensurePdfLib() {
   if (pdfLibModule) return pdfLibModule;
-  pdfLibModule = await import('https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js');
+  pdfLibModule = await import(DEPS.PDF_LIB);
   return pdfLibModule;
 }
 
@@ -3086,9 +3096,7 @@ async function ensureUnicodeFont() {
   // Load fontkit (required by pdf-lib for custom font embedding)
   if (!fontkitModule) {
     try {
-      const mod = await import(
-        'https://esm.sh/@pdf-lib/fontkit@1.1.1'
-      );
+      const mod = await import(DEPS.FONTKIT);
       fontkitModule = mod.default || mod;
     } catch (e) {
       console.warn('Failed to load fontkit:', e);
@@ -3099,9 +3107,7 @@ async function ensureUnicodeFont() {
   // Load Noto Sans Regular TTF (comprehensive Unicode coverage)
   if (!cachedFontBytes) {
     try {
-      const resp = await fetch(
-        'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf'
-      );
+      const resp = await fetch(DEPS.NOTO_SANS);
       if (!resp.ok) throw new Error(`Font fetch ${resp.status}`);
       cachedFontBytes = new Uint8Array(await resp.arrayBuffer());
     } catch (e) {
@@ -3344,7 +3350,7 @@ async function exportDarkPdf() {
     let exportWorker = null;
     if (isScannedDocument) {
       try {
-        const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');
+        const mod = await import(DEPS.TESSERACT);
         const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
         exportWorker = await createWorker('eng', 1, { logger: () => {} });
       } catch (err) {
