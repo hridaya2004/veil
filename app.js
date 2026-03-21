@@ -947,6 +947,28 @@ document.addEventListener('selectionchange', () => {
   if (slot) cleanupOcrIndicators(slot);
 });
 
+// Force clean clipboard on copy. The text layer uses color:transparent
+// on a dark background — without this, pasting into Word/Pages/Notion
+// carries those invisible styles (black bg + transparent text).
+// Setting both text/plain and text/html ensures every target app gets
+// clean, unstyled content: LaTeX editors use plain, rich editors use HTML.
+document.addEventListener('copy', (e) => {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const text = sel.toString();
+  if (!text) return;
+
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const html = escaped.split('\n').join('<br>');
+
+  e.clipboardData.setData('text/plain', text);
+  e.clipboardData.setData('text/html', html);
+  e.preventDefault();
+});
+
 // Listen for selection attempts on pages with pending OCR.
 // On touch: require a long press (350ms hold without movement) to
 // distinguish "trying to select text" from "scrolling past".
