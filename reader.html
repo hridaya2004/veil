@@ -18,22 +18,24 @@
 </head>
 <body>
 
+  <!-- Page transition: amber glow that fades out on arrival -->
+  <div id="page-transition" class="page-transition-overlay active" aria-hidden="true"></div>
+
   <!-- Drop Zone -->
-  <div id="drop-zone">
+  <div id="drop-zone" role="button" tabindex="0" aria-label="Drop a PDF file or click to browse">
     <input type="file" id="file-input" accept=".pdf" class="sr-only">
 
     <a href="index.html" class="drop-about">What is veil?</a>
 
     <div class="drop-hero">
       <div class="drop-wordmark" aria-label="veil">
-        <span class="drop-v-ghost" aria-hidden="true">v</span>
         <span class="drop-v">v</span><span class="drop-eil">eil</span>
       </div>
       <p class="drop-tagline drop-tagline-desktop">Drop a PDF, protect your eyes</p>
+      <p class="drop-tagline drop-tagline-mobile">Protect your eyes</p>
       <label for="file-input" class="drop-browse-btn">Browse PDF</label>
     </div>
 
-    <p class="drop-hint">or click anywhere to browse</p>
 
     <!-- Veil layers — slide apart when a PDF loads, like curtains parting.
          Three layers at different speeds create parallax depth. -->
@@ -47,7 +49,6 @@
     <header id="toolbar">
       <a href="#" class="toolbar-logo" title="Open another file" id="btn-home">
         <span class="nav-wordmark" aria-label="veil">
-          <span class="nav-v-ghost" aria-hidden="true">v</span>
           <span class="nav-v">v</span><span class="nav-eil">eil</span>
         </span>
       </a>
@@ -59,13 +60,13 @@
       <div class="toolbar-divider toolbar-filename-divider"></div>
 
       <nav class="toolbar-nav">
-        <button id="btn-prev" title="Previous page" aria-label="Previous page" disabled>
+        <button id="btn-prev" title="Previous page (←)" aria-label="Previous page" aria-keyshortcuts="ArrowLeft" disabled>
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
         </button>
         <span id="page-info" aria-live="polite">1 / 1</span>
-        <button id="btn-next" title="Next page" aria-label="Next page" disabled>
+        <button id="btn-next" title="Next page (→)" aria-label="Next page" aria-keyshortcuts="ArrowRight" disabled>
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 18 15 12 9 6"/>
           </svg>
@@ -74,7 +75,7 @@
 
       <div class="toolbar-divider"></div>
 
-      <button id="btn-toggle" class="toggle-active" title="Toggle dark mode" aria-label="Toggle dark mode">
+      <button id="btn-toggle" class="toggle-active" title="Toggle dark mode (D)" aria-label="Dark mode" aria-pressed="true" aria-keyshortcuts="d">
         <svg id="icon-dark" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
         </svg>
@@ -97,18 +98,21 @@
 
     </header>
 
-    <main id="viewport">
+    <main id="viewport" aria-label="PDF document">
       <!-- Page containers are created dynamically by app.js -->
     </main>
 
-    <div id="error-banner" hidden>
+    <div id="error-banner" hidden role="alert" aria-live="assertive">
       <span id="error-message"></span>
       <button id="error-dismiss" aria-label="Dismiss">&times;</button>
     </div>
 
-    <div id="info-banner" hidden>
+    <div id="info-banner" hidden aria-live="polite">
       <span id="info-message"></span>
     </div>
+
+    <!-- Screen reader announcements for dynamic events -->
+    <div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
     <div id="ios-export-warn" hidden>
       <span id="ios-export-warn-text"></span>

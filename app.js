@@ -423,6 +423,14 @@ let originalFileName = 'document';
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const readerEl = document.getElementById('reader');
+
+// Screen reader announcements
+const srAnnouncer = document.getElementById('sr-announcer');
+function announce(message) {
+  if (!srAnnouncer) return;
+  srAnnouncer.textContent = '';
+  requestAnimationFrame(() => { srAnnouncer.textContent = message; });
+}
 const btnHome = document.getElementById('btn-home');
 const btnPrev = document.getElementById('btn-prev');
 const btnNext = document.getElementById('btn-next');
@@ -488,6 +496,10 @@ const TOOLBAR_HOVER_DELAY = 300; // ms mouse must stay in zone
 function enterFocusMode() {
   if (!readerEl || readerEl.hidden || focusPaused) return;
   toolbar.classList.add('toolbar-hidden');
+  // Remove toolbar elements from tab order when hidden
+  toolbar.querySelectorAll('button, a, [tabindex]').forEach(el => {
+    el.setAttribute('tabindex', '-1');
+  });
 }
 
 function exitFocusMode() {
@@ -495,6 +507,10 @@ function exitFocusMode() {
   // The user rotates to portrait to access toolbar actions.
   if (isMobileLandscape()) return;
   toolbar.classList.remove('toolbar-hidden');
+  // Restore toolbar elements to tab order
+  toolbar.querySelectorAll('button, a, [tabindex="-1"]').forEach(el => {
+    el.removeAttribute('tabindex');
+  });
   resetFocusTimer();
 }
 
@@ -557,8 +573,12 @@ document.addEventListener('touchstart', (e) => {
   }
 }, { passive: false });
 
-// Keyboard: F to toggle focus mode
+// Keyboard: Tab reveals toolbar when hidden (accessibility)
+// F to toggle focus mode
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Tab' && !readerEl.hidden && toolbar.classList.contains('toolbar-hidden')) {
+    exitFocusMode();
+  }
   if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey
       && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
     if (toolbar.classList.contains('toolbar-hidden')) {
@@ -826,28 +846,67 @@ async function restoreSession(forceButton = false) {
 }
 
 function showResumeButton(filename, onClick) {
-  // Create a resume button in the drop zone, below the browse button
-  const existing = document.getElementById('resume-btn');
+  const existing = document.getElementById('resume-section');
   if (existing) existing.remove();
 
-  const btn = document.createElement('button');
-  btn.id = 'resume-btn';
-  btn.className = 'drop-resume-btn';
-  btn.textContent = `Resume: ${filename}`;
-  btn.addEventListener('click', (e) => {
-    e.stopPropagation(); // don't trigger drop zone click
-    btn.disabled = true;
-    btn.textContent = 'Loading...';
+  const savedPage = parseInt(localStorage.getItem('veil-page'), 10) || 1;
+
+  const section = document.createElement('div');
+  section.id = 'resume-section';
+  section.className = 'drop-resume-section';
+  section.role = 'button';
+  section.tabIndex = 0;
+  section.setAttribute('aria-label', `Resume reading ${filename}`);
+  section.innerHTML = `
+    <p class="drop-resume-label">Pick up where you left off</p>
+    <p class="drop-resume-filename">${filename.replace(/</g, '&lt;')}</p>
+    <p class="drop-resume-page">Page ${savedPage}</p>
+  `;
+  // Empty touchstart enables :active on iOS Safari
+  section.addEventListener('touchstart', () => {}, { passive: true });
+  function activateResume(e) {
+    e.stopPropagation();
+    section.querySelector('.drop-resume-label').textContent = 'Loading...';
     onClick();
+  }
+  section.addEventListener('click', activateResume);
+  section.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activateResume(e);
+    }
   });
 
   const hero = document.querySelector('.drop-hero');
-  if (hero) hero.appendChild(btn);
+  if (hero) hero.appendChild(section);
+
+  // Hide "Browse PDF" button and tagline when resume is shown
+  const browseBtn = document.querySelector('.drop-browse-btn');
+  if (browseBtn) browseBtn.style.display = 'none';
+  document.querySelectorAll('.drop-tagline').forEach(el => el.style.display = 'none');
+
+  // Add "or open a different file" below
+  const altExisting = document.getElementById('drop-alt-action');
+  if (altExisting) altExisting.remove();
+  const alt = document.createElement('label');
+  alt.id = 'drop-alt-action';
+  alt.className = 'drop-alt-action';
+  alt.htmlFor = 'file-input';
+  alt.textContent = 'or open a different file';
+  // Empty touchstart enables :active on iOS Safari
+  alt.addEventListener('touchstart', () => {}, { passive: true });
+  hero.appendChild(alt);
 }
 
 function hideResumeButton() {
-  const btn = document.getElementById('resume-btn');
-  if (btn) btn.remove();
+  const section = document.getElementById('resume-section');
+  if (section) section.remove();
+  const alt = document.getElementById('drop-alt-action');
+  if (alt) alt.remove();
+  // Restore Browse PDF button and tagline
+  const browseBtn = document.querySelector('.drop-browse-btn');
+  if (browseBtn) browseBtn.style.display = '';
+  document.querySelectorAll('.drop-tagline').forEach(el => el.style.display = '');
 }
 
 // ============================================================
@@ -857,6 +916,7 @@ function hideResumeButton() {
 function handleFile(file) {
   if (!file || file.type !== 'application/pdf') return;
   hideResumeButton();
+  announce('Loading document...');
   originalFileName = file.name.replace(/\.pdf$/i, '');
   if (fileNameEl) fileNameEl.textContent = file.name;
   document.title = `veil - ${file.name}`;
@@ -940,6 +1000,8 @@ async function loadPDF(data, resumePage = 1) {
     scrollToPage(resumePage, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
+    checkScrollSnap();
+    announce(`Document loaded, ${pdfDoc.numPages} pages`);
 
   } catch (err) {
     console.error('Failed to load PDF:', err);
@@ -1829,6 +1891,7 @@ function assignContainer(poolSlot, pageNum) {
   el.style.top = geo.offsetTop + 'px';
   el.style.width = geo.cssWidth + 'px';
   el.style.height = geo.cssHeight + 'px';
+  el.style.scrollSnapAlign = '';
   el.style.display = '';
   el.dataset.pageNum = pageNum;
 
@@ -1845,11 +1908,34 @@ function assignContainer(poolSlot, pageNum) {
   poolSlot.assignedPage = pageNum;
   pageSlots.set(pageNum, poolSlot);
 
-  // Trigger rendering if not already done
+  // Don't render immediately — schedule it. During scroll animation,
+  // containers get repositioned at 60fps but PDF.js rendering only
+  // starts when the scroll settles. Pre-rendered pages (already in
+  // the pool) appear instantly; new ones show the placeholder until
+  // the debounced render fires.
+  scheduleRender(pageNum);
+}
+
+// Debounced render scheduler: accumulates pages that need rendering
+// and fires them all at once when scrolling stops.
+let _renderDebounceTimer = null;
+const _pendingRenders = new Set();
+
+function scheduleRender(pageNum) {
   const state = getOrCreateRenderState(pageNum);
-  if (!state.rendered && !state.rendering) {
-    enqueueRender(pageNum);
+  if (state.rendered || state.rendering) return;
+  _pendingRenders.add(pageNum);
+  clearTimeout(_renderDebounceTimer);
+  _renderDebounceTimer = setTimeout(flushPendingRenders, 150);
+}
+
+function flushPendingRenders() {
+  for (const pageNum of _pendingRenders) {
+    if (pageSlots.has(pageNum)) {
+      enqueueRender(pageNum);
+    }
   }
+  _pendingRenders.clear();
 }
 
 function evictContainer(poolSlot) {
@@ -2838,6 +2924,7 @@ function updateToggleButton() {
   iconDark.hidden = !dark;
   iconLight.hidden = dark;
   btnToggle.classList.toggle('toggle-active', dark);
+  btnToggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
 }
 
 function toggleDarkMode() {
@@ -2852,6 +2939,7 @@ function toggleDarkMode() {
 
   applyDarkModeToPage(pageNum);
   updateToggleButton();
+  announce(shouldApplyDark(pageNum) ? 'Dark mode enabled' : 'Dark mode disabled');
   // Persist immediately so the override survives app close
   savePagePosition();
 }
@@ -3534,6 +3622,7 @@ async function exportDarkPdf() {
       // Delay revoke so the browser has time to start the download
       setTimeout(() => URL.revokeObjectURL(url), 5000);
     }
+    announce('Export complete');
 
   } catch (err) {
     console.error('Export failed:', err);
@@ -3633,6 +3722,15 @@ dropZone.addEventListener('click', async (e) => {
   fileInput.click();
 });
 
+// Keyboard: Enter/Space opens file picker (accessibility)
+dropZone.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    if (e.target.closest('#resume-section') || e.target.closest('a') || e.target.closest('label')) return;
+    e.preventDefault();
+    dropZone.click();
+  }
+});
+
 dropZone.addEventListener('dragover', (e) => {
   e.preventDefault();
   dropZone.classList.add('drag-over');
@@ -3713,6 +3811,10 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowRight') scrollToPage(currentVisiblePage + 1, true);
   else if (e.key === 'd') toggleDarkMode();
 });
+
+function checkScrollSnap() {
+  // Scroll snap removed — caused janky scrolling on presentations
+}
 
 // --- Scroll: update current page indicator (throttled) ---
 let scrollRAF = 0;
@@ -3811,6 +3913,15 @@ restoreSession().then((restored) => {
     // No saved session — hide the loader (if visible), show drop zone
     const loader = document.getElementById('app-loader');
     if (loader) loader.hidden = true;
+  }
+  // Fade out the amber transition overlay (if present from landing page navigation)
+  const transitionOverlay = document.getElementById('page-transition');
+  if (transitionOverlay) {
+    requestAnimationFrame(() => {
+      transitionOverlay.classList.remove('active');
+      // Remove from DOM after fade completes
+      setTimeout(() => transitionOverlay.remove(), 600);
+    });
   }
   // Signal that the app module has fully initialized (used by e2e tests)
   document.documentElement.dataset.appReady = 'true';

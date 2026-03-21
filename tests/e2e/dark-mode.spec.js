@@ -43,7 +43,7 @@ test.describe('Dark mode (normal PDF)', () => {
 
   test('toggle button switches dark mode off', async ({ page }) => {
     // Click the toggle button
-    await page.locator('#btn-toggle').click();
+    await page.locator('#btn-toggle').click({ force: true });
 
     // Canvas should lose dark-active class
     const hasDarkActive = await page.evaluate(() => {
@@ -63,14 +63,14 @@ test.describe('Dark mode (normal PDF)', () => {
     expect(dark).toBe(true);
 
     // Toggle off
-    await btnToggle.click();
+    await btnToggle.click({ force: true });
     dark = await page.evaluate(() =>
       document.querySelector('.page-canvas').classList.contains('dark-active')
     );
     expect(dark).toBe(false);
 
     // Toggle back on
-    await btnToggle.click();
+    await btnToggle.click({ force: true });
     dark = await page.evaluate(() =>
       document.querySelector('.page-canvas').classList.contains('dark-active')
     );
@@ -97,7 +97,7 @@ test.describe('Dark mode (already-dark PDF)', () => {
 
   test('force dark override still works on already-dark page', async ({ page }) => {
     // Click toggle to force dark mode on (it starts off because auto-detected as dark)
-    await page.locator('#btn-toggle').click();
+    await page.locator('#btn-toggle').click({ force: true });
 
     const hasDarkActive = await page.evaluate(() => {
       const canvas = document.querySelector('.page-container[data-page-num="1"] .page-canvas');

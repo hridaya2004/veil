@@ -43,6 +43,25 @@ body {
 }
 
 /* ============================================================
+   Page Transition — amber glow
+   ============================================================ */
+
+.page-transition-overlay {
+  position: fixed; inset: 0; z-index: 999;
+  background: #241e18;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+.page-transition-overlay.active {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-transition-overlay { transition: none; opacity: 0 !important; }
+}
+
+/* ============================================================
    Drop Zone
    ============================================================ */
 
@@ -53,6 +72,8 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 48px 0;
+  overflow-y: auto;
   cursor: pointer;
   z-index: 100;
   -webkit-tap-highlight-color: transparent;
@@ -68,20 +89,24 @@ body {
   background: #161210;
 }
 
-#drop-zone.drag-over::after {
-  content: '';
-  position: absolute;
-  inset: 16px;
-  border: 2px dashed rgba(212, 163, 115, 0.4);
-  border-radius: 16px;
-  pointer-events: none;
-  z-index: 4;
-  animation: drag-border-fade-in 0.2s ease;
+#drop-zone::after {
+  content: none;
+}
+@media (pointer: fine) {
+  #drop-zone::after {
+    content: '';
+    position: absolute;
+    inset: 64px 48px 48px;
+    border: 1.5px dashed rgba(212, 163, 115, 0.25);
+    border-radius: 16px;
+    pointer-events: none;
+    z-index: 4;
+    transition: border-color 0.3s ease;
+  }
 }
 
-@keyframes drag-border-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+#drop-zone.drag-over::after {
+  border-color: rgba(212, 163, 115, 0.4);
 }
 
 /* --- Veil transition layers ---
@@ -99,7 +124,7 @@ body {
 }
 
 .veil-layer-1 {
-  background: #0a0806;
+  background: #241e18;
   z-index: 3;
   transition: background 0.3s ease, transform 0.7s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -116,7 +141,7 @@ body {
   transition: transform 1s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* When opening: layers slide right at different speeds */
+/* When opening (PDF loaded): layers slide right at different speeds */
 #drop-zone.veil-opening .veil-layer-1 {
   transform: translateX(100%);
 }
@@ -134,8 +159,11 @@ body {
 
 /* Content fades out as veil opens */
 #drop-zone.veil-opening .drop-hero,
-#drop-zone.veil-opening .drop-hint,
 #drop-zone.veil-opening .drop-about {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+#drop-zone.veil-opening::after {
   opacity: 0;
   transition: opacity 0.3s ease;
 }
@@ -143,8 +171,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .veil-layer { transition: none; }
   #drop-zone.veil-opening .drop-hero,
-  #drop-zone.veil-opening .drop-hint,
-  #drop-zone.veil-opening .drop-about {
+  #drop-zone.veil-opening .drop-about,
+  #drop-zone.veil-opening::after {
     transition: none;
   }
 }
@@ -155,16 +183,15 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  text-align: center;
   gap: 16px;
   user-select: none;
   z-index: 5;
   position: relative;
-  /* Shift the hero group above center — brand in the upper third,
-     action below it with breathing room. */
-  margin-top: -4vh;
+  margin-top: -5vh;
 }
 @media (min-width: 700px) {
-  .drop-hero { margin-top: -12vh; }
+  .drop-hero { margin-top: -8vh; }
 }
 
 .drop-wordmark {
@@ -172,7 +199,7 @@ body {
   font-family: 'IBM Plex Sans', sans-serif;
   font-size: 72px;
   font-weight: 700;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.01em;
   line-height: 1;
   color: var(--accent);
   transition: opacity 0.4s ease;
@@ -186,16 +213,6 @@ body {
   position: relative;
   z-index: 1;
 }
-.drop-v-ghost {
-  position: absolute;
-  left: 0;
-  top: -0.15em;
-  color: var(--accent);
-  opacity: 0.35;
-  z-index: 0;
-  pointer-events: none;
-  filter: blur(1.5px);
-}
 .drop-eil {
   position: relative;
   z-index: 1;
@@ -205,6 +222,7 @@ body {
   font-size: 14px;
   color: var(--text-secondary);
   letter-spacing: -0.01em;
+  margin-top: 8px;
 }
 /* Touch devices (phones, tablets, foldables): short tagline */
 .drop-tagline-desktop { display: none; }
@@ -221,7 +239,6 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
   padding: 12px 28px;
   border-radius: 50px;
   font-family: inherit;
@@ -241,66 +258,141 @@ body {
   .drop-browse-btn { display: none; }
 }
 
-.drop-resume-btn {
-  display: block;
-  margin-top: 28px;
-  padding: 10px 24px;
-  border-radius: 50px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  border: 1px solid rgba(212, 163, 115, 0.3);
-  background: transparent;
-  color: var(--accent);
+.drop-resume-section {
+  margin-top: 56px;
+  padding: 20px 28px;
+  border-radius: 12px;
+  border: 1px solid rgba(212, 163, 115, 0.1);
+  background: rgba(212, 163, 115, 0.04);
   cursor: pointer;
+  text-align: center;
+  transition: background 0.2s, border-color 0.2s, transform 0.15s;
+  max-width: 320px;
+  width: calc(100% - 48px);
+  -webkit-tap-highlight-color: transparent;
+}
+@media (min-width: 700px) {
+  .drop-resume-section { margin-top: 88px; max-width: 440px; width: auto; padding: 24px 36px; }
+  .drop-resume-label { font-size: 15px; }
+  .drop-resume-filename { font-size: 18px; }
+  .drop-resume-page { font-size: 13px; }
+}
+@media (hover: hover) {
+  .drop-resume-section:hover {
+    background: rgba(212, 163, 115, 0.08);
+    border-color: rgba(212, 163, 115, 0.25);
+  }
+}
+.drop-resume-section:active {
+  background: rgba(212, 163, 115, 0.1);
+  border-color: rgba(212, 163, 115, 0.25);
+  transform: scale(0.98);
+}
+.drop-resume-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.drop-resume-filename {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-word;
+  line-height: 1.4;
+}
+.drop-resume-page {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+.drop-alt-action {
+  margin-top: 14px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 12px 24px;
+  border-radius: 12px;
+  border: 1px solid rgba(212, 163, 115, 0.1);
+  background: rgba(212, 163, 115, 0.04);
   transition: background 0.2s, border-color 0.2s;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 280px;
+  -webkit-tap-highlight-color: transparent;
 }
-.drop-resume-btn:hover {
-  background: rgba(212, 163, 115, 0.08);
-  border-color: rgba(212, 163, 115, 0.5);
+.drop-alt-action:active {
+  background: rgba(212, 163, 115, 0.1);
+  border-color: rgba(212, 163, 115, 0.25);
+  transform: scale(0.98);
 }
-.drop-resume-btn:active {
-  background: rgba(212, 163, 115, 0.15);
+@media (hover: hover) {
+  .drop-alt-action:hover {
+    background: rgba(212, 163, 115, 0.08);
+    border-color: rgba(212, 163, 115, 0.25);
+  }
 }
-.drop-resume-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
+@media (min-width: 700px) {
+  .drop-alt-action { font-size: 15px; padding: 14px 28px; }
 }
 
-/* --- Hint at bottom (desktop only) --- */
-
-.drop-hint {
-  position: fixed;
-  bottom: 32px;
-  font-size: 13px;
-  color: var(--text-muted);
-  user-select: none;
-  z-index: 5;
-  display: none;
-}
-/* Mouse devices only — touch devices use the Browse PDF button */
-@media (pointer: fine) {
-  .drop-hint { display: block; }
-}
 
 /* --- "What is veil?" link --- */
 
 .drop-about {
   position: fixed;
-  top: 20px;
-  left: 24px;
-  font-size: 12px;
+  top: 16px;
+  left: 20px;
+  font-size: 14px;
   color: var(--text-secondary);
   text-decoration: none;
   transition: color var(--transition);
   z-index: 101;
+  padding: 8px 4px;
 }
 .drop-about:hover {
   color: var(--accent);
+}
+@media (min-width: 700px) {
+  .drop-about { left: 48px; }
+}
+
+/* --- Focus styles --- */
+
+#drop-zone:focus-visible {
+  outline: none;
+}
+#drop-zone:focus-visible::after {
+  border-color: rgba(212, 163, 115, 0.5) !important;
+  content: '' !important;
+  position: absolute !important;
+  inset: 64px 48px 48px !important;
+  border: 1.5px dashed rgba(212, 163, 115, 0.5) !important;
+  border-radius: 16px !important;
+  pointer-events: none !important;
+  z-index: 4 !important;
+}
+.drop-about:focus-visible {
+  outline: 2px solid rgba(212, 163, 115, 0.6);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.drop-browse-btn:focus-visible,
+.drop-resume-section:focus-visible {
+  outline: 2px solid rgba(212, 163, 115, 0.6);
+  outline-offset: 3px;
+}
+
+/* --- Prefers contrast: more --- */
+
+@media (prefers-contrast: more) {
+  .drop-tagline { color: var(--text-primary); }
+  .drop-resume-label { color: var(--text-primary); }
+  .drop-resume-page { color: var(--text-secondary); }
+  .drop-alt-action { color: var(--text-secondary); }
+  .drop-about { color: var(--text-primary); }
+  .drop-resume-section {
+    border-color: rgba(212, 163, 115, 0.3);
+  }
+  #drop-zone::after {
+    border-color: rgba(212, 163, 115, 0.5) !important;
+  }
 }
 
 /* ============================================================
@@ -352,7 +444,7 @@ body {
   font-family: 'IBM Plex Sans', sans-serif;
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.01em;
   line-height: 1;
   color: var(--accent);
 }
@@ -362,16 +454,6 @@ body {
 .nav-v {
   position: relative;
   z-index: 1;
-}
-.nav-v-ghost {
-  position: absolute;
-  left: 0;
-  top: -0.15em;
-  color: var(--accent);
-  opacity: 0.35;
-  z-index: 0;
-  pointer-events: none;
-  filter: blur(0.3px);
 }
 .nav-eil {
   position: relative;
@@ -410,7 +492,7 @@ body {
 }
 
 #page-info {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-secondary);
   min-width: 48px;
   text-align: center;
@@ -425,6 +507,10 @@ body {
   #page-info:hover {
     background: rgba(212, 163, 115, 0.08);
   }
+}
+#page-info:focus-visible {
+  outline: 2px solid rgba(212, 163, 115, 0.6);
+  outline-offset: 2px;
 }
 @media (min-width: 700px) {
   #page-info { font-size: 12px; min-width: 56px; }
@@ -442,6 +528,10 @@ body {
   border-radius: 4px;
   padding: 2px 4px;
   outline: none;
+}
+#page-input:focus-visible {
+  border-color: rgba(212, 163, 115, 0.5);
+  box-shadow: 0 0 0 2px rgba(212, 163, 115, 0.2);
 }
 @media (min-width: 700px) {
   #page-input { font-size: 12px; }
@@ -479,6 +569,17 @@ body {
 #toolbar button:disabled {
   opacity: 0.25;
   cursor: default;
+}
+
+#toolbar button:focus-visible {
+  outline: 2px solid rgba(212, 163, 115, 0.6);
+  outline-offset: 2px;
+}
+
+.toolbar-logo:focus-visible {
+  outline: 2px solid rgba(212, 163, 115, 0.6);
+  outline-offset: 2px;
+  opacity: 1;
 }
 
 
@@ -940,6 +1041,51 @@ div.ocr-loading:not(.page-container)::before {
   }
 }
 
+/* Respect user motion preferences — toolbar, banners */
+@media (prefers-reduced-motion: reduce) {
+  #toolbar { transition: none; }
+  #info-banner { transition: none; }
+  .export-progress-fill { transition: none; }
+  .link-annot { transition: none; }
+}
+
+/* ============================================================
+   High Contrast
+   ============================================================ */
+
+@media (prefers-contrast: more) {
+  #toolbar {
+    border-color: rgba(212, 163, 115, 0.25);
+  }
+  .toolbar-divider {
+    background: rgba(212, 163, 115, 0.25);
+  }
+  .toolbar-filename {
+    color: var(--text-primary);
+  }
+  #page-info {
+    color: var(--text-primary);
+  }
+  #toolbar button {
+    color: var(--text-primary);
+  }
+  #toolbar button:disabled {
+    opacity: 0.4;
+  }
+  #error-banner {
+    border-color: rgba(200, 100, 100, 0.4);
+  }
+  #info-banner {
+    border-color: rgba(212, 163, 115, 0.35);
+  }
+  .export-progress-text {
+    color: var(--text-primary);
+  }
+  #viewport {
+    scrollbar-color: rgba(212, 163, 115, 0.45) transparent;
+  }
+}
+
 /* ============================================================
    Utilities
    ============================================================ */
@@ -1000,7 +1146,7 @@ div.ocr-loading:not(.page-container)::before {
   font-family: 'IBM Plex Sans', sans-serif;
   font-size: 48px;
   font-weight: 700;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.01em;
   color: var(--accent);
   animation: loader-pulse 1.5s ease-in-out infinite;
 }

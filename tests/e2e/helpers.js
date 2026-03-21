@@ -38,8 +38,18 @@ export async function loadPDF(page, filename) {
     return dz && dz.hidden;
   }, { timeout: 30000 });
 
-  // Brief settle after veil animation for layout/compositing to complete
-  await page.waitForTimeout(200);
+  // Brief settle after veil animation for layout/compositing to complete.
+  // The render queue processes pages asynchronously — wait for the first
+  // page to actually render before proceeding.
+  await page.waitForTimeout(300);
+
+  // Ensure toolbar is visible (not hidden by focus mode timer).
+  // Move mouse to the top to trigger toolbar reveal, then wait
+  // for the dwell timer (TOOLBAR_HOVER_DELAY = 300ms).
+  await page.mouse.move(640, 20);
+  await page.waitForTimeout(400);
+  // Keep mouse over toolbar so it stays visible
+  await page.mouse.move(640, 30);
 
   // Wait for the first page container to have a rendered canvas
   await page.waitForFunction(() => {
@@ -65,5 +75,5 @@ export async function waitForOcrTextLayer(page, pageNum = 1) {
   await page.waitForFunction((pNum) => {
     const container = document.querySelector(`.page-container[data-page-num="${pNum}"] .text-layer`);
     return container && container.querySelectorAll('span').length > 0;
-  }, pageNum, { timeout: 60000 }); // OCR can be slow
+  }, pageNum, { timeout: 120000 }); // OCR + render queue can be slow on real PDFs
 }

@@ -64,7 +64,9 @@
   function updateSlider() {
     baVeil.style.clipPath = `inset(0 ${100 - pos}% 0 0)`;
     baSlider.style.left = pos + "%";
-    baSlider.setAttribute("aria-valuenow", Math.round(pos));
+    const rounded = Math.round(pos);
+    baSlider.setAttribute("aria-valuenow", rounded);
+    baSlider.setAttribute("aria-valuetext", `Showing ${rounded}% Veil, ${100 - rounded}% Standard`);
   }
 
   function moveSlider(cx) {
@@ -334,5 +336,24 @@
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => buildLayers(), 100);
   });
+
+  /* ═══ PAGE TRANSITION ═══ */
+  if (!prefersReducedMotion) {
+    const overlay = document.getElementById("page-transition");
+    document.querySelectorAll('a[href="reader.html"]').forEach(link => {
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        overlay.classList.add("active");
+        setTimeout(() => overlay.classList.add("darken"), 50);
+        setTimeout(() => { window.location.href = "reader.html"; }, 350);
+      });
+    });
+    // Reset overlay when returning via back button (bfcache restore)
+    window.addEventListener("pageshow", (e) => {
+      if (e.persisted) {
+        overlay.classList.remove("active", "darken");
+      }
+    });
+  }
 
 })();
