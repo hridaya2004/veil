@@ -172,28 +172,21 @@ const BASELINE_RATIO = (() => {
 // State
 // ============================================================
 
-let pdfDoc = null;
-let currentScale = 0;
-// Original PDF bytes — kept for iOS document recreation (see resetPdfEngine).
-let _pdfBuffer = null;
-
-// Each page can be in one of these dark-mode states:
-//   'auto'  – use already-dark detection result
-//   'dark'  – force dark mode on (user override)
-//   'light' – force dark mode off (user override)
-// Default is 'auto' for all pages.
-const pageDarkOverride = new Map();
-
-// Cache of already-dark detection results per page.
-// true = page is already dark, skip inversion.
-const pageAlreadyDark = new Map();
-
-// Virtual scrolling: only a few DOM containers exist at any time.
-// pageSlots maps currently-active page numbers to their pool container.
-// pageRenderState tracks per-page state that persists across recycling.
-const pageSlots = new Map(); // Map<pageNum, poolSlot>
-const pageRenderState = new Map(); // Map<pageNum, { rendered, rendering, ... }>
-let pageGeometry = []; // [{cssWidth, cssHeight, offsetTop}] indexed by pageNum (1-based, index 0 unused)
+const pdfState = {
+  doc: null,
+  scale: 0,
+  buffer: null,              // raw bytes for iOS engine reset
+  geometry: [],              // [{cssWidth, cssHeight, offsetTop}] per page (1-based)
+  generation: 0,             // monotonic counter for stale detection
+  isScanned: false,
+  fileName: 'document',
+  largeDocConstrained: false,
+  currentPage: 1,
+  darkOverride: new Map(),   // 'auto' | 'dark' | 'light' per page
+  alreadyDark: new Map(),    // boolean per page
+  slots: new Map(),          // pageNum → pool container
+  renderState: new Map(),    // pageNum → {rendered, rendering, ...}
+};
 // Desktop: generous pool for fluid scrolling (RAM is abundant).
 // Mobile: tight pool to minimize canvas context memory pressure.
 const POOL_SIZE = _memConstrainedEarly ? 5 : window.matchMedia('(pointer: fine)').matches ? 15 : 7;
@@ -202,16 +195,13 @@ const PAGE_GAP = 40; // px between pages (matches CSS gap)
 const VIEWPORT_PADDING_TOP = 64; // space for floating toolbar
 
 // Monotonically increasing, bumped on new PDF load or resize
-let globalGeneration = 0;
 
 // true if the document is detected as scanned (full-page images, no text).
 // When true, image protection is skipped so CSS inversion covers the whole page.
-let isScannedDocument = false;
 
 
 
 
-let originalFileName = 'document';
 
 // ============================================================
 // DOM References
@@ -440,7 +430,7 @@ infoBanner.addEventListener('click', () => {
 // enough and returns to normal view.
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
-    if (uiState.zoomHintShown || !pdfDoc) return;
+    if (uiState.zoomHintShown || !pdfState.doc) return;
     // Don't suggest landscape if already in landscape
     if (window.matchMedia('(orientation: landscape)').matches) return;
     const scale = window.visualViewport.scale;
@@ -469,12 +459,12 @@ if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
 
 
 function savePagePosition() {
-  if (!pdfDoc) return;
-  localStorage.setItem('veil-page', String(currentVisiblePage));
+  if (!pdfState.doc) return;
+  localStorage.setItem('veil-page', String(pdfState.currentPage));
 
   // Persist dark mode overrides (pages manually toggled by the user)
   const overrides = {};
-  for (const [pageNum, mode] of pageDarkOverride) {
+  for (const [pageNum, mode] of pdfState.darkOverride) {
     if (mode !== 'auto') overrides[pageNum] = mode;
   }
   if (Object.keys(overrides).length > 0) {
@@ -486,7 +476,7 @@ function savePagePosition() {
 
 // Save page position periodically during reading
 viewport.addEventListener('scroll', () => {
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
   clearTimeout(uiState.savePageTimer);
   uiState.savePageTimer = setTimeout(savePagePosition, 1000);
 }, { passive: true });
@@ -539,7 +529,7 @@ async function restoreSession(forceButton = false) {
           const file = await sessionData.handle.getFile();
           const buffer = await file.arrayBuffer();
           if (loader) loader.hidden = false;
-          originalFileName = savedFilename.replace(/\.pdf$/i, '');
+          pdfState.fileName = savedFilename.replace(/\.pdf$/i, '');
           if (fileNameEl) fileNameEl.textContent = savedFilename;
           document.title = `veil - ${savedFilename}`;
           await loadPDF(new Uint8Array(buffer), savedPage);
@@ -557,7 +547,7 @@ async function restoreSession(forceButton = false) {
         showResumeButton(savedFilename, async () => {
           try {
             if (loader) loader.hidden = false;
-            originalFileName = savedFilename.replace(/\.pdf$/i, '');
+            pdfState.fileName = savedFilename.replace(/\.pdf$/i, '');
             if (fileNameEl) fileNameEl.textContent = savedFilename;
             document.title = `veil - ${savedFilename}`;
             await loadPDF(new Uint8Array(sessionData.buffer), savedPage);
@@ -572,7 +562,7 @@ async function restoreSession(forceButton = false) {
       }
       // Natural reopen — auto-restore without click
       if (loader) loader.hidden = false;
-      originalFileName = savedFilename.replace(/\.pdf$/i, '');
+      pdfState.fileName = savedFilename.replace(/\.pdf$/i, '');
       if (fileNameEl) fileNameEl.textContent = savedFilename;
       document.title = `veil - ${savedFilename}`;
       await loadPDF(new Uint8Array(sessionData.buffer), savedPage);
@@ -670,7 +660,7 @@ function handleFile(file) {
   }
   hideResumeButton();
   announce('Loading document...');
-  originalFileName = file.name.replace(/\.pdf$/i, '');
+  pdfState.fileName = file.name.replace(/\.pdf$/i, '');
   if (fileNameEl) fileNameEl.textContent = file.name;
   document.title = `veil - ${file.name}`;
 
@@ -696,18 +686,18 @@ function handleFile(file) {
 
 async function loadPDF(data, resumePage = 1) {
   try {
-    if (pdfDoc) pdfDoc.destroy();
+    if (pdfState.doc) pdfState.doc.destroy();
     cleanup();
 
     // Keep the original bytes for iOS document recreation.
     // PDF.js may transfer the buffer, so we keep our own copy.
-    _pdfBuffer = data.slice(0);
-    pdfDoc = await pdfjsLib.getDocument({ data }).promise;
-    _isLargeDocConstrained = _isMemoryConstrained && pdfDoc.numPages > LARGE_DOC_THRESHOLD;
-    pageDarkOverride.clear();
-    pageAlreadyDark.clear();
-    isScannedDocument = false;
-    globalGeneration++;
+    pdfState.buffer = data.slice(0);
+    pdfState.doc = await pdfjsLib.getDocument({ data }).promise;
+    pdfState.largeDocConstrained = _isMemoryConstrained && pdfState.doc.numPages > LARGE_DOC_THRESHOLD;
+    pdfState.darkOverride.clear();
+    pdfState.alreadyDark.clear();
+    pdfState.isScanned = false;
+    pdfState.generation++;
 
     // Cancel all pending render and OCR jobs from previous document
     resetOcrState();
@@ -727,7 +717,7 @@ async function loadPDF(data, resumePage = 1) {
     }, 1050);
 
     // Detect scanned document before building pages
-    isScannedDocument = await detectScannedDocument();
+    pdfState.isScanned = await detectScannedDocument();
 
     await buildPageSlots();
     // Wait one frame for the browser to reflow the new spacer/pool DOM.
@@ -741,7 +731,7 @@ async function loadPDF(data, resumePage = 1) {
       try {
         const overrides = JSON.parse(savedOverrides);
         for (const [pageNum, mode] of Object.entries(overrides)) {
-          pageDarkOverride.set(parseInt(pageNum, 10), mode);
+          pdfState.darkOverride.set(parseInt(pageNum, 10), mode);
         }
       } catch (_) {}
     }
@@ -750,7 +740,7 @@ async function loadPDF(data, resumePage = 1) {
     reconcileContainers();
     updateCurrentPageFromScroll();
     checkPresentationMode();
-    announce(`Document loaded, ${pdfDoc.numPages} pages`);
+    announce(`Document loaded, ${pdfState.doc.numPages} pages`);
 
   } catch (err) {
     console.error('Failed to load PDF:', err);
@@ -778,10 +768,10 @@ async function loadPDF(data, resumePage = 1) {
 // ============================================================
 
 async function detectScannedDocument() {
-  if (!pdfDoc || pdfDoc.numPages === 0) return false;
+  if (!pdfState.doc || pdfState.doc.numPages === 0) return false;
 
   // Pick sample pages spread across the document
-  const numPages = pdfDoc.numPages;
+  const numPages = pdfState.doc.numPages;
   const sampleIndices = new Set();
   sampleIndices.add(1); // first page always
   if (numPages >= 2) sampleIndices.add(numPages); // last
@@ -793,7 +783,7 @@ async function detectScannedDocument() {
   const pageSamples = [];
 
   for (const pageNum of samplesToCheck) {
-    const page = await pdfDoc.getPage(pageNum);
+    const page = await pdfState.doc.getPage(pageNum);
     const vp = page.getViewport({ scale: 1 });
     const pageArea = vp.width * vp.height;
 
@@ -864,7 +854,7 @@ function cleanupOcrIndicators(slot) {
 
 function ocrFinished(slot) {
   const pageNum = slot.assignedPage;
-  const state = pageNum != null ? pageRenderState.get(pageNum) : null;
+  const state = pageNum != null ? pdfState.renderState.get(pageNum) : null;
   if (state) {
     state.ocrInProgress = false;
   }
@@ -892,7 +882,7 @@ function hitTestImageRegion(stateOrSlot, x, y) {
  */
 function showOcrLoading(slot, region) {
   const pageNum = slot.assignedPage;
-  const state = pageNum != null ? pageRenderState.get(pageNum) : null;
+  const state = pageNum != null ? pdfState.renderState.get(pageNum) : null;
   if (!state || !state.ocrInProgress) return;
 
   // Don't show the indicator if OCR started recently (< 500ms ago).
@@ -900,7 +890,7 @@ function showOcrLoading(slot, region) {
   // Flashing the indicator for sub-second OCR is distracting.
   if (state._ocrStartTime && (Date.now() - state._ocrStartTime) < 500) return;
 
-  if (isScannedDocument) {
+  if (pdfState.isScanned) {
     if (!slot.element.classList.contains('ocr-loading')) {
       slot.element.classList.remove('ocr-done');
       slot.element.classList.add('ocr-loading');
@@ -937,11 +927,11 @@ document.addEventListener('selectionchange', () => {
   if (!el) return;
 
   // For scanned docs: any selection on the page means OCR worked
-  if (isScannedDocument) {
+  if (pdfState.isScanned) {
     const container = el.closest('.page-container');
     if (!container) return;
     const pageNum = parseInt(container.dataset.pageNum, 10);
-    const slot = pageSlots.get(pageNum);
+    const slot = pdfState.slots.get(pageNum);
     if (slot) cleanupOcrIndicators(slot);
     return;
   }
@@ -953,7 +943,7 @@ document.addEventListener('selectionchange', () => {
   const container = ocrRegion.closest('.page-container');
   if (!container) return;
   const pageNum = parseInt(container.dataset.pageNum, 10);
-  const slot = pageSlots.get(pageNum);
+  const slot = pdfState.slots.get(pageNum);
   if (slot) cleanupOcrIndicators(slot);
 });
 
@@ -969,15 +959,15 @@ function triggerOcrIndicator(e) {
   if (!container) return;
 
   const pageNum = parseInt(container.dataset.pageNum, 10);
-  const slot = pageSlots.get(pageNum);
-  const state = pageRenderState.get(pageNum);
+  const slot = pdfState.slots.get(pageNum);
+  const state = pdfState.renderState.get(pageNum);
   if (!slot || !state || !state.ocrInProgress) return;
 
   const rect = container.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
 
-  if (isScannedDocument) {
+  if (pdfState.isScanned) {
     showOcrLoading(slot, null);
   } else {
     const region = hitTestImageRegion(state, x, y);
@@ -1034,10 +1024,10 @@ document.addEventListener('pointercancel', () => {
 
 function cleanup() {
   viewport.innerHTML = '';
-  pageSlots.clear();
-  pageRenderState.clear();
+  pdfState.slots.clear();
+  pdfState.renderState.clear();
   renderPipeline.pool.length = 0;
-  pageGeometry = [null];
+  pdfState.geometry = [null];
   renderPipeline.spacer = null;
 }
 
@@ -1135,7 +1125,7 @@ function createPoolContainer() {
 }
 
 function getOrCreateRenderState(pageNum) {
-  let state = pageRenderState.get(pageNum);
+  let state = pdfState.renderState.get(pageNum);
   if (!state) {
     state = {
       rendered: false,
@@ -1146,17 +1136,17 @@ function getOrCreateRenderState(pageNum) {
       imageRegionsRaw: [],
       _renderTask: null,
     };
-    pageRenderState.set(pageNum, state);
+    pdfState.renderState.set(pageNum, state);
   }
   return state;
 }
 
 // Binary search: find first page whose bottom edge > viewTop
 function binarySearchFirstVisible(viewTop) {
-  let lo = 1, hi = pdfDoc.numPages;
+  let lo = 1, hi = pdfState.doc.numPages;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    const pg = pageGeometry[mid];
+    const pg = pdfState.geometry[mid];
     if (pg.offsetTop + pg.cssHeight < viewTop) {
       lo = mid + 1;
     } else {
@@ -1173,20 +1163,20 @@ function getVisiblePageRange() {
 
   let firstVisible = binarySearchFirstVisible(scrollTop);
   let lastVisible = firstVisible;
-  while (lastVisible < pdfDoc.numPages &&
-    pageGeometry[lastVisible + 1].offsetTop < viewBottom) {
+  while (lastVisible < pdfState.doc.numPages &&
+    pdfState.geometry[lastVisible + 1].offsetTop < viewBottom) {
     lastVisible++;
   }
 
   const buf = _isMemoryConstrained ? 1 : VIRTUAL_BUFFER;
   const rangeStart = Math.max(1, firstVisible - buf);
-  const rangeEnd = Math.min(pdfDoc.numPages, lastVisible + buf);
+  const rangeEnd = Math.min(pdfState.doc.numPages, lastVisible + buf);
 
   return { firstVisible, lastVisible, rangeStart, rangeEnd };
 }
 
 function assignContainer(poolSlot, pageNum) {
-  const geo = pageGeometry[pageNum];
+  const geo = pdfState.geometry[pageNum];
   const el = poolSlot.element;
 
   el.style.top = geo.offsetTop + 'px';
@@ -1207,7 +1197,7 @@ function assignContainer(poolSlot, pageNum) {
   poolSlot.pageLabel.textContent = pageNum;
 
   poolSlot.assignedPage = pageNum;
-  pageSlots.set(pageNum, poolSlot);
+  pdfState.slots.set(pageNum, poolSlot);
 
   // Don't render immediately — schedule it. During scroll animation,
   // containers get repositioned at 60fps but PDF.js rendering only
@@ -1230,7 +1220,7 @@ function scheduleRender(pageNum) {
 
 function flushPendingRenders() {
   for (const pageNum of renderPipeline.pendingSet) {
-    if (pageSlots.has(pageNum)) {
+    if (pdfState.slots.has(pageNum)) {
       enqueueRender(pageNum);
     }
   }
@@ -1244,7 +1234,7 @@ function evictContainer(poolSlot) {
   // Cancel pending work
   cancelQueuedRender(pageNum);
   cancelOcrJobsForPage(pageNum);
-  const state = pageRenderState.get(pageNum);
+  const state = pdfState.renderState.get(pageNum);
   if (state && state._renderTask) {
     state._renderTask.cancel();
     state._renderTask = null;
@@ -1268,8 +1258,8 @@ function evictContainer(poolSlot) {
   poolSlot.element.classList.remove('ocr-loading', 'ocr-done');
 
   // Release PDF.js page cache on constrained devices
-  if (_isMemoryConstrained && pdfDoc && !renderPipeline.resetting) {
-    pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
+  if (_isMemoryConstrained && pdfState.doc && !renderPipeline.resetting) {
+    pdfState.doc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
   }
 
   // Update state
@@ -1283,11 +1273,11 @@ function evictContainer(poolSlot) {
 
   poolSlot.element.style.display = 'none';
   poolSlot.assignedPage = null;
-  pageSlots.delete(pageNum);
+  pdfState.slots.delete(pageNum);
 }
 
 function reconcileContainers() {
-  if (!pdfDoc || pdfDoc.numPages === 0) return;
+  if (!pdfState.doc || pdfState.doc.numPages === 0) return;
 
   const { rangeStart, rangeEnd } = getVisiblePageRange();
   const needed = new Set();
@@ -1302,7 +1292,7 @@ function reconcileContainers() {
 
   // Assign free containers to newly-needed pages (closest to center first)
   const centerPage = Math.round((rangeStart + rangeEnd) / 2);
-  const sorted = [...needed].filter(p => !pageSlots.has(p))
+  const sorted = [...needed].filter(p => !pdfState.slots.has(p))
     .sort((a, b) => Math.abs(a - centerPage) - Math.abs(b - centerPage));
 
   for (const pageNum of sorted) {
@@ -1313,19 +1303,19 @@ function reconcileContainers() {
 }
 
 async function buildPageSlots() {
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
 
   // Clear previous state
   viewport.innerHTML = '';
-  pageSlots.clear();
-  pageRenderState.clear();
+  pdfState.slots.clear();
+  pdfState.renderState.clear();
   renderPipeline.pool.length = 0;
-  pageGeometry = [null]; // index 0 unused (pages are 1-based)
+  pdfState.geometry = [null]; // index 0 unused (pages are 1-based)
 
   // Determine scale from first page
-  const firstPage = await pdfDoc.getPage(1);
+  const firstPage = await pdfState.doc.getPage(1);
   const scale = calculateScale(firstPage);
-  currentScale = scale;
+  pdfState.scale = scale;
   const dpr = getDpr();
 
   // Compute geometry for all pages. Most PDFs have uniform page sizes —
@@ -1337,35 +1327,35 @@ async function buildPageSlots() {
 
   // Build geometry table
   let offsetTop = VIEWPORT_PADDING_TOP;
-  for (let i = 1; i <= pdfDoc.numPages; i++) {
+  for (let i = 1; i <= pdfState.doc.numPages; i++) {
     let cssW = firstCssW;
     let cssH = firstCssH;
 
     if (i > 1) {
       // Check if this page has different dimensions
-      const page = await pdfDoc.getPage(i);
+      const page = await pdfState.doc.getPage(i);
       const vp = page.getViewport({ scale: scale * dpr });
       cssW = Math.floor(vp.width / dpr);
       cssH = Math.floor(vp.height / dpr);
       if (cssW !== firstCssW || cssH !== firstCssH) uniform = false;
     }
 
-    pageGeometry[i] = { cssWidth: cssW, cssHeight: cssH, offsetTop };
+    pdfState.geometry[i] = { cssWidth: cssW, cssHeight: cssH, offsetTop };
     offsetTop += cssH + PAGE_GAP;
 
     // Optimization: if all pages so far are uniform, skip getPage for rest
     if (uniform && i === 2 && cssW === firstCssW && cssH === firstCssH) {
-      for (let j = 3; j <= pdfDoc.numPages; j++) {
+      for (let j = 3; j <= pdfState.doc.numPages; j++) {
         offsetTop = VIEWPORT_PADDING_TOP + (j - 1) * (firstCssH + PAGE_GAP);
-        pageGeometry[j] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
+        pdfState.geometry[j] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
       }
       break;
     }
   }
 
   // Total scroll height
-  const totalHeight = pageGeometry[pdfDoc.numPages].offsetTop +
-    pageGeometry[pdfDoc.numPages].cssHeight + 16; // bottom padding
+  const totalHeight = pdfState.geometry[pdfState.doc.numPages].offsetTop +
+    pdfState.geometry[pdfState.doc.numPages].cssHeight + 16; // bottom padding
 
   // Create spacer
   renderPipeline.spacer = document.createElement('div');
@@ -1397,11 +1387,10 @@ const _deviceMemoryGB = navigator.deviceMemory || 0;
 const _isMemoryConstrained = _isIOS || (_isMobileDevice && (_deviceMemoryGB > 0 ? _deviceMemoryGB <= 4 : false));
 
 const LARGE_DOC_THRESHOLD = 150;
-let _isLargeDocConstrained = false;
 
 function getDpr() {
   const raw = window.devicePixelRatio || 1;
-  return _isLargeDocConstrained ? Math.min(raw, 2) : raw;
+  return pdfState.largeDocConstrained ? Math.min(raw, 2) : raw;
 }
 
 // ============================================================
@@ -1514,7 +1503,7 @@ function returnCanvas(c) {
 // PDF.js runs a web worker that accumulates internal state:
 // parsed XRef tables, decoded font programs, stream decoder
 // caches, shared objects. page.cleanup() releases per-page
-// data; pdfDoc.cleanup() releases some shared resources. But
+// data; pdfState.doc.cleanup() releases some shared resources. But
 // the worker thread retains structures that neither cleanup
 // method fully releases. After ~400 getPage() calls, this
 // accumulated state alone can reach 200-300MB — triggering
@@ -1540,7 +1529,7 @@ function returnCanvas(c) {
 // Normal mobile documents get a relaxed threshold (40) for
 // smoother scrolling and less CPU heat.
 function getEngineResetThreshold() {
-  if (_isLargeDocConstrained) return 15;
+  if (pdfState.largeDocConstrained) return 15;
   return 40;
 }
 
@@ -1551,10 +1540,10 @@ const scheduleIdle = typeof requestIdleCallback === 'function'
   : (fn) => requestAnimationFrame(() => setTimeout(fn, 0));
 
 async function resetPdfEngine() {
-  if (!pdfDoc || !_pdfBuffer || renderPipeline.resetting) return;
+  if (!pdfState.doc || !pdfState.buffer || renderPipeline.resetting) return;
 
   renderPipeline.resetting = true;
-  const gen = ++globalGeneration;
+  const gen = ++pdfState.generation;
 
   // Cancel all in-flight and queued work — they hold page
   // references from the old instance that will become invalid.
@@ -1564,20 +1553,20 @@ async function resetPdfEngine() {
   try {
     // Destroy the old instance (main thread + worker thread).
     // This releases ALL accumulated state.
-    await pdfDoc.destroy();
+    await pdfState.doc.destroy();
 
     // Recreate from the original buffer. PDF.js may transfer
     // ArrayBuffers internally, so we always pass a fresh copy.
-    pdfDoc = await pdfjsLib.getDocument({
-      data: _pdfBuffer.slice(0),
+    pdfState.doc = await pdfjsLib.getDocument({
+      data: pdfState.buffer.slice(0),
     }).promise;
 
     renderPipeline.sinceReset = 0;
     renderPipeline.resetPending = false;
 
     // Stale check: if a new document was loaded during the await,
-    // globalGeneration will have changed — abandon this reset.
-    if (globalGeneration !== gen) return;
+    // pdfState.generation will have changed — abandon this reset.
+    if (pdfState.generation !== gen) return;
 
     // Re-trigger rendering for pages currently near the viewport.
     // Their canvases still have pixels — this is a no-op for
@@ -1586,7 +1575,7 @@ async function resetPdfEngine() {
     flushRenderQueue();
   } catch (err) {
     // If destroy/recreate fails (e.g., corrupt buffer), log but
-    // don't crash — the old pdfDoc is already destroyed, so we
+    // don't crash — the old pdfState.doc is already destroyed, so we
     // can't recover. The user will need to re-open the file.
     console.warn('PDF engine reset failed:', err);
   } finally {
@@ -1595,20 +1584,20 @@ async function resetPdfEngine() {
 }
 
 function maybeScheduleEngineReset() {
-  if (!_isMemoryConstrained || !renderPipeline.resetPending || !pdfDoc) return;
+  if (!_isMemoryConstrained || !renderPipeline.resetPending || !pdfState.doc) return;
   if (renderPipeline.active > 0 || renderPipeline.resetting) return;
 
   scheduleIdle(() => {
     // Re-check after yielding to the event loop — a render
     // may have started, or a new document may have been loaded.
-    if (!pdfDoc || renderPipeline.active > 0 || renderPipeline.resetting || !renderPipeline.resetPending) return;
+    if (!pdfState.doc || renderPipeline.active > 0 || renderPipeline.resetting || !renderPipeline.resetPending) return;
     resetPdfEngine();
   });
 }
 
 function enqueueRender(pageNum) {
-  if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
-  if (!pageSlots.has(pageNum)) return; // page has no active container
+  if (!pdfState.doc || pageNum < 1 || pageNum > pdfState.doc.numPages) return;
+  if (!pdfState.slots.has(pageNum)) return; // page has no active container
   const state = getOrCreateRenderState(pageNum);
   if (state.rendered || state.rendering) return;
 
@@ -1624,11 +1613,11 @@ function processRenderQueue() {
 
   while (renderPipeline.active < MAX_CONCURRENT_RENDERS && renderPipeline.queue.length > 0) {
     // Sort by distance from current visible page (closest first)
-    const visPage = currentVisiblePage || 1;
+    const visPage = pdfState.currentPage || 1;
     renderPipeline.queue.sort((a, b) => Math.abs(a - visPage) - Math.abs(b - visPage));
 
     const pageNum = renderPipeline.queue.shift();
-    const slot = pageSlots.get(pageNum);
+    const slot = pdfState.slots.get(pageNum);
 
     // Skip if already rendered, evicted, or stale
     if (!slot || slot.rendered || slot.rendering) continue;
@@ -1672,23 +1661,23 @@ function cancelQueuedRender(pageNum) {
 // ============================================================
 
 async function renderPageIfNeeded(pageNum) {
-  if (!pdfDoc || pageNum < 1 || pageNum > pdfDoc.numPages) return;
+  if (!pdfState.doc || pageNum < 1 || pageNum > pdfState.doc.numPages) return;
 
-  const slot = pageSlots.get(pageNum);
+  const slot = pdfState.slots.get(pageNum);
   if (!slot) return;
   const state = getOrCreateRenderState(pageNum);
   if (state.rendered || state.rendering) return;
 
   state.rendering = true;
-  const myGen = globalGeneration;
+  const myGen = pdfState.generation;
   state.renderGeneration = myGen;
 
   try {
-    const page = await pdfDoc.getPage(pageNum);
-    if (globalGeneration !== myGen) return;
+    const page = await pdfState.doc.getPage(pageNum);
+    if (pdfState.generation !== myGen) return;
 
     const dpr = getDpr();
-    const scaledViewport = page.getViewport({ scale: currentScale * dpr });
+    const scaledViewport = page.getViewport({ scale: pdfState.scale * dpr });
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
 
@@ -1709,22 +1698,22 @@ async function renderPageIfNeeded(pageNum) {
       page.getOperatorList(),
     ];
     // Skip getTextContent for scanned docs — it returns nothing useful
-    if (!isScannedDocument) {
+    if (!pdfState.isScanned) {
       parallelTasks.push(page.getTextContent());
     }
 
     const results = await Promise.all(parallelTasks);
     const opList = results[1];
-    const textContent = isScannedDocument ? null : results[2];
+    const textContent = pdfState.isScanned ? null : results[2];
 
-    if (globalGeneration !== myGen) return;
+    if (pdfState.generation !== myGen) return;
 
     // --- Already-dark detection ---
     const isDark = detectAlreadyDark(renderCanvas);
-    pageAlreadyDark.set(pageNum, isDark);
+    pdfState.alreadyDark.set(pageNum, isDark);
 
     // --- Extract image regions (skip if scanned document) ---
-    const regions = isScannedDocument
+    const regions = pdfState.isScanned
       ? []
       : extractImageRegions(opList, scaledViewport.transform);
 
@@ -1756,7 +1745,7 @@ async function renderPageIfNeeded(pageNum) {
     // --- Link annotations ---
     try {
       const annotations = await page.getAnnotations();
-      if (globalGeneration === myGen) {
+      if (pdfState.generation === myGen) {
         buildLinkLayer(slot.element, annotations, scaledViewport, dpr, pageNum);
       }
     } catch (_) { /* some pages have no annotations */ }
@@ -1772,7 +1761,7 @@ async function renderPageIfNeeded(pageNum) {
     // On memory-constrained devices, release PDF.js internal caches.
     if (_isMemoryConstrained) page.cleanup();
   } catch (err) {
-    if (globalGeneration !== myGen) return;
+    if (pdfState.generation !== myGen) return;
     if (err?.name !== 'RenderingCancelledException' && err?.message !== 'Rendering cancelled') {
       console.error(`Render page ${pageNum} failed:`, err);
     }
@@ -2016,19 +2005,19 @@ function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
 }
 
 async function resolveInternalLink(dest) {
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
 
   try {
     let pageIndex;
 
     if (typeof dest === 'string') {
       // Named destination — resolve via PDF.js
-      const resolved = await pdfDoc.getDestination(dest);
+      const resolved = await pdfState.doc.getDestination(dest);
       if (!resolved) return;
-      pageIndex = await pdfDoc.getPageIndex(resolved[0]);
+      pageIndex = await pdfState.doc.getPageIndex(resolved[0]);
     } else if (Array.isArray(dest) && dest.length > 0) {
       // Explicit destination — first element is page ref
-      pageIndex = await pdfDoc.getPageIndex(dest[0]);
+      pageIndex = await pdfState.doc.getPageIndex(dest[0]);
     } else {
       return;
     }
@@ -2057,13 +2046,13 @@ function extractImageRegions(opList, viewportTransform) {
 // ============================================================
 
 function shouldApplyDark(pageNum) {
-  return _shouldApplyDark(pageNum, pageDarkOverride, pageAlreadyDark);
+  return _shouldApplyDark(pageNum, pdfState.darkOverride, pdfState.alreadyDark);
 }
 
 function applyDarkModeToPage(pageNum) {
-  const slot = pageSlots.get(pageNum);
+  const slot = pdfState.slots.get(pageNum);
   if (!slot) return;
-  const state = pageRenderState.get(pageNum);
+  const state = pdfState.renderState.get(pageNum);
   if (!state || !state.rendered) return;
 
   const dark = shouldApplyDark(pageNum);
@@ -2072,7 +2061,7 @@ function applyDarkModeToPage(pageNum) {
 }
 
 function applyDarkModeToAllPages() {
-  for (const [pageNum] of pageSlots) {
+  for (const [pageNum] of pdfState.slots) {
     applyDarkModeToPage(pageNum);
   }
 }
@@ -2081,10 +2070,9 @@ function applyDarkModeToAllPages() {
 // Current Page Tracking (from scroll position)
 // ============================================================
 
-let currentVisiblePage = 1;
 
 function updateCurrentPageFromScroll() {
-  if (!pdfDoc || pageGeometry.length <= 1) return;
+  if (!pdfState.doc || pdfState.geometry.length <= 1) return;
 
   // Find the page whose center is closest to the viewport center.
   // Uses the precomputed geometry table — pure math, no DOM queries.
@@ -2095,9 +2083,9 @@ function updateCurrentPageFromScroll() {
   // Binary search for approximate location, then linear scan nearby
   const approx = binarySearchFirstVisible(viewport.scrollTop);
   const lo = Math.max(1, approx - 3);
-  const hi = Math.min(pdfDoc.numPages, approx + 5);
+  const hi = Math.min(pdfState.doc.numPages, approx + 5);
   for (let i = lo; i <= hi; i++) {
-    const geo = pageGeometry[i];
+    const geo = pdfState.geometry[i];
     const pageCenter = geo.offsetTop + geo.cssHeight / 2;
     const dist = Math.abs(pageCenter - viewCenter);
     if (dist < closestDist) {
@@ -2106,7 +2094,7 @@ function updateCurrentPageFromScroll() {
     }
   }
 
-  currentVisiblePage = closestPage;
+  pdfState.currentPage = closestPage;
   updateNavigationUI();
   updateToggleButton();
 }
@@ -2116,7 +2104,7 @@ function updateCurrentPageFromScroll() {
 // ============================================================
 
 function updateToggleButton() {
-  const dark = shouldApplyDark(currentVisiblePage);
+  const dark = shouldApplyDark(pdfState.currentPage);
   iconDark.hidden = !dark;
   iconLight.hidden = dark;
   btnToggle.classList.toggle('toggle-active', dark);
@@ -2124,13 +2112,13 @@ function updateToggleButton() {
 }
 
 function toggleDarkMode() {
-  const pageNum = currentVisiblePage;
+  const pageNum = pdfState.currentPage;
   const currentlyDark = shouldApplyDark(pageNum);
 
   if (currentlyDark) {
-    pageDarkOverride.set(pageNum, 'light');
+    pdfState.darkOverride.set(pageNum, 'light');
   } else {
-    pageDarkOverride.set(pageNum, 'dark');
+    pdfState.darkOverride.set(pageNum, 'dark');
   }
 
   applyDarkModeToPage(pageNum);
@@ -2145,10 +2133,10 @@ function toggleDarkMode() {
 // ============================================================
 
 function updateNavigationUI() {
-  if (!pdfDoc) return;
-  pageInfo.textContent = `${currentVisiblePage} / ${pdfDoc.numPages}`;
-  btnPrev.disabled = currentVisiblePage <= 1;
-  btnNext.disabled = currentVisiblePage >= pdfDoc.numPages;
+  if (!pdfState.doc) return;
+  pageInfo.textContent = `${pdfState.currentPage} / ${pdfState.doc.numPages}`;
+  btnPrev.disabled = pdfState.currentPage <= 1;
+  btnNext.disabled = pdfState.currentPage >= pdfState.doc.numPages;
 }
 
 // Click-to-edit page number: transforms the label into an input.
@@ -2158,10 +2146,10 @@ function updateNavigationUI() {
 // the keydown never arrives and the navigation doesn't happen.
 // Fix: commit on blur if the value changed, not just on Enter.
 pageInfo.addEventListener('click', () => {
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
 
-  const current = currentVisiblePage;
-  const total = pdfDoc.numPages;
+  const current = pdfState.currentPage;
+  const total = pdfState.doc.numPages;
 
   // Create inline input
   const input = document.createElement('input');
@@ -2225,9 +2213,9 @@ pageInfo.addEventListener('click', () => {
 });
 
 function scrollToPage(pageNum, instant = false) {
-  if (!pdfDoc || pageGeometry.length <= 1) return;
-  const clamped = Math.max(1, Math.min(pageNum, pdfDoc.numPages));
-  const geo = pageGeometry[clamped];
+  if (!pdfState.doc || pdfState.geometry.length <= 1) return;
+  const clamped = Math.max(1, Math.min(pageNum, pdfState.doc.numPages));
+  const geo = pdfState.geometry[clamped];
   if (!geo) return;
 
   // Scroll so the page is centered in the viewport
@@ -2255,8 +2243,8 @@ function scrollToPage(pageNum, instant = false) {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Alt') return;
 
-  const slot = pageSlots.get(currentVisiblePage);
-  const state = pageRenderState.get(currentVisiblePage);
+  const slot = pdfState.slots.get(pdfState.currentPage);
+  const state = pdfState.renderState.get(pdfState.currentPage);
   if (!slot || !state || state.imageRegionsRaw.length === 0) return;
   if (slot.mainCanvas.width === 0) return;
 
@@ -2264,7 +2252,7 @@ document.addEventListener('keydown', (e) => {
   if (vertLayer.children.length > 0) return;
 
   const dpr = getDpr();
-  const myGen = globalGeneration;
+  const myGen = pdfState.generation;
   for (const region of state.imageRegionsRaw) {
     ocrImageVertical(slot.mainCanvas, vertLayer, region, dpr, myGen);
   }
@@ -2344,9 +2332,27 @@ dropZone.addEventListener('dragleave', () => {
   dropZone.classList.remove('drag-over');
 });
 
-dropZone.addEventListener('drop', (e) => {
+dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
+
+  // Try to get a file handle from the drop (File System Access API).
+  // This enables session resume from the original file path on desktop,
+  // same as showOpenFilePicker(). Without this, dropped files fall back
+  // to ArrayBuffer persistence (120MB limit).
+  const item = e.dataTransfer.items && e.dataTransfer.items[0];
+  if (item && item.getAsFileSystemHandle) {
+    try {
+      const handle = await item.getAsFileSystemHandle();
+      if (handle && handle.kind === 'file') {
+        const file = await handle.getFile();
+        file._handle = handle;
+        handleFile(file);
+        return;
+      }
+    } catch (_) { /* fallback to regular file */ }
+  }
+
   handleFile(e.dataTransfer.files[0]);
 });
 
@@ -2361,19 +2367,19 @@ fileInput.addEventListener('change', () => {
 // can continue reading or open a new file.
 btnHome.addEventListener('click', (e) => {
   e.preventDefault();
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
 
   // Save current page position before leaving
   savePagePosition();
 
   // Stop all rendering and OCR
-  globalGeneration++;
+  pdfState.generation++;
   renderPipeline.queue.length = 0;
   resetOcrState();
 
   // Destroy PDF.js instance to free memory
-  if (pdfDoc) { pdfDoc.destroy(); pdfDoc = null; }
-  _pdfBuffer = null;
+  if (pdfState.doc) { pdfState.doc.destroy(); pdfState.doc = null; }
+  pdfState.buffer = null;
   cleanup();
 
   // Hide reader, show drop zone with resume button
@@ -2391,17 +2397,17 @@ btnHome.addEventListener('click', (e) => {
   }
 });
 
-btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1, true));
-btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1, true));
+btnPrev.addEventListener('click', () => scrollToPage(pdfState.currentPage - 1, true));
+btnNext.addEventListener('click', () => scrollToPage(pdfState.currentPage + 1, true));
 btnToggle.addEventListener('click', toggleDarkMode);
 btnExport.addEventListener('click', exportDarkPdf);
 exportCancelBtn.addEventListener('click', cancelExport);
 
 // --- Keyboard ---
 document.addEventListener('keydown', (e) => {
-  if (!pdfDoc) return;
-  if (e.key === 'ArrowLeft') scrollToPage(currentVisiblePage - 1, true);
-  else if (e.key === 'ArrowRight') scrollToPage(currentVisiblePage + 1, true);
+  if (!pdfState.doc) return;
+  if (e.key === 'ArrowLeft') scrollToPage(pdfState.currentPage - 1, true);
+  else if (e.key === 'ArrowRight') scrollToPage(pdfState.currentPage + 1, true);
   else if (e.key === 'd') toggleDarkMode();
 });
 
@@ -2415,18 +2421,18 @@ document.addEventListener('keydown', (e) => {
 const WHEEL_PAGE_THRESHOLD = 60; // accumulated delta before jumping
 
 function checkPresentationMode() {
-  if (!pdfDoc || pageGeometry.length <= 1) {
+  if (!pdfState.doc || pdfState.geometry.length <= 1) {
     scrollState.presentationMode = false;
     return;
   }
   // Presentations have landscape pages (wider than tall).
   // Papers/books have portrait pages — keep normal scroll for those.
-  const firstGeo = pageGeometry[1];
+  const firstGeo = pdfState.geometry[1];
   scrollState.presentationMode = firstGeo.cssWidth > firstGeo.cssHeight;
 }
 
 viewport.addEventListener('wheel', (e) => {
-  if (!scrollState.presentationMode || !pdfDoc) return;
+  if (!scrollState.presentationMode || !pdfState.doc) return;
 
   e.preventDefault();
 
@@ -2439,13 +2445,13 @@ viewport.addEventListener('wheel', (e) => {
   if (Math.abs(scrollState.wheelAccum) >= WHEEL_PAGE_THRESHOLD) {
     const direction = scrollState.wheelAccum > 0 ? 1 : -1;
     scrollState.wheelAccum = 0;
-    scrollToPage(currentVisiblePage + direction, true);
+    scrollToPage(pdfState.currentPage + direction, true);
   }
 }, { passive: false });
 
 // --- Scroll: update current page indicator (throttled) ---
 viewport.addEventListener('scroll', () => {
-  if (!pdfDoc) return;
+  if (!pdfState.doc) return;
   if (scrollState.raf) return;
   scrollState.raf = requestAnimationFrame(() => {
     scrollState.raf = 0;
@@ -2492,11 +2498,11 @@ if (/iPad|iPhone/.test(navigator.userAgent)) {
 window.addEventListener('resize', () => {
   clearTimeout(uiState.resizeTimer);
   uiState.resizeTimer = setTimeout(async () => {
-    if (!pdfDoc) return;
+    if (!pdfState.doc) return;
     if (window.innerWidth === _lastResizeWidth) return; // height-only change
     _lastResizeWidth = window.innerWidth;
-    const pageToRestore = currentVisiblePage;
-    globalGeneration++;
+    const pageToRestore = pdfState.currentPage;
+    pdfState.generation++;
     // Cancel pending render and OCR — scale changed, coordinates are stale
     renderPipeline.queue.length = 0;
     resetOcrState();
@@ -2523,18 +2529,30 @@ window.addEventListener('resize', () => {
 
 // --- Allow dropping a new file onto the reader too ---
 readerEl.addEventListener('dragover', (e) => e.preventDefault());
-readerEl.addEventListener('drop', (e) => {
+readerEl.addEventListener('drop', async (e) => {
   e.preventDefault();
+  const item = e.dataTransfer.items && e.dataTransfer.items[0];
+  if (item && item.getAsFileSystemHandle) {
+    try {
+      const handle = await item.getAsFileSystemHandle();
+      if (handle && handle.kind === 'file') {
+        const file = await handle.getFile();
+        file._handle = handle;
+        handleFile(file);
+        return;
+      }
+    } catch (_) {}
+  }
   handleFile(e.dataTransfer.files[0]);
 });
 
 // Initialize export module with app context
 initExport({
-  get pdfDoc() { return pdfDoc; },
-  get isScannedDocument() { return isScannedDocument; },
-  get currentScale() { return currentScale; },
-  get pageDarkOverride() { return pageDarkOverride; },
-  get originalFileName() { return originalFileName; },
+  get pdfDoc() { return pdfState.doc; },
+  get isScannedDocument() { return pdfState.isScanned; },
+  get currentScale() { return pdfState.scale; },
+  get pageDarkOverride() { return pdfState.darkOverride; },
+  get originalFileName() { return pdfState.fileName; },
   get isIOS() { return isIOS; },
   supportsCtxFilter,
   DEPS,
@@ -2558,11 +2576,11 @@ initExport({
 
 // Initialize OCR module with app context (read-only getters + function refs)
 initOcr({
-  get globalGeneration() { return globalGeneration; },
-  get currentVisiblePage() { return currentVisiblePage; },
-  get currentScale() { return currentScale; },
-  get isScannedDocument() { return isScannedDocument; },
-  get pageSlots() { return pageSlots; },
+  get globalGeneration() { return pdfState.generation; },
+  get currentVisiblePage() { return pdfState.currentPage; },
+  get currentScale() { return pdfState.scale; },
+  get isScannedDocument() { return pdfState.isScanned; },
+  get pageSlots() { return pdfState.slots; },
   DEPS,
   createOffscreenCanvas,
   returnCanvas,
