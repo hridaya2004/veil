@@ -1009,7 +1009,7 @@ async function loadPDF(data, resumePage = 1) {
     scrollToPage(resumePage, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
-    checkScrollSnap();
+    checkPresentationMode();
     announce(`Document loaded, ${pdfDoc.numPages} pages`);
 
   } catch (err) {
@@ -3833,9 +3833,46 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'd') toggleDarkMode();
 });
 
-function checkScrollSnap() {
-  // Scroll snap removed — caused janky scrolling on presentations
+// --- Presentation mode: page-by-page navigation ---
+// When pages fill ≥85% of the viewport height (slides, presentations),
+// continuous scroll produces jank on Chrome/Edge (GPU IPC churn on
+// large canvas eviction). Instead, intercept wheel/trackpad and
+// jump page-by-page — same pattern as Google Slides, PowerPoint Online.
+// Normal documents (papers, books) keep continuous scroll.
+
+let _isPresentationMode = false;
+let _wheelAccumulator = 0;
+let _wheelTimer = null;
+const WHEEL_PAGE_THRESHOLD = 60; // accumulated delta before jumping
+
+function checkPresentationMode() {
+  if (!pdfDoc || pageGeometry.length <= 1) {
+    _isPresentationMode = false;
+    return;
+  }
+  // Presentations have landscape pages (wider than tall).
+  // Papers/books have portrait pages — keep normal scroll for those.
+  const firstGeo = pageGeometry[1];
+  _isPresentationMode = firstGeo.cssWidth > firstGeo.cssHeight;
 }
+
+viewport.addEventListener('wheel', (e) => {
+  if (!_isPresentationMode || !pdfDoc) return;
+
+  e.preventDefault();
+
+  // Accumulate delta to handle trackpad inertia (many small events)
+  _wheelAccumulator += e.deltaY;
+
+  clearTimeout(_wheelTimer);
+  _wheelTimer = setTimeout(() => { _wheelAccumulator = 0; }, 200);
+
+  if (Math.abs(_wheelAccumulator) >= WHEEL_PAGE_THRESHOLD) {
+    const direction = _wheelAccumulator > 0 ? 1 : -1;
+    _wheelAccumulator = 0;
+    scrollToPage(currentVisiblePage + direction, true);
+  }
+}, { passive: false });
 
 // --- Scroll: update current page indicator (throttled) ---
 let scrollRAF = 0;
@@ -3907,6 +3944,7 @@ window.addEventListener('resize', () => {
     scrollToPage(pageToRestore, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
+    checkPresentationMode();
 
     // Mobile landscape: toolbar is completely hidden — pure reading.
     // Rotating back to portrait restores normal focus mode behavior.
