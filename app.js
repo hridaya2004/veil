@@ -35,6 +35,14 @@ import {
 } from './export.js';
 
 import {
+  saveSession,
+  loadSession,
+  clearSession,
+  SESSION_MAX_SIZE,
+  hasFileSystemAccess,
+} from './session.js';
+
+import {
   initOcr,
   resetOcrState,
   enqueueOcrJob,
@@ -452,68 +460,6 @@ if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
 // - Both: page number + filename in localStorage (survives SW updates)
 // ============================================================
 
-const SESSION_DB_NAME = 'veil-session';
-const SESSION_DB_VERSION = 1;
-const SESSION_STORE = 'pdf';
-const SESSION_MAX_SIZE = 120 * 1024 * 1024; // 120MB
-const _hasFileSystemAccess = 'showOpenFilePicker' in window;
-
-function openSessionDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(SESSION_DB_NAME, SESSION_DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(SESSION_STORE)) {
-        db.createObjectStore(SESSION_STORE);
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function saveSession(data) {
-  try {
-    const db = await openSessionDB();
-    const tx = db.transaction(SESSION_STORE, 'readwrite');
-    const store = tx.objectStore(SESSION_STORE);
-    // LRU 1 slot: clear everything before saving
-    store.clear();
-    store.put(data, 'current');
-    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
-    db.close();
-  } catch (_) { /* IndexedDB may be unavailable in some contexts */ }
-}
-
-async function loadSession() {
-  try {
-    const db = await openSessionDB();
-    const tx = db.transaction(SESSION_STORE, 'readonly');
-    const store = tx.objectStore(SESSION_STORE);
-    const req = store.get('current');
-    const result = await new Promise((res, rej) => {
-      req.onsuccess = () => res(req.result);
-      req.onerror = rej;
-    });
-    db.close();
-    return result || null;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function clearSession() {
-  try {
-    const db = await openSessionDB();
-    const tx = db.transaction(SESSION_STORE, 'readwrite');
-    tx.objectStore(SESSION_STORE).clear();
-    await new Promise((res) => { tx.oncomplete = res; });
-    db.close();
-  } catch (_) {}
-  localStorage.removeItem('veil-filename');
-  localStorage.removeItem('veil-page');
-  localStorage.removeItem('veil-dark-overrides');
-}
 
 function savePagePosition() {
   if (!pdfDoc) return;
@@ -542,7 +488,7 @@ viewport.addEventListener('scroll', () => {
 async function persistFile(file, arrayBuffer) {
   const filename = file.name;
 
-  if (_hasFileSystemAccess && file._handle) {
+  if (hasFileSystemAccess && file._handle) {
     // Desktop: save the lightweight file handle (~30 bytes)
     localStorage.setItem('veil-filename', filename);
     localStorage.setItem('veil-page', '1');
@@ -2354,7 +2300,7 @@ dropZone.addEventListener('click', async (e) => {
 
   // Desktop with File System Access API: use showOpenFilePicker
   // to get a file handle for session resume (zero-copy persistence).
-  if (_hasFileSystemAccess) {
+  if (hasFileSystemAccess) {
     try {
       const [handle] = await window.showOpenFilePicker({
         types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
