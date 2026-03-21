@@ -124,7 +124,6 @@ const _memConstrainedEarly = (
   window.matchMedia('(pointer: coarse)').matches &&
   (/iPad|iPhone/.test(navigator.userAgent) || (navigator.deviceMemory && navigator.deviceMemory <= 4))
 );
-const PRERENDER_MARGIN = _memConstrainedEarly ? 1 : 2;
 
 // Feature-detect ctx.filter support (Safari iOS ignores it silently)
 const supportsCtxFilter = (() => {
@@ -1404,7 +1403,7 @@ async function buildPageSlots() {
 // ============================================================
 
 const _isMobileDevice = window.matchMedia('(pointer: coarse)').matches;
-const _isIOS = _isMobileDevice && /iPad|iPhone/.test(navigator.userAgent);
+const _isIOS = _isMobileDevice && (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 const _deviceMemoryGB = navigator.deviceMemory || 0;
 const _isMemoryConstrained = _isIOS || (_isMobileDevice && (_deviceMemoryGB > 0 ? _deviceMemoryGB <= 4 : false));
 

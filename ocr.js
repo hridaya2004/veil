@@ -230,30 +230,6 @@ export async function ensureTesseractWorker() {
 }
 
 // ============================================================
-// Full-Page OCR (Scanned Documents)
-// ============================================================
-
-async function ocrPage(canvas, textLayerDiv, cssWidth, cssHeight, myGen) {
-  const worker = await ensureTesseractWorker();
-  if (!worker || ctx.globalGeneration !== myGen) return;
-
-  try {
-    const processed = preprocessCanvasForOcr(canvas);
-    canvas.width = 0;
-
-    const { data } = await worker.recognize(processed);
-    if (ctx.globalGeneration !== myGen) { processed.width = 0; return; }
-
-    buildOcrTextLayerDirect(textLayerDiv, data, processed.width, processed.height, cssWidth, cssHeight);
-
-    processed.width = 0;
-  } catch (err) {
-    if (ctx.globalGeneration !== myGen) return;
-    console.warn('OCR failed for page:', err);
-  }
-}
-
-// ============================================================
 // Image Region OCR (Native PDFs)
 // ============================================================
 

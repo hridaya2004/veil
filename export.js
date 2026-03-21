@@ -13,6 +13,7 @@ import {
   normalizeLigatures,
   isOcrArtifact,
   compositeImageRegions,
+  getNavigatorLanguage,
 } from './core.js';
 
 import { preprocessCanvasForOcr } from './ocr.js';
@@ -466,7 +467,9 @@ export async function exportDarkPdf() {
       try {
         const mod = await import(ctx.DEPS.TESSERACT);
         const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
-        exportWorker = await createWorker('eng', 1, { logger: () => {} });
+        const navLang = getNavigatorLanguage();
+        const langs = navLang ? 'eng+' + navLang : 'eng';
+        exportWorker = await createWorker(langs, 1, { logger: () => {} });
       } catch (err) {
         console.warn('[Export] Failed to create OCR worker:', err);
       }
