@@ -711,10 +711,10 @@ async function loadPDF(data, resumePage = 1) {
 
     // Cancel all pending render and OCR jobs from previous document
     resetOcrState();
-    renderQueue.length = 0;
+    renderPipeline.queue.length = 0;
     scrollState.isFast = false;
-    rendersSinceReset = 0;
-    isResetPending = false;
+    renderPipeline.sinceReset = 0;
+    renderPipeline.resetPending = false;
 
     // Show the reader behind the drop zone, then animate the veil open.
     // The veil layers slide right while the reader renders underneath.
@@ -1036,9 +1036,9 @@ function cleanup() {
   viewport.innerHTML = '';
   pageSlots.clear();
   pageRenderState.clear();
-  containerPool.length = 0;
+  renderPipeline.pool.length = 0;
   pageGeometry = [null];
-  scrollSpacer = null;
+  renderPipeline.spacer = null;
 }
 
 // ============================================================
@@ -1082,8 +1082,17 @@ function calculateScale(page) {
 // (14 contexts), memory is O(1) regardless of document length.
 // ============================================================
 
-let scrollSpacer = null; // the tall div that drives the native scrollbar
-const containerPool = []; // array of {element, mainCanvas, overlayCanvas, ...}
+const renderPipeline = {
+  spacer: null,
+  pool: [],
+  queue: [],
+  active: 0,
+  sinceReset: 0,
+  resetPending: false,
+  resetting: false,
+  debounceTimer: null,
+  pendingSet: new Set(),
+};
 
 function createPoolContainer() {
   const container = document.createElement('div');
@@ -1210,24 +1219,22 @@ function assignContainer(poolSlot, pageNum) {
 
 // Debounced render scheduler: accumulates pages that need rendering
 // and fires them all at once when scrolling stops.
-let _renderDebounceTimer = null;
-const _pendingRenders = new Set();
 
 function scheduleRender(pageNum) {
   const state = getOrCreateRenderState(pageNum);
   if (state.rendered || state.rendering) return;
-  _pendingRenders.add(pageNum);
-  clearTimeout(_renderDebounceTimer);
-  _renderDebounceTimer = setTimeout(flushPendingRenders, 150);
+  renderPipeline.pendingSet.add(pageNum);
+  clearTimeout(renderPipeline.debounceTimer);
+  renderPipeline.debounceTimer = setTimeout(flushPendingRenders, 150);
 }
 
 function flushPendingRenders() {
-  for (const pageNum of _pendingRenders) {
+  for (const pageNum of renderPipeline.pendingSet) {
     if (pageSlots.has(pageNum)) {
       enqueueRender(pageNum);
     }
   }
-  _pendingRenders.clear();
+  renderPipeline.pendingSet.clear();
 }
 
 function evictContainer(poolSlot) {
@@ -1261,7 +1268,7 @@ function evictContainer(poolSlot) {
   poolSlot.element.classList.remove('ocr-loading', 'ocr-done');
 
   // Release PDF.js page cache on constrained devices
-  if (_isMemoryConstrained && pdfDoc && !isResetting) {
+  if (_isMemoryConstrained && pdfDoc && !renderPipeline.resetting) {
     pdfDoc.getPage(pageNum).then(p => p.cleanup()).catch(() => {});
   }
 
@@ -1287,7 +1294,7 @@ function reconcileContainers() {
   for (let p = rangeStart; p <= rangeEnd; p++) needed.add(p);
 
   // Release containers no longer in range
-  for (const poolSlot of containerPool) {
+  for (const poolSlot of renderPipeline.pool) {
     if (poolSlot.assignedPage != null && !needed.has(poolSlot.assignedPage)) {
       evictContainer(poolSlot);
     }
@@ -1299,7 +1306,7 @@ function reconcileContainers() {
     .sort((a, b) => Math.abs(a - centerPage) - Math.abs(b - centerPage));
 
   for (const pageNum of sorted) {
-    const free = containerPool.find(s => s.assignedPage === null);
+    const free = renderPipeline.pool.find(s => s.assignedPage === null);
     if (!free) break; // pool exhausted
     assignContainer(free, pageNum);
   }
@@ -1312,7 +1319,7 @@ async function buildPageSlots() {
   viewport.innerHTML = '';
   pageSlots.clear();
   pageRenderState.clear();
-  containerPool.length = 0;
+  renderPipeline.pool.length = 0;
   pageGeometry = [null]; // index 0 unused (pages are 1-based)
 
   // Determine scale from first page
@@ -1361,20 +1368,20 @@ async function buildPageSlots() {
     pageGeometry[pdfDoc.numPages].cssHeight + 16; // bottom padding
 
   // Create spacer
-  scrollSpacer = document.createElement('div');
-  scrollSpacer.id = 'scroll-spacer';
-  scrollSpacer.style.position = 'relative';
-  scrollSpacer.style.width = '100%';
-  scrollSpacer.style.height = totalHeight + 'px';
+  renderPipeline.spacer = document.createElement('div');
+  renderPipeline.spacer.id = 'scroll-spacer';
+  renderPipeline.spacer.style.position = 'relative';
+  renderPipeline.spacer.style.width = '100%';
+  renderPipeline.spacer.style.height = totalHeight + 'px';
 
   // Create container pool
   for (let i = 0; i < POOL_SIZE; i++) {
     const slot = createPoolContainer();
-    scrollSpacer.appendChild(slot.element);
-    containerPool.push(slot);
+    renderPipeline.spacer.appendChild(slot.element);
+    renderPipeline.pool.push(slot);
   }
 
-  viewport.appendChild(scrollSpacer);
+  viewport.appendChild(renderPipeline.spacer);
 
   // Initial assignment
   reconcileContainers();
@@ -1500,8 +1507,6 @@ function returnCanvas(c) {
 // process them until scroll settles (flushRenderQueue).
 // ============================================================
 
-const renderQueue = [];
-let activeRenders = 0;
 
 // ============================================================
 // iOS PDF Engine Reset (Compartment Seal)
@@ -1538,9 +1543,6 @@ function getEngineResetThreshold() {
   if (_isLargeDocConstrained) return 15;
   return 40;
 }
-let rendersSinceReset = 0;
-let isResetPending = false;
-let isResetting = false; // true during async destroy/recreate
 
 // Safari's requestIdleCallback support is incomplete — use rAF + setTimeout
 // as a reliable fallback that still defers to an idle moment.
@@ -1549,14 +1551,14 @@ const scheduleIdle = typeof requestIdleCallback === 'function'
   : (fn) => requestAnimationFrame(() => setTimeout(fn, 0));
 
 async function resetPdfEngine() {
-  if (!pdfDoc || !_pdfBuffer || isResetting) return;
+  if (!pdfDoc || !_pdfBuffer || renderPipeline.resetting) return;
 
-  isResetting = true;
+  renderPipeline.resetting = true;
   const gen = ++globalGeneration;
 
   // Cancel all in-flight and queued work — they hold page
   // references from the old instance that will become invalid.
-  renderQueue.length = 0;
+  renderPipeline.queue.length = 0;
   resetOcrState();
 
   try {
@@ -1570,8 +1572,8 @@ async function resetPdfEngine() {
       data: _pdfBuffer.slice(0),
     }).promise;
 
-    rendersSinceReset = 0;
-    isResetPending = false;
+    renderPipeline.sinceReset = 0;
+    renderPipeline.resetPending = false;
 
     // Stale check: if a new document was loaded during the await,
     // globalGeneration will have changed — abandon this reset.
@@ -1588,18 +1590,18 @@ async function resetPdfEngine() {
     // can't recover. The user will need to re-open the file.
     console.warn('PDF engine reset failed:', err);
   } finally {
-    isResetting = false;
+    renderPipeline.resetting = false;
   }
 }
 
 function maybeScheduleEngineReset() {
-  if (!_isMemoryConstrained || !isResetPending || !pdfDoc) return;
-  if (activeRenders > 0 || isResetting) return;
+  if (!_isMemoryConstrained || !renderPipeline.resetPending || !pdfDoc) return;
+  if (renderPipeline.active > 0 || renderPipeline.resetting) return;
 
   scheduleIdle(() => {
     // Re-check after yielding to the event loop — a render
     // may have started, or a new document may have been loaded.
-    if (!pdfDoc || activeRenders > 0 || isResetting || !isResetPending) return;
+    if (!pdfDoc || renderPipeline.active > 0 || renderPipeline.resetting || !renderPipeline.resetPending) return;
     resetPdfEngine();
   });
 }
@@ -1611,42 +1613,42 @@ function enqueueRender(pageNum) {
   if (state.rendered || state.rendering) return;
 
   // Don't duplicate
-  if (renderQueue.includes(pageNum)) return;
+  if (renderPipeline.queue.includes(pageNum)) return;
 
-  renderQueue.push(pageNum);
+  renderPipeline.queue.push(pageNum);
   processRenderQueue();
 }
 
 function processRenderQueue() {
-  if (scrollState.isFast || isResetting) return; // wait for scroll to settle / engine reset
+  if (scrollState.isFast || renderPipeline.resetting) return; // wait for scroll to settle / engine reset
 
-  while (activeRenders < MAX_CONCURRENT_RENDERS && renderQueue.length > 0) {
+  while (renderPipeline.active < MAX_CONCURRENT_RENDERS && renderPipeline.queue.length > 0) {
     // Sort by distance from current visible page (closest first)
     const visPage = currentVisiblePage || 1;
-    renderQueue.sort((a, b) => Math.abs(a - visPage) - Math.abs(b - visPage));
+    renderPipeline.queue.sort((a, b) => Math.abs(a - visPage) - Math.abs(b - visPage));
 
-    const pageNum = renderQueue.shift();
+    const pageNum = renderPipeline.queue.shift();
     const slot = pageSlots.get(pageNum);
 
     // Skip if already rendered, evicted, or stale
     if (!slot || slot.rendered || slot.rendering) continue;
 
-    activeRenders++;
+    renderPipeline.active++;
     renderPageIfNeeded(pageNum).finally(() => {
-      activeRenders--;
+      renderPipeline.active--;
 
       // Track memory pressure from accumulated renders.
       // On iOS, trigger a full engine reset every N pages to
       // prevent the PDF.js worker from accumulating fatal levels
       // of cached state (fonts, XRef, stream decoders).
-      rendersSinceReset++;
-      if (rendersSinceReset >= getEngineResetThreshold()) {
-        isResetPending = true;
+      renderPipeline.sinceReset++;
+      if (renderPipeline.sinceReset >= getEngineResetThreshold()) {
+        renderPipeline.resetPending = true;
       }
 
       // If queue is empty and a reset is pending, this is the
       // quiet moment — schedule it before picking up more work.
-      if (activeRenders === 0 && isResetPending) {
+      if (renderPipeline.active === 0 && renderPipeline.resetPending) {
         maybeScheduleEngineReset();
       }
 
@@ -1661,8 +1663,8 @@ function flushRenderQueue() {
 
 // Cancel queued renders for a specific page (called by eviction observer)
 function cancelQueuedRender(pageNum) {
-  const idx = renderQueue.indexOf(pageNum);
-  if (idx !== -1) renderQueue.splice(idx, 1);
+  const idx = renderPipeline.queue.indexOf(pageNum);
+  if (idx !== -1) renderPipeline.queue.splice(idx, 1);
 }
 
 // ============================================================
@@ -2366,7 +2368,7 @@ btnHome.addEventListener('click', (e) => {
 
   // Stop all rendering and OCR
   globalGeneration++;
-  renderQueue.length = 0;
+  renderPipeline.queue.length = 0;
   resetOcrState();
 
   // Destroy PDF.js instance to free memory
@@ -2496,11 +2498,11 @@ window.addEventListener('resize', () => {
     const pageToRestore = currentVisiblePage;
     globalGeneration++;
     // Cancel pending render and OCR — scale changed, coordinates are stale
-    renderQueue.length = 0;
+    renderPipeline.queue.length = 0;
     resetOcrState();
     scrollState.isFast = false;
-    rendersSinceReset = 0;
-    isResetPending = false;
+    renderPipeline.sinceReset = 0;
+    renderPipeline.resetPending = false;
     await buildPageSlots();
     // Restore scroll position to the same page
     scrollToPage(pageToRestore, true);
