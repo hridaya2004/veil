@@ -494,10 +494,12 @@ async function persistFile(file, arrayBuffer) {
     localStorage.setItem('veil-page', '1');
     await saveSession({ type: 'buffer', buffer: arrayBuffer, filename });
   } else {
-    // File too large to persist — clear any stale session so there's
-    // no mismatch between localStorage name and IndexedDB content.
+    // File too large for IndexedDB — clear any stale file from
+    // IndexedDB (previous smaller file) but keep filename + page
+    // in localStorage as a reminder for the resume screen.
     await clearSession();
-    showInfo('This file is too large to save for offline reading.');
+    localStorage.setItem('veil-filename', filename);
+    localStorage.setItem('veil-page', '1');
   }
 }
 
@@ -510,7 +512,28 @@ async function restoreSession(forceButton = false) {
 
   const sessionData = await loadSession();
   if (!sessionData) {
-    clearSession();
+    if (forceButton && pdfState.buffer) {
+      // User clicked "veil" while reading a large file — the PDF is
+      // still in memory even though it wasn't persisted to IndexedDB.
+      // Show a clickable resume button that reloads from the buffer.
+      showResumeButton(savedFilename, async () => {
+        try {
+          if (loader) loader.hidden = false;
+          pdfState.fileName = savedFilename.replace(/\.pdf$/i, '');
+          if (fileNameEl) fileNameEl.textContent = savedFilename;
+          document.title = `veil - ${savedFilename}`;
+          await loadPDF(new Uint8Array(pdfState.buffer), savedPage);
+          if (loader) loader.hidden = true;
+        } catch (_) {
+          if (loader) loader.hidden = true;
+          hideResumeButton();
+        }
+      });
+    } else {
+      // Cold start with no file in IndexedDB — show a non-actionable
+      // reminder of where the user was, with Browse PDF as primary.
+      showResumeReminder(savedFilename, savedPage);
+    }
     return false;
   }
 
@@ -635,6 +658,41 @@ function showResumeButton(filename, onClick) {
   hero.appendChild(alt);
 }
 
+function showResumeReminder(filename, savedPage) {
+  // Non-actionable resume: the file wasn't stored (too large for IndexedDB)
+  // but we remember the filename and page. Shows where the user was
+  // with Browse PDF as the primary action to re-open the file.
+  const existing = document.getElementById('resume-section');
+  if (existing) existing.remove();
+
+  const section = document.createElement('div');
+  section.id = 'resume-section';
+  section.className = 'drop-resume-section';
+  section.style.cursor = 'default';
+  section.style.pointerEvents = 'none';
+  section.style.opacity = '0.5';
+
+  const label = document.createElement('p');
+  label.className = 'drop-resume-label';
+  label.textContent = `You were on page ${savedPage}`;
+  const fname = document.createElement('p');
+  fname.className = 'drop-resume-filename';
+  fname.textContent = filename;
+  section.append(label, fname);
+
+  const hero = document.querySelector('.drop-hero');
+  if (hero) hero.appendChild(section);
+
+  // Hide tagline, move Browse PDF below the reminder box
+  document.querySelectorAll('.drop-tagline').forEach(el => el.style.display = 'none');
+  const browseBtn = document.querySelector('.drop-browse-btn');
+  if (browseBtn) {
+    browseBtn.style.display = '';
+    browseBtn.style.marginTop = '24px';
+    hero.appendChild(browseBtn); // moves (not clones) after the section
+  }
+}
+
 function hideResumeButton() {
   const section = document.getElementById('resume-section');
   if (section) section.remove();
@@ -666,13 +724,19 @@ function handleFile(file) {
   // Start focus mode timer when a PDF is loaded
   resetFocusTimer();
 
+  // If reopening the same file, resume at the saved page
+  const savedName = localStorage.getItem('veil-filename');
+  const resumePage = (savedName && file.name === savedName)
+    ? parseInt(localStorage.getItem('veil-page'), 10) || 1
+    : 1;
+
   const fr = new FileReader();
   fr.onload = async (e) => {
     const arrayBuffer = e.target.result;
     // Copy the buffer BEFORE loadPDF — PDF.js may transfer (detach)
     // the original ArrayBuffer to its worker thread.
     const bufferCopy = arrayBuffer.slice(0);
-    await loadPDF(new Uint8Array(arrayBuffer));
+    await loadPDF(new Uint8Array(arrayBuffer), resumePage);
     // Persist file for session resume (async, non-blocking)
     persistFile(file, bufferCopy);
   };

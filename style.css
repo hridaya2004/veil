@@ -343,15 +343,16 @@ body {
 
 .drop-resume-section {
   margin-top: 56px;
-  padding: var(--space-5) var(--space-7);
+  padding: var(--space-4) var(--space-5);
   border-radius: var(--radius-md);
   border: 1px solid var(--accent-border);
   background: var(--accent-ghost);
   cursor: pointer;
   text-align: center;
   transition: background 0.2s, border-color 0.2s, transform 0.15s;
-  max-width: 440px;
-  width: calc(100% - 24px);
+  max-width: 340px;
+  min-width: 260px;
+  width: calc(100% - 40px);
   -webkit-tap-highlight-color: transparent;
 }
 @media (min-width: 700px) {
