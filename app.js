@@ -283,15 +283,28 @@ const toolbar = document.getElementById('toolbar');
 // Keyboard shortcut: F to toggle manually.
 // ============================================================
 
-let focusTimer = null;
-let focusPaused = false;
+const uiState = {
+  focusTimer: null,
+  focusPaused: false,
+  hoverTimer: null,
+  mouseMoveThrottled: false,
+  errorTimeout: null,
+  infoTimeout: null,
+  zoomHintShown: false,
+  hasZoomedIn: false,
+  savePageTimer: null,
+  ocrPressTimer: null,
+  ocrPressStartX: 0,
+  ocrPressStartY: 0,
+  resizeTimer: null,
+};
 // On mobile, the user needs more time to decide what to tap.
 const FOCUS_DELAY = window.matchMedia('(pointer: coarse)').matches ? 2500 : 1500;
 const TOOLBAR_TRIGGER_ZONE = 35; // px from top edge
 const TOOLBAR_HOVER_DELAY = 300; // ms mouse must stay in zone
 
 function enterFocusMode() {
-  if (!readerEl || readerEl.hidden || focusPaused) return;
+  if (!readerEl || readerEl.hidden || uiState.focusPaused) return;
   toolbar.classList.add('toolbar-hidden');
   // Remove toolbar elements from tab order when hidden
   toolbar.querySelectorAll('button, a, [tabindex]').forEach(el => {
@@ -312,19 +325,17 @@ function exitFocusMode() {
 }
 
 function resetFocusTimer() {
-  if (focusTimer) clearTimeout(focusTimer);
-  focusTimer = setTimeout(() => { focusTimer = null; enterFocusMode(); }, FOCUS_DELAY);
+  if (uiState.focusTimer) clearTimeout(uiState.focusTimer);
+  uiState.focusTimer = setTimeout(() => { uiState.focusTimer = null; enterFocusMode(); }, FOCUS_DELAY);
 }
 
 // Mouse near top edge: show toolbar after dwelling briefly.
 // Throttled to ~30fps to avoid timer churn during trackpad scroll.
-let hoverTimer = null;
-let mouseMoveThrottled = false;
 
 document.addEventListener('mousemove', (e) => {
-  if (mouseMoveThrottled || !readerEl || readerEl.hidden) return;
-  mouseMoveThrottled = true;
-  requestAnimationFrame(() => { mouseMoveThrottled = false; });
+  if (uiState.mouseMoveThrottled || !readerEl || readerEl.hidden) return;
+  uiState.mouseMoveThrottled = true;
+  requestAnimationFrame(() => { uiState.mouseMoveThrottled = false; });
 
   // Is the mouse over the toolbar or in the trigger zone?
   const toolbarRect = toolbar.getBoundingClientRect();
@@ -332,23 +343,23 @@ document.addEventListener('mousemove', (e) => {
     e.clientX >= toolbarRect.left - 10 && e.clientX <= toolbarRect.right + 10;
 
   if (e.clientY <= TOOLBAR_TRIGGER_ZONE || overToolbar) {
-    if (toolbar.classList.contains('toolbar-hidden') && !hoverTimer) {
-      hoverTimer = setTimeout(() => {
-        hoverTimer = null;
+    if (toolbar.classList.contains('toolbar-hidden') && !uiState.hoverTimer) {
+      uiState.hoverTimer = setTimeout(() => {
+        uiState.hoverTimer = null;
         exitFocusMode();
       }, TOOLBAR_HOVER_DELAY);
     }
   } else {
-    if (hoverTimer) {
-      clearTimeout(hoverTimer);
-      hoverTimer = null;
+    if (uiState.hoverTimer) {
+      clearTimeout(uiState.hoverTimer);
+      uiState.hoverTimer = null;
     }
   }
 
   // Toolbar visible: keep it while mouse is over it, hide timer when away
   if (!toolbar.classList.contains('toolbar-hidden')) {
     if (overToolbar) {
-      clearTimeout(focusTimer);
+      clearTimeout(uiState.focusTimer);
     } else {
       resetFocusTimer();
     }
@@ -381,7 +392,7 @@ document.addEventListener('keydown', (e) => {
     if (toolbar.classList.contains('toolbar-hidden')) {
       exitFocusMode();
     } else {
-      clearTimeout(focusTimer);
+      clearTimeout(uiState.focusTimer);
       enterFocusMode();
     }
   }
@@ -391,37 +402,35 @@ document.addEventListener('keydown', (e) => {
 // Error Display
 // ============================================================
 
-let errorTimeout = null;
 
 function showError(msg, duration = 8000) {
   errorMessage.textContent = msg;
   errorBanner.hidden = false;
-  if (errorTimeout) clearTimeout(errorTimeout);
+  if (uiState.errorTimeout) clearTimeout(uiState.errorTimeout);
   if (duration > 0) {
-    errorTimeout = setTimeout(() => { errorBanner.hidden = true; }, duration);
+    uiState.errorTimeout = setTimeout(() => { errorBanner.hidden = true; }, duration);
   }
 }
 
 errorDismiss.addEventListener('click', () => {
   errorBanner.hidden = true;
-  if (errorTimeout) clearTimeout(errorTimeout);
+  if (uiState.errorTimeout) clearTimeout(uiState.errorTimeout);
 });
 
-let infoTimeout = null;
 
 function showInfo(msg, duration = 6000) {
   infoMessage.textContent = msg;
   infoBanner.hidden = false;
-  if (infoTimeout) clearTimeout(infoTimeout);
+  if (uiState.infoTimeout) clearTimeout(uiState.infoTimeout);
   if (duration > 0) {
-    infoTimeout = setTimeout(() => { infoBanner.hidden = true; }, duration);
+    uiState.infoTimeout = setTimeout(() => { infoBanner.hidden = true; }, duration);
   }
 }
 
 // Dismiss info banner on tap (mobile)
 infoBanner.addEventListener('click', () => {
   infoBanner.hidden = true;
-  if (infoTimeout) clearTimeout(infoTimeout);
+  if (uiState.infoTimeout) clearTimeout(uiState.infoTimeout);
 });
 
 // Pinch-to-zoom hint: on mobile, portrait pages are rendered at
@@ -429,19 +438,17 @@ infoBanner.addEventListener('click', () => {
 // back out, suggest landscape. Shown once per session, triggered
 // on zoom-out — the moment the user realizes the quality isn't
 // enough and returns to normal view.
-let _zoomHintShown = false;
-let _hasZoomedIn = false;
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
-    if (_zoomHintShown || !pdfDoc) return;
+    if (uiState.zoomHintShown || !pdfDoc) return;
     // Don't suggest landscape if already in landscape
     if (window.matchMedia('(orientation: landscape)').matches) return;
     const scale = window.visualViewport.scale;
     if (scale > 1.2) {
-      _hasZoomedIn = true;
-    } else if (_hasZoomedIn && scale < 1.1) {
-      _hasZoomedIn = false;
-      _zoomHintShown = true;
+      uiState.hasZoomedIn = true;
+    } else if (uiState.hasZoomedIn && scale < 1.1) {
+      uiState.hasZoomedIn = false;
+      uiState.zoomHintShown = true;
       showInfo('For best visual quality, try landscape mode.');
     }
   });
@@ -478,11 +485,10 @@ function savePagePosition() {
 }
 
 // Save page position periodically during reading
-let _savePageTimer = null;
 viewport.addEventListener('scroll', () => {
   if (!pdfDoc) return;
-  clearTimeout(_savePageTimer);
-  _savePageTimer = setTimeout(savePagePosition, 1000);
+  clearTimeout(uiState.savePageTimer);
+  uiState.savePageTimer = setTimeout(savePagePosition, 1000);
 }, { passive: true });
 
 async function persistFile(file, arrayBuffer) {
@@ -955,9 +961,6 @@ document.addEventListener('selectionchange', () => {
 // On touch: require a long press (350ms hold without movement) to
 // distinguish "trying to select text" from "scrolling past".
 // On mouse/pen: trigger immediately (no ambiguity with scroll).
-let _ocrPressTimer = null;
-let _ocrPressStartX = 0;
-let _ocrPressStartY = 0;
 const OCR_PRESS_DELAY = 350; // ms — shorter than iOS native long press (500ms)
 const OCR_PRESS_MOVE_TOLERANCE = 10; // px — finger jitter allowance
 
@@ -987,11 +990,11 @@ function triggerOcrIndicator(e) {
 document.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'touch') {
     // Touch: start long press timer
-    _ocrPressStartX = e.clientX;
-    _ocrPressStartY = e.clientY;
-    if (_ocrPressTimer) clearTimeout(_ocrPressTimer);
-    _ocrPressTimer = setTimeout(() => {
-      _ocrPressTimer = null;
+    uiState.ocrPressStartX = e.clientX;
+    uiState.ocrPressStartY = e.clientY;
+    if (uiState.ocrPressTimer) clearTimeout(uiState.ocrPressTimer);
+    uiState.ocrPressTimer = setTimeout(() => {
+      uiState.ocrPressTimer = null;
       triggerOcrIndicator(e);
     }, OCR_PRESS_DELAY);
   } else {
@@ -1001,26 +1004,26 @@ document.addEventListener('pointerdown', (e) => {
 });
 
 document.addEventListener('pointermove', (e) => {
-  if (!_ocrPressTimer || e.pointerType !== 'touch') return;
-  const dx = e.clientX - _ocrPressStartX;
-  const dy = e.clientY - _ocrPressStartY;
+  if (!uiState.ocrPressTimer || e.pointerType !== 'touch') return;
+  const dx = e.clientX - uiState.ocrPressStartX;
+  const dy = e.clientY - uiState.ocrPressStartY;
   if (dx * dx + dy * dy > OCR_PRESS_MOVE_TOLERANCE * OCR_PRESS_MOVE_TOLERANCE) {
-    clearTimeout(_ocrPressTimer);
-    _ocrPressTimer = null;
+    clearTimeout(uiState.ocrPressTimer);
+    uiState.ocrPressTimer = null;
   }
 }, { passive: true });
 
 document.addEventListener('pointerup', () => {
-  if (_ocrPressTimer) {
-    clearTimeout(_ocrPressTimer);
-    _ocrPressTimer = null;
+  if (uiState.ocrPressTimer) {
+    clearTimeout(uiState.ocrPressTimer);
+    uiState.ocrPressTimer = null;
   }
 });
 
 document.addEventListener('pointercancel', () => {
-  if (_ocrPressTimer) {
-    clearTimeout(_ocrPressTimer);
-    _ocrPressTimer = null;
+  if (uiState.ocrPressTimer) {
+    clearTimeout(uiState.ocrPressTimer);
+    uiState.ocrPressTimer = null;
   }
 });
 
@@ -2162,9 +2165,9 @@ pageInfo.addEventListener('click', () => {
   input.setAttribute('aria-label', `Go to page (1-${total})`);
 
   // Pause focus mode while editing — toolbar stays visible
-  focusPaused = true;
-  clearTimeout(focusTimer);
-  focusTimer = null;
+  uiState.focusPaused = true;
+  clearTimeout(uiState.focusTimer);
+  uiState.focusTimer = null;
 
   let committed = false;
 
@@ -2188,7 +2191,7 @@ pageInfo.addEventListener('click', () => {
     input.remove();
     pageInfo.style.display = '';
     // Resume focus mode
-    focusPaused = false;
+    uiState.focusPaused = false;
     resetFocusTimer();
   }
 
@@ -2482,10 +2485,9 @@ if (/iPad|iPhone/.test(navigator.userAgent)) {
 // bar, virtual keyboard open/close) and don't affect the page
 // scale (which is determined by width). Rebuilding on height-only
 // changes causes scroll snap, DOM churn, and kills the page input.
-let resizeTimer;
 window.addEventListener('resize', () => {
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(async () => {
+  clearTimeout(uiState.resizeTimer);
+  uiState.resizeTimer = setTimeout(async () => {
     if (!pdfDoc) return;
     if (window.innerWidth === _lastResizeWidth) return; // height-only change
     _lastResizeWidth = window.innerWidth;
@@ -2507,7 +2509,7 @@ window.addEventListener('resize', () => {
     // Mobile landscape: toolbar is completely hidden — pure reading.
     // Rotating back to portrait restores normal focus mode behavior.
     if (isPhoneLandscape()) {
-      clearTimeout(focusTimer);
+      clearTimeout(uiState.focusTimer);
       enterFocusMode();
     } else {
       exitFocusMode();
@@ -2546,7 +2548,7 @@ initExport({
   announce,
   yieldToUI,
   exitFocusMode,
-  set focusPaused(v) { focusPaused = v; },
+  set focusPaused(v) { uiState.focusPaused = v; },
   resetFocusTimer,
 });
 
