@@ -28,6 +28,13 @@ const DEPS = {
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
 
 import {
+  initExport,
+  exportDarkPdf,
+  cancelExport,
+  hideExportProgress,
+} from './export.js';
+
+import {
   initOcr,
   resetOcrState,
   enqueueOcrJob,
@@ -196,19 +203,6 @@ let isScannedDocument = false;
 
 
 
-// pdf-lib module — loaded lazily for export.
-let pdfLibModule = null;
-
-// fontkit + Unicode font — loaded lazily for export.
-// fontkit is required by pdf-lib to embed custom (non-standard) fonts.
-// The Unicode font replaces Helvetica (WinAnsi-only, 256 chars) so that
-// symbols like −, ≥, α, β, ∑ are preserved in the exported PDF.
-let fontkitModule = null;
-let cachedFontBytes = null;
-
-// Export state
-let exporting = false;
-let exportGeneration = 0; // incremented on each export start and cancel
 let originalFileName = 'document';
 
 // ============================================================
@@ -2288,558 +2282,6 @@ function scrollToPage(pageNum, instant = false) {
 }
 
 // ============================================================
-// Export Dark PDF
-//
-// Renders each page with dark mode applied, composites original
-// images on top, and assembles a new PDF using pdf-lib.
-// An invisible text layer (opacity: 0) is embedded for
-// selectability and search. For scanned docs, OCR runs on each
-// page during export.
-//
-// Pages are processed sequentially to keep memory bounded:
-// only one page's canvases are alive at any time.
-// ============================================================
-
-async function ensurePdfLib() {
-  if (pdfLibModule) return pdfLibModule;
-  pdfLibModule = await import(DEPS.PDF_LIB);
-  return pdfLibModule;
-}
-
-async function ensureUnicodeFont() {
-  // Load fontkit (required by pdf-lib for custom font embedding)
-  if (!fontkitModule) {
-    try {
-      const mod = await import(DEPS.FONTKIT);
-      fontkitModule = mod.default || mod;
-    } catch (e) {
-      console.warn('Failed to load fontkit:', e);
-      return null;
-    }
-  }
-
-  // Load Noto Sans Regular TTF (comprehensive Unicode coverage)
-  if (!cachedFontBytes) {
-    try {
-      const resp = await fetch(DEPS.NOTO_SANS);
-      if (!resp.ok) throw new Error(`Font fetch ${resp.status}`);
-      cachedFontBytes = new Uint8Array(await resp.arrayBuffer());
-    } catch (e) {
-      console.warn('Failed to load Unicode font:', e);
-      return null;
-    }
-  }
-
-  return { fontkit: fontkitModule, fontBytes: cachedFontBytes };
-}
-
-function showExportProgress(current, total) {
-  exportProgressEl.hidden = false;
-  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-  exportProgressFill.style.width = pct + '%';
-  exportProgressText.textContent = `${current} / ${total}`;
-}
-
-function hideExportProgress() {
-  exportProgressEl.hidden = true;
-  exportProgressFill.style.width = '0%';
-}
-
-async function embedLinkAnnotations(outPdf, outPage, annotations) {
-  const { PDFName, PDFString } = pdfLibModule;
-
-  for (const annot of annotations) {
-    if (annot.subtype !== 'Link') continue;
-    if (!annot.rect || annot.rect.length < 4) continue;
-
-    const url = annot.url || null;
-    const dest = annot.dest || null;
-    if (!url && !dest) continue;
-
-    const [x1, y1, x2, y2] = annot.rect;
-
-    try {
-      const context = outPdf.context;
-
-      const annotDict = context.obj({
-        Type: 'Annot',
-        Subtype: 'Link',
-        Rect: [x1, y1, x2, y2],
-        Border: [0, 0, 0],
-        F: 4,
-      });
-
-      if (url) {
-        // External link: URI action
-        const actionDict = context.obj({
-          Type: 'Action',
-          S: 'URI',
-          URI: PDFString.of(url),
-        });
-        annotDict.set(PDFName.of('A'), context.register(actionDict));
-      } else if (dest) {
-        // Internal link — resolve to explicit destination.
-        let explicitDest = null;
-
-        try {
-          if (typeof dest === 'string') {
-            explicitDest = await pdfDoc.getDestination(dest);
-          } else if (Array.isArray(dest) && dest.length > 0) {
-            explicitDest = dest;
-          }
-        } catch (e) {
-          console.warn('[LinkExport] Failed to resolve dest:', dest, e);
-          continue;
-        }
-
-        if (!explicitDest || !Array.isArray(explicitDest) || explicitDest.length === 0) {
-          console.warn('[LinkExport] Empty or invalid explicitDest for:', dest);
-          continue;
-        }
-
-        try {
-          const pageIndex = await pdfDoc.getPageIndex(explicitDest[0]);
-
-          if (pageIndex >= outPdf.getPageCount()) {
-            console.warn('[LinkExport] Page index out of range:', pageIndex, '>=', outPdf.getPageCount());
-            continue;
-          }
-
-          const targetPageRef = outPdf.getPage(pageIndex).ref;
-
-          // Build dest array: [pageRef, /FitType, ...params]
-          // Use context.obj() for individual values, assemble manually.
-          //
-          // PDF.js dest format (confirmed by analysis):
-          //   [0] = {num, gen} page ref — already resolved above
-          //   [1] = fit type — could be:
-          //         - string: "/XYZ" or "XYZ"
-          //         - object: {name: "XYZ"}
-          //   [2+] = number or null
-          const destValues = [targetPageRef];
-
-          for (let d = 1; d < explicitDest.length; d++) {
-            const v = explicitDest[d];
-
-            if (v === null || v === undefined) {
-              // Null parameter — use context.obj(null) to create
-              // a proper PDFNull instance (not the PDFNull class itself)
-              destValues.push(context.obj(null));
-            } else if (typeof v === 'object' && v.name) {
-              // Fit type as object: {name: "XYZ"} — extract the name
-              destValues.push(PDFName.of(v.name));
-            } else if (typeof v === 'string') {
-              // Fit type as string: "/XYZ" or "XYZ"
-              const name = v.startsWith('/') ? v.slice(1) : v;
-              destValues.push(PDFName.of(name));
-            } else if (typeof v === 'number') {
-              destValues.push(context.obj(v));
-            } else {
-              console.warn('[LinkExport] Unknown dest value type:', typeof v, v);
-              destValues.push(context.obj(null));
-            }
-          }
-
-          const destArray = context.obj(destValues);
-          annotDict.set(PDFName.of('Dest'), destArray);
-        } catch (e) {
-          console.warn('[LinkExport] Failed to build dest array:', e);
-          continue;
-        }
-      }
-
-      // Attach annotation to page
-      const annotRef = context.register(annotDict);
-      const pageDict = outPage.node;
-      let annots = pageDict.lookup(PDFName.of('Annots'));
-
-      if (annots instanceof pdfLibModule.PDFArray) {
-        annots.push(annotRef);
-      } else {
-        const newAnnots = context.obj([annotRef]);
-        pageDict.set(PDFName.of('Annots'), newAnnots);
-      }
-    } catch (e) {
-      console.warn('[LinkExport] Annotation failed:', e);
-    }
-  }
-}
-
-// Threshold for iOS scanned PDF export warning.
-// Based on real testing: iPhone 15 Pro crashed at ~240/334 scanned pages.
-// Native PDFs handle 500+ pages fine (no OCR overhead).
-const IOS_SCANNED_EXPORT_WARN = 150;
-
-/**
- * Shows the iOS export warning and returns a Promise that resolves
- * to true (proceed) or false (cancel).
- */
-function showIosExportWarning(pageCount) {
-  return new Promise(resolve => {
-    iosWarnText.innerHTML =
-      `<strong>This PDF has ${pageCount} scanned pages.</strong><br>` +
-      `iOS browsers limit memory for long OCR exports.<br>` +
-      `For best results, use a desktop browser.`;
-    iosWarnEl.hidden = false;
-
-    // Keep toolbar visible while the warning is showing
-    exitFocusMode();
-    focusPaused = true;
-
-    function cleanup() {
-      iosWarnEl.hidden = true;
-      focusPaused = false;
-      resetFocusTimer();
-      iosWarnTry.removeEventListener('click', onTry);
-      iosWarnCancel.removeEventListener('click', onCancel);
-    }
-    function onTry() { cleanup(); resolve(true); }
-    function onCancel() { cleanup(); resolve(false); }
-
-    iosWarnTry.addEventListener('click', onTry);
-    iosWarnCancel.addEventListener('click', onCancel);
-  });
-}
-
-async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, renderCanvas, finalCanvas, deferredAnnotations, myExportGen, totalPages) {
-  const page = await pdfDoc.getPage(pageNum);
-  const origVp = page.getViewport({ scale: 1 });
-  const renderVp = page.getViewport({ scale: exportScale });
-  const w = Math.floor(renderVp.width);
-  const h = Math.floor(renderVp.height);
-
-  renderCanvas.width = w;
-  renderCanvas.height = h;
-  finalCanvas.width = w;
-  finalCanvas.height = h;
-
-  const tasks = [
-    page.render({
-      canvasContext: renderCanvas.getContext('2d'),
-      viewport: renderVp,
-    }).promise,
-    page.getOperatorList(),
-    page.getAnnotations(),
-  ];
-  if (!isScannedDocument) {
-    tasks.push(page.getTextContent());
-  }
-
-  const results = await Promise.all(tasks);
-  if (exportGeneration !== myExportGen) return;
-
-  const opList = results[1];
-  const annotations = results[2];
-  const textContent = isScannedDocument ? null : results[3];
-
-  // Determine dark mode for this page
-  const isDarkBg = detectAlreadyDark(renderCanvas);
-  const override = pageDarkOverride.get(pageNum);
-  let applyDark;
-  if (override === 'dark') applyDark = true;
-  else if (override === 'light') applyDark = false;
-  else applyDark = !isDarkBg;
-
-  // Compose final image
-  const ctx = finalCanvas.getContext('2d');
-
-  if (applyDark) {
-    if (supportsCtxFilter) {
-      ctx.filter = 'invert(0.86) hue-rotate(180deg)';
-      ctx.drawImage(renderCanvas, 0, 0);
-      ctx.filter = 'none';
-    } else {
-      ctx.drawImage(renderCanvas, 0, 0);
-      const imgData = ctx.getImageData(0, 0, w, h);
-      const d = imgData.data;
-      for (let i = 0; i < d.length; i += 4) {
-        let r = d[i]   + 0.86 * (255 - 2 * d[i]);
-        let g = d[i+1] + 0.86 * (255 - 2 * d[i+1]);
-        let b = d[i+2] + 0.86 * (255 - 2 * d[i+2]);
-        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        r = 2 * lum - r;
-        g = 2 * lum - g;
-        b = 2 * lum - b;
-        d[i]   = Math.max(0, Math.min(255, r));
-        d[i+1] = Math.max(0, Math.min(255, g));
-        d[i+2] = Math.max(0, Math.min(255, b));
-      }
-      ctx.putImageData(imgData, 0, 0);
-    }
-
-    if (!isScannedDocument) {
-      const regions = extractImageRegions(opList, renderVp.transform);
-      if (regions.length > 0) {
-        compositeImageRegions(ctx, renderCanvas, regions, w, h);
-      }
-    }
-  } else {
-    ctx.drawImage(renderCanvas, 0, 0);
-  }
-
-  // Convert to JPEG
-  const jpegBlob = await new Promise(r =>
-    finalCanvas.toBlob(r, 'image/jpeg', 0.85)
-  );
-  const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
-
-  // Add page to output PDF
-  const jpegImage = await outPdf.embedJpg(jpegBytes);
-  const outPage = outPdf.addPage([origVp.width, origVp.height]);
-  outPage.drawImage(jpegImage, {
-    x: 0,
-    y: 0,
-    width: origVp.width,
-    height: origVp.height,
-  });
-
-  // Invisible text layer
-  if (textContent) {
-    for (const item of textContent.items) {
-      if (!item.str || !item.str.trim()) continue;
-      const itemText = normalizeLigatures(item.str);
-      const tx = item.transform;
-      const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
-      if (baseFontSize < 1) continue;
-
-      try {
-        let drawSize = baseFontSize;
-        if (item.width > 0) {
-          const naturalWidth = font.widthOfTextAtSize(itemText, baseFontSize);
-          if (naturalWidth > 0) {
-            drawSize = baseFontSize * (item.width / naturalWidth);
-          }
-        }
-
-        outPage.drawText(itemText, {
-          x: tx[4],
-          y: tx[5],
-          size: drawSize,
-          font,
-          opacity: 0,
-        });
-      } catch (_) {}
-    }
-
-  } else if (isScannedDocument && exportWorker) {
-    const processed = preprocessCanvasForOcr(renderCanvas);
-    const ocrBlob = await new Promise(r =>
-      processed.toBlob(r, 'image/png')
-    );
-    processed.width = 0;
-    const { data } = await exportWorker.recognize(ocrBlob);
-
-    if (data.words) {
-      const sx = origVp.width / w;
-      const sy = origVp.height / h;
-
-      for (const word of data.words) {
-        if (!word.text || !word.text.trim()) continue;
-        if (word.confidence < OCR_CONFIDENCE_THRESHOLD) continue;
-        if (isOcrArtifact(word.text)) continue;
-        const wordText = normalizeLigatures(word.text);
-        const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
-        if (baseFontSize < 1) continue;
-
-        try {
-          const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
-          let drawSize = baseFontSize;
-          if (targetWidth > 0) {
-            const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
-            if (naturalWidth > 0) {
-              drawSize = baseFontSize * (targetWidth / naturalWidth);
-            }
-          }
-
-          outPage.drawText(wordText, {
-            x: word.bbox.x0 * sx,
-            y: origVp.height - word.bbox.y1 * sy,
-            size: drawSize,
-            font,
-            opacity: 0,
-          });
-        } catch (_) {}
-      }
-    }
-  }
-
-  // Collect link annotations for deferred embedding
-  if (annotations.length > 0) {
-    deferredAnnotations.push({ outPage, annotations });
-  }
-
-  page.cleanup();
-  renderCanvas.getContext('2d').clearRect(0, 0, w, h);
-  finalCanvas.getContext('2d').clearRect(0, 0, w, h);
-
-  if (exportGeneration === myExportGen) {
-    showExportProgress(pageNum, totalPages);
-  }
-
-  if (pageNum % 10 === 0) {
-    await new Promise(r => setTimeout(r, 50));
-  } else {
-    await yieldToUI();
-  }
-}
-
-async function exportDarkPdf() {
-  if (!pdfDoc || exporting) return;
-
-  // Warn iOS users before starting a long scanned export
-  if (isIOS && isScannedDocument && pdfDoc.numPages > IOS_SCANNED_EXPORT_WARN) {
-    const proceed = await showIosExportWarning(pdfDoc.numPages);
-    if (!proceed) return;
-  }
-
-  exporting = true;
-  const myExportGen = ++exportGeneration;
-  btnExport.disabled = true;
-
-  try {
-    const { PDFDocument, StandardFonts } = await ensurePdfLib();
-
-    const outPdf = await PDFDocument.create();
-
-    // Try to load a Unicode font (Noto Sans) for full character support.
-    // Falls back to Helvetica (WinAnsi, 256 chars) if loading fails.
-    let font;
-    const fontResources = await ensureUnicodeFont();
-    if (fontResources) {
-      try {
-        outPdf.registerFontkit(fontResources.fontkit);
-        font = await outPdf.embedFont(fontResources.fontBytes, { subset: true });
-        console.log('[Export] Using Noto Sans (full Unicode support)');
-      } catch (e) {
-        console.warn('[Export] Failed to embed Unicode font, falling back to Helvetica:', e);
-        font = await outPdf.embedFont(StandardFonts.Helvetica);
-      }
-    } else {
-      console.warn('[Export] Unicode font not available, using Helvetica (limited charset)');
-      font = await outPdf.embedFont(StandardFonts.Helvetica);
-    }
-
-    const totalPages = pdfDoc.numPages;
-
-    // Export at consistent quality regardless of screen size.
-    // On a small mobile screen, currentScale can be 0.5 (fitting A4
-    // into 390px). Without a floor, the export would be ~79 DPI — blurry.
-    //
-    // On mobile (touch devices), we cap at scale 2 (144 DPI) to stay
-    // within iOS Safari's per-tab memory limit (~1-1.5GB). At scale 3,
-    // a 218-page export crashes around page 120 because canvas allocations
-    // (~18MB each) outpace the garbage collector.
-    //
-    // On desktop, scale 3 (216 DPI) gives sharper text. Desktop browsers
-    // have much higher memory limits and faster GC.
-    const isMobile = window.matchMedia('(pointer: coarse)').matches;
-    const minExportScale = isMobile ? 2 : 3;
-    const exportScale = Math.max(currentScale * 2, minExportScale);
-
-    showExportProgress(0, totalPages);
-    const deferredAnnotations = [];
-
-    // OCR worker for scanned documents only.
-    // Native PDFs don't need OCR in the export — their text is already
-    // in the content stream. Image OCR lives in the web view only
-    // (see shelved/image-ocr-export.js for the removed code).
-    let exportWorker = null;
-    if (isScannedDocument) {
-      try {
-        const mod = await import(DEPS.TESSERACT);
-        const createWorker = mod.createWorker || (mod.default && mod.default.createWorker);
-        exportWorker = await createWorker('eng', 1, { logger: () => {} });
-      } catch (err) {
-        console.warn('[Export] Failed to create OCR worker:', err);
-      }
-    }
-
-    // Reusable canvases — created once, recycled every iteration.
-    // Avoids GC thrashing on iOS WebKit where canvas backing stores
-    // are released lazily. Reassigning width/height clears the canvas
-    // and reuses the backing store if dimensions haven't changed.
-    const renderCanvas = document.createElement('canvas');
-    const finalCanvas = document.createElement('canvas');
-
-    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      if (exportGeneration !== myExportGen) break;
-      await exportPage(pageNum, outPdf, font, exportWorker, exportScale, renderCanvas, finalCanvas, deferredAnnotations, myExportGen, totalPages);
-    }
-
-    // --- Release recycled canvases ---
-    renderCanvas.width = 0;
-    finalCanvas.width = 0;
-
-    // --- Cancelled? Clean up silently and abort ---
-    // The UI was already hidden by the cancel button handler (instant
-    // perceived cancellation). We just need to release resources.
-    if (exportGeneration !== myExportGen) {
-      if (exportWorker) exportWorker.terminate().catch(() => {});
-      return;
-    }
-
-    // --- Terminate the shared export OCR worker ---
-    if (exportWorker) {
-      await exportWorker.terminate();
-    }
-
-    // --- Embed link annotations (all pages now exist) ---
-    for (const { outPage, annotations } of deferredAnnotations) {
-      await embedLinkAnnotations(outPdf, outPage, annotations);
-    }
-
-    // --- Stamp metadata and save ---
-    outPdf.setProducer('veil (https://veil.simoneamico.com)');
-    outPdf.setCreator('veil');
-    let pdfBytes = await outPdf.save();
-    hideExportProgress();
-
-    const filename = `${originalFileName}-dark.pdf`;
-    let blob = new Blob([pdfBytes], { type: 'application/pdf' });
-
-    // Release the raw bytes immediately — the Blob now owns the data.
-    // On iOS this frees tens of MB that would otherwise linger in the
-    // async function's closure and trigger Jetsam during scrolling.
-    pdfBytes = null;
-
-    // iOS Safari ignores the `download` attribute on anchor elements
-    // and opens blob URLs inline instead of downloading. The reliable
-    // workaround: use the native share sheet via navigator.share().
-    // Falls back to the standard anchor technique on other browsers.
-    if (navigator.share && isIOS) {
-      try {
-        const file = new File([blob], filename, { type: 'application/pdf' });
-        blob = null; // File now owns the data
-        await navigator.share({ files: [file] });
-      } catch (e) {
-        // User cancelled the share sheet — not an error
-        if (e.name !== 'AbortError') console.warn('Share failed:', e);
-      }
-    } else {
-      const url = URL.createObjectURL(blob);
-      blob = null; // Blob URL now owns the data
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // Delay revoke so the browser has time to start the download
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-    }
-    announce('Export complete');
-
-  } catch (err) {
-    console.error('Export failed:', err);
-    hideExportProgress();
-    if (exportGeneration === myExportGen) showError('Export failed. Please try again.');
-  } finally {
-    exporting = false;
-    btnExport.disabled = false;
-  }
-}
-
-// ============================================================
 // Event Listeners
 // ============================================================
 
@@ -2996,17 +2438,7 @@ btnPrev.addEventListener('click', () => scrollToPage(currentVisiblePage - 1, tru
 btnNext.addEventListener('click', () => scrollToPage(currentVisiblePage + 1, true));
 btnToggle.addEventListener('click', toggleDarkMode);
 btnExport.addEventListener('click', exportDarkPdf);
-exportCancelBtn.addEventListener('click', () => {
-  // Increment generation to invalidate the running export.
-  // Any in-flight export will see the generation mismatch and stop.
-  exportGeneration++;
-  // Instant perceived cancellation: hide progress and re-enable the
-  // export button immediately. The actual cleanup (worker termination,
-  // canvas release) happens in the background inside exportDarkPdf().
-  hideExportProgress();
-  exporting = false;
-  btnExport.disabled = false;
-});
+exportCancelBtn.addEventListener('click', cancelExport);
 
 // --- Keyboard ---
 document.addEventListener('keydown', (e) => {
@@ -3142,6 +2574,34 @@ readerEl.addEventListener('dragover', (e) => e.preventDefault());
 readerEl.addEventListener('drop', (e) => {
   e.preventDefault();
   handleFile(e.dataTransfer.files[0]);
+});
+
+// Initialize export module with app context
+initExport({
+  get pdfDoc() { return pdfDoc; },
+  get isScannedDocument() { return isScannedDocument; },
+  get currentScale() { return currentScale; },
+  get pageDarkOverride() { return pageDarkOverride; },
+  get originalFileName() { return originalFileName; },
+  get isIOS() { return isIOS; },
+  supportsCtxFilter,
+  DEPS,
+  btnExport,
+  exportProgressEl,
+  exportProgressFill,
+  exportProgressText,
+  iosWarnEl: document.getElementById('ios-export-warn'),
+  iosWarnText: document.getElementById('ios-export-warn-text'),
+  iosWarnTry: document.getElementById('ios-export-try'),
+  iosWarnCancel: document.getElementById('ios-export-cancel'),
+  detectAlreadyDark,
+  extractImageRegions,
+  showError,
+  announce,
+  yieldToUI,
+  exitFocusMode,
+  set focusPaused(v) { focusPaused = v; },
+  resetFocusTimer,
 });
 
 // Initialize OCR module with app context (read-only getters + function refs)
