@@ -1135,10 +1135,11 @@ function isTouchLandscape() {
 
 function calculateScale(page) {
   const vp = page.getViewport({ scale: 1 });
+  const sidePadding = _isMobileDevice ? 0 : 16;
   return _calculateScale(
     vp.width, vp.height,
     window.innerWidth, window.innerHeight,
-    48, 16, isTouchLandscape()
+    48, sidePadding, _isMobileDevice
   );
 }
 
@@ -1173,8 +1174,10 @@ function createPoolContainer() {
   const container = document.createElement('div');
   container.className = 'page-container';
   container.style.position = 'absolute';
-  container.style.left = '50%';
-  container.style.transform = 'translateX(-50%)';
+  container.style.left = '0';
+  container.style.right = '0';
+  container.style.margin = '0 auto';
+  container.style.willChange = 'transform';
   container.style.display = 'none';
 
   const mainCanvas = document.createElement('canvas');
@@ -1406,8 +1409,9 @@ async function buildPageSlots() {
   // Compute geometry for all pages. Most PDFs have uniform page sizes —
   // detect this after page 1 and skip getPage() for the rest.
   const firstVp = firstPage.getViewport({ scale: scale * dpr });
-  const firstCssW = Math.floor(firstVp.width / dpr);
-  const firstCssH = Math.floor(firstVp.height / dpr);
+  const round = _isMobileDevice ? Math.round : Math.floor;
+  const firstCssW = round(firstVp.width / dpr);
+  const firstCssH = round(firstVp.height / dpr);
   let uniform = true;
 
   // Build geometry table
@@ -1420,8 +1424,8 @@ async function buildPageSlots() {
       // Check if this page has different dimensions
       const page = await pdfState.doc.getPage(i);
       const vp = page.getViewport({ scale: scale * dpr });
-      cssW = Math.floor(vp.width / dpr);
-      cssH = Math.floor(vp.height / dpr);
+      cssW = round(vp.width / dpr);
+      cssH = round(vp.height / dpr);
       if (cssW !== firstCssW || cssH !== firstCssH) uniform = false;
     }
 

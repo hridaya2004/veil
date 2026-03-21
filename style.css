@@ -1126,9 +1126,11 @@ div.ocr-loading:not(.page-container)::before {
   box-shadow: 0 0 5px rgba(0, 0, 0, 0.5), inset 0 0 5px rgba(0, 0, 0, 0.15);
 }
 
-/* Graceful fade-out when OCR completes */
+/* Completion flash: solid amber border holds 300ms, then fades out */
 .ocr-loading.ocr-done::before {
+  background: var(--accent);
   opacity: 0;
+  transition: opacity 0.6s ease 0.3s;
 }
 
 /* Respect user motion preferences */
