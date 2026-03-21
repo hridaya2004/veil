@@ -81,8 +81,14 @@ self.addEventListener('fetch', (event) => {
   // Skip chrome-extension, blob, and data URLs
   if (!url.protocol.startsWith('http')) return;
 
+  // Google Fonts CSS: network-first (CSS content varies by user-agent)
+  if (url.hostname === 'fonts.googleapis.com') {
+    event.respondWith(networkFirst(event.request));
+    return;
+  }
+
   // CDN resources: cache-first (versioned URLs, immutable)
-  if (CDN_CACHE_PATTERNS.some((pattern) => url.hostname.includes(pattern))) {
+  if (CDN_CACHE_PATTERNS.some((pattern) => url.hostname === pattern || url.hostname.endsWith('.' + pattern))) {
     event.respondWith(cacheFirst(event.request));
     return;
   }

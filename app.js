@@ -35,9 +35,6 @@ import {
   shouldInsertSpace,
   calculateScale as _calculateScale,
   isScannedPattern,
-  sanitizeOcrWords,
-  filterFlowBreakingItems,
-  OCR_GAP_OUTLIER_FACTOR,
   detectLanguageFromText,
   getNavigatorLanguage,
   isOcrArtifact,
@@ -859,11 +856,16 @@ function showResumeButton(filename, onClick) {
   section.role = 'button';
   section.tabIndex = 0;
   section.setAttribute('aria-label', `Resume reading ${filename}`);
-  section.innerHTML = `
-    <p class="drop-resume-label">Pick up where you left off</p>
-    <p class="drop-resume-filename">${filename.replace(/</g, '&lt;')}</p>
-    <p class="drop-resume-page">Page ${savedPage}</p>
-  `;
+  const label = document.createElement('p');
+  label.className = 'drop-resume-label';
+  label.textContent = 'Pick up where you left off';
+  const fname = document.createElement('p');
+  fname.className = 'drop-resume-filename';
+  fname.textContent = filename;
+  const page = document.createElement('p');
+  page.className = 'drop-resume-page';
+  page.textContent = `Page ${savedPage}`;
+  section.append(label, fname, page);
   // Empty touchstart enables :active on iOS Safari
   section.addEventListener('touchstart', () => {}, { passive: true });
   function activateResume(e) {
@@ -916,7 +918,12 @@ function hideResumeButton() {
 // ============================================================
 
 function handleFile(file) {
-  if (!file || file.type !== 'application/pdf') return;
+  if (!file) return;
+  if (file.type !== 'application/pdf' && !file.name.endsWith('.pdf')) return;
+  if (file.size > 512 * 1024 * 1024) {
+    showError('This file is too large. Maximum size is 512 MB.');
+    return;
+  }
   hideResumeButton();
   announce('Loading document...');
   originalFileName = file.name.replace(/\.pdf$/i, '');
@@ -2807,6 +2814,11 @@ function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
     a.className = 'link-annot';
 
     if (url) {
+      // Sanitize URL protocol — malicious PDFs can embed javascript: links
+      try {
+        const parsed = new URL(url);
+        if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) continue;
+      } catch (_) { continue; }
       a.href = url;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
