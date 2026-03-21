@@ -1119,9 +1119,18 @@ div.ocr-loading:not(.page-container)::before {
    isMobileLandscape + scroll listener).
    ============================================================ */
 
+/* Phone landscape: compact shadow */
 @media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
   .page-container {
     box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* Tablet landscape: same fit-to-width rendering as phone,
+   but toolbar stays visible and more vertical space available */
+@media (pointer: coarse) and (orientation: landscape) and (min-height: 501px) {
+  .page-container {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
   }
 }
 

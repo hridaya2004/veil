@@ -505,7 +505,7 @@ function enterFocusMode() {
 function exitFocusMode() {
   // Mobile landscape: toolbar stays hidden unconditionally.
   // The user rotates to portrait to access toolbar actions.
-  if (isMobileLandscape()) return;
+  if (isPhoneLandscape()) return;
   toolbar.classList.remove('toolbar-hidden');
   // Restore toolbar elements to tab order
   toolbar.querySelectorAll('button, a, [tabindex="-1"]').forEach(el => {
@@ -564,7 +564,7 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('touchstart', (e) => {
   if (!readerEl || readerEl.hidden) return;
   if (!toolbar.classList.contains('toolbar-hidden')) return;
-  if (isMobileLandscape()) return;
+  if (isPhoneLandscape()) return;
 
   const touch = e.touches[0];
   if (touch && touch.clientY <= TOOLBAR_TRIGGER_ZONE * 2) {
@@ -637,6 +637,8 @@ let _hasZoomedIn = false;
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
     if (_zoomHintShown || !pdfDoc) return;
+    // Don't suggest landscape if already in landscape
+    if (window.matchMedia('(orientation: landscape)').matches) return;
     const scale = window.visualViewport.scale;
     if (scale > 1.2) {
       _hasZoomedIn = true;
@@ -1760,10 +1762,17 @@ function cleanup() {
 // Scale Calculation
 // ============================================================
 
-function isMobileLandscape() {
+// Phone landscape: small screen held sideways. Toolbar hidden, fit-to-width.
+function isPhoneLandscape() {
   return window.matchMedia('(pointer: coarse)').matches &&
     window.matchMedia('(orientation: landscape)').matches &&
     window.innerHeight < 500;
+}
+
+// Any touch device in landscape (phone + tablet). Fit-to-width for both.
+function isTouchLandscape() {
+  return window.matchMedia('(pointer: coarse)').matches &&
+    window.matchMedia('(orientation: landscape)').matches;
 }
 
 function calculateScale(page) {
@@ -1771,7 +1780,7 @@ function calculateScale(page) {
   return _calculateScale(
     vp.width, vp.height,
     window.innerWidth, window.innerHeight,
-    48, 16, isMobileLandscape()
+    48, 16, isTouchLandscape()
   );
 }
 
@@ -3889,7 +3898,7 @@ window.addEventListener('resize', () => {
 
     // Mobile landscape: toolbar is completely hidden — pure reading.
     // Rotating back to portrait restores normal focus mode behavior.
-    if (isMobileLandscape()) {
+    if (isPhoneLandscape()) {
       clearTimeout(focusTimer);
       enterFocusMode();
     } else {
