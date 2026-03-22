@@ -1188,7 +1188,6 @@ function createPoolContainer() {
   container.style.left = '0';
   container.style.right = '0';
   container.style.margin = '0 auto';
-  container.style.willChange = 'transform';
   container.style.display = 'none';
 
   const mainCanvas = document.createElement('canvas');
@@ -1568,6 +1567,7 @@ const scrollState = {
   presentationMode: false,
   wheelAccum: 0,
   wheelTimer: null,
+  willChangeTimer: null,
 };
 const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
 
@@ -1579,6 +1579,23 @@ const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
 viewport.addEventListener('scroll', () => {
   const now = performance.now();
   const scrollTop = viewport.scrollTop; // single reflow
+
+  // 0. will-change: promote containers during scroll, demote after 200ms idle.
+  //    Permanent will-change wastes compositor memory for every pooled container
+  //    even when the user is just reading. Lazy promotion keeps GPU layers only
+  //    while they're actually being repositioned.
+  if (!scrollState.willChangeTimer) {
+    for (const slot of renderPipeline.pool) {
+      if (slot.assignedPage != null) slot.element.style.willChange = 'transform';
+    }
+  }
+  clearTimeout(scrollState.willChangeTimer);
+  scrollState.willChangeTimer = setTimeout(() => {
+    scrollState.willChangeTimer = null;
+    for (const slot of renderPipeline.pool) {
+      slot.element.style.willChange = '';
+    }
+  }, 200);
 
   // 1. Velocity detection (synchronous — reconcile reads isFast)
   const dt = now - scrollState.lastTime;
