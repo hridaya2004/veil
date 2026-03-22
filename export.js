@@ -103,38 +103,6 @@ export function hideExportProgress() {
 }
 
 // ============================================================
-// iOS Export Warning
-// ============================================================
-
-const IOS_SCANNED_EXPORT_WARN = 150;
-
-function showIosExportWarning(pageCount) {
-  return new Promise(resolve => {
-    ctx.iosWarnText.innerHTML =
-      `<strong>This PDF has ${pageCount} scanned pages.</strong><br>` +
-      `iOS browsers limit memory for long OCR exports.<br>` +
-      `For best results, use a desktop browser.`;
-    ctx.iosWarnEl.hidden = false;
-
-    ctx.exitFocusMode();
-    ctx.focusPaused = true;
-
-    function cleanup() {
-      ctx.iosWarnEl.hidden = true;
-      ctx.focusPaused = false;
-      ctx.resetFocusTimer();
-      ctx.iosWarnTry.removeEventListener('click', onTry);
-      ctx.iosWarnCancel.removeEventListener('click', onCancel);
-    }
-    function onTry() { cleanup(); resolve(true); }
-    function onCancel() { cleanup(); resolve(false); }
-
-    ctx.iosWarnTry.addEventListener('click', onTry);
-    ctx.iosWarnCancel.addEventListener('click', onCancel);
-  });
-}
-
-// ============================================================
 // Link Annotations
 // ============================================================
 
@@ -433,11 +401,6 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
 export async function exportDarkPdf() {
   if (!ctx.pdfDoc || exporting) return;
 
-  if (ctx.isIOS && ctx.isScannedDocument && ctx.pdfDoc.numPages > IOS_SCANNED_EXPORT_WARN) {
-    const proceed = await showIosExportWarning(ctx.pdfDoc.numPages);
-    if (!proceed) return;
-  }
-
   exporting = true;
   const myExportGen = ++exportGeneration;
   ctx.btnExport.disabled = true;
@@ -518,25 +481,15 @@ export async function exportDarkPdf() {
     pdfBytes = null;
     outPdf = null; // release ~300MB of embedded JPEGs and page dictionaries
 
-    if (navigator.share && ctx.isIOS) {
-      try {
-        const file = new File([blob], filename, { type: 'application/pdf' });
-        blob = null;
-        await navigator.share({ files: [file] });
-      } catch (e) {
-        if (e.name !== 'AbortError') console.warn('Share failed:', e);
-      }
-    } else {
-      const url = URL.createObjectURL(blob);
-      blob = null;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-    }
+    const url = URL.createObjectURL(blob);
+    blob = null;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
     ctx.announce('Export complete');
 
   } catch (err) {

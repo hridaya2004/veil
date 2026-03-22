@@ -241,10 +241,6 @@ const exportCancelBtn = document.getElementById('export-cancel');
 const errorBanner = document.getElementById('error-banner');
 const infoBanner = document.getElementById('info-banner');
 const infoMessage = document.getElementById('info-message');
-const iosWarnEl = document.getElementById('ios-export-warn');
-const iosWarnText = document.getElementById('ios-export-warn-text');
-const iosWarnTry = document.getElementById('ios-export-try');
-const iosWarnCancel = document.getElementById('ios-export-cancel');
 
 // iOS detection — all browsers on iOS use WebKit (Apple policy),
 // so they ALL share the same Jetsam memory limits. This detects
@@ -2798,25 +2794,17 @@ initExport({
   get currentScale() { return pdfState.scale; },
   get pageDarkOverride() { return pdfState.darkOverride; },
   get originalFileName() { return pdfState.fileName; },
-  get isIOS() { return isIOS; },
   supportsCtxFilter,
   DEPS,
   btnExport,
   exportProgressEl,
   exportProgressFill,
   exportProgressText,
-  iosWarnEl: document.getElementById('ios-export-warn'),
-  iosWarnText: document.getElementById('ios-export-warn-text'),
-  iosWarnTry: document.getElementById('ios-export-try'),
-  iosWarnCancel: document.getElementById('ios-export-cancel'),
   detectAlreadyDark,
   extractImageRegions,
   showError,
   announce,
   yieldToUI,
-  exitFocusMode,
-  set focusPaused(v) { uiState.focusPaused = v; },
-  resetFocusTimer,
 });
 
 // Initialize OCR module with app context (read-only getters + function refs)
