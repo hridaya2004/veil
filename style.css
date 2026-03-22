@@ -869,6 +869,12 @@ body {
   background: rgba(212, 163, 115, 0.12);
 }
 
+.link-annot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  background: rgba(212, 163, 115, 0.12);
+}
+
 /* ============================================================
    Page Number Label
    ============================================================ */

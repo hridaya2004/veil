@@ -2164,8 +2164,18 @@ function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
       a.href = url;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
+      // Accessible label: show host for http/https, full address for mailto
+      try {
+        const parsed = new URL(url);
+        a.setAttribute('aria-label', parsed.protocol === 'mailto:'
+          ? `Email ${parsed.pathname}`
+          : `${parsed.hostname} (opens in new tab)`);
+      } catch (_) {
+        a.setAttribute('aria-label', 'External link (opens in new tab)');
+      }
     } else if (dest) {
       a.href = '#';
+      a.setAttribute('aria-label', `Internal link to page ${typeof dest === 'string' ? dest : ''}`);
       a.addEventListener('click', (e) => {
         e.preventDefault();
         resolveInternalLink(dest);
