@@ -477,12 +477,7 @@ function savePagePosition() {
   }
 }
 
-// Save page position periodically during reading
-viewport.addEventListener('scroll', () => {
-  if (!pdfState.doc) return;
-  clearTimeout(uiState.savePageTimer);
-  uiState.savePageTimer = setTimeout(savePagePosition, 1000);
-}, { passive: true });
+// Page position saving is handled by the unified scroll coordinator below
 
 async function persistFile(file, arrayBuffer) {
   const filename = file.name;
@@ -1576,10 +1571,17 @@ const scrollState = {
 };
 const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
 
+// --- Unified scroll coordinator ---
+// Single scrollTop read per frame. Three separate listeners each called
+// viewport.scrollTop independently — on Android budget devices each read
+// can force a layout reflow (~2-5ms), totaling 6-15ms per frame wasted.
+// Order matters: velocity MUST update before reconcile reads scrollState.isFast.
 viewport.addEventListener('scroll', () => {
   const now = performance.now();
+  const scrollTop = viewport.scrollTop; // single reflow
+
+  // 1. Velocity detection (synchronous — reconcile reads isFast)
   const dt = now - scrollState.lastTime;
-  const scrollTop = viewport.scrollTop;
   if (dt > 0 && scrollState.lastTime > 0) {
     const dy = Math.abs(scrollTop - scrollState.lastTop);
     const velocity = (dy / dt) * 1000; // px/sec
@@ -1588,13 +1590,26 @@ viewport.addEventListener('scroll', () => {
   scrollState.lastTop = scrollTop;
   scrollState.lastTime = now;
 
-  // When scroll stops, mark as slow after a brief settle
   clearTimeout(scrollState.velocityTimer);
   scrollState.velocityTimer = setTimeout(() => {
     scrollState.isFast = false;
-    // Flush any deferred renders now that scroll has settled
     flushRenderQueue();
   }, 150);
+
+  // 2. Reconcile containers + update page indicator (rAF-throttled)
+  if (!scrollState.raf) {
+    scrollState.raf = requestAnimationFrame(() => {
+      scrollState.raf = 0;
+      reconcileContainers();
+      updateCurrentPageFromScroll();
+    });
+  }
+
+  // 3. Save page position (debounced 1s)
+  if (pdfState.doc) {
+    clearTimeout(uiState.savePageTimer);
+    uiState.savePageTimer = setTimeout(savePagePosition, 1000);
+  }
 }, { passive: true });
 
 // ============================================================
@@ -2703,16 +2718,7 @@ viewport.addEventListener('wheel', (e) => {
   }
 }, { passive: false });
 
-// --- Scroll: update current page indicator (throttled) ---
-viewport.addEventListener('scroll', () => {
-  if (!pdfState.doc) return;
-  if (scrollState.raf) return;
-  scrollState.raf = requestAnimationFrame(() => {
-    scrollState.raf = 0;
-    reconcileContainers();
-    updateCurrentPageFromScroll();
-  });
-}, { passive: true });
+// Scroll handling consolidated in the unified scroll coordinator above
 
 let _lastResizeWidth = window.innerWidth;
 
