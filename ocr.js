@@ -383,12 +383,6 @@ export async function ocrImageVertical(mainCanvas, verticalLayerDiv, region, dpr
     const { data } = await worker.recognize(processed90);
     processed90.width = 0;
 
-    tesseractUses++;
-    if (tesseractUses >= 5 && tesseractWorker) {
-      tesseractWorker.terminate().catch(() => {});
-      tesseractWorker = null;
-    }
-
     if (ctx.globalGeneration !== myGen) return;
 
     if (hasValidOcrWords(data)) {
@@ -597,12 +591,6 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
           else ocrCanvas.width = 0;
 
           const { data } = await worker.recognize(processed);
-
-          tesseractUses++;
-          if (tesseractUses >= 5 && tesseractWorker) {
-            tesseractWorker.terminate().catch(() => {});
-            tesseractWorker = null;
-          }
 
           if (ctx.globalGeneration !== myGen) { processed.width = 0; return; }
 
