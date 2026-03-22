@@ -43,35 +43,39 @@ test.describe('Session persistence', () => {
     expect(Number(storedPage)).toBeGreaterThan(1);
   });
 
-  // BUG: will be fixed in commit 'fix: prevent corrupted PDFs from poisoning session'
-  test.skip('corrupted file does not poison session', async ({ page }) => {
+  test('corrupted file does not poison session', async ({ page }) => {
     await page.goto(READER_URL);
 
-    // Attempt to load a non-PDF file
     await page.waitForFunction(
       () => document.documentElement.dataset.appReady === 'true',
       { timeout: 30000 }
     );
 
-    // Set a non-PDF file — should produce an error
+    // Clear any pre-existing session data
+    await page.evaluate(() => {
+      localStorage.removeItem('veil-filename');
+      localStorage.removeItem('veil-page');
+    });
+
+    // Load a fake PDF (valid name/MIME but invalid content)
     const fileInput = page.locator('#file-input');
-    // Create a fake text file path (this won't work as a real fixture,
-    // but demonstrates the intent of the test)
     await fileInput.setInputFiles({
       name: 'corrupted.pdf',
       mimeType: 'application/pdf',
-      buffer: Buffer.from('not a real PDF'),
+      buffer: Buffer.from('not a real PDF file content'),
     });
 
-    // Reload and verify no resume is attempted
-    await page.reload();
-    await page.waitForFunction(
-      () => document.documentElement.dataset.appReady === 'true',
-      { timeout: 30000 }
-    );
+    // Wait for the error banner to appear (loadPDF failed)
+    await page.waitForFunction(() => {
+      const banner = document.getElementById('error-banner');
+      return banner && !banner.hidden;
+    }, { timeout: 15000 });
 
-    const reader = page.locator('#reader');
-    await expect(reader).not.toBeVisible();
+    // Verify filename was NOT saved to localStorage
+    const savedName = await page.evaluate(() =>
+      localStorage.getItem('veil-filename')
+    );
+    expect(savedName).toBeNull();
   });
 
   test('resume state exists after loading PDF', async ({ page }) => {

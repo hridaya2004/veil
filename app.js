@@ -744,9 +744,13 @@ function handleFile(file) {
     // Copy the buffer BEFORE loadPDF — PDF.js may transfer (detach)
     // the original ArrayBuffer to its worker thread.
     const bufferCopy = arrayBuffer.slice(0);
-    await loadPDF(new Uint8Array(arrayBuffer), resumePage);
-    // Persist file for session resume (async, non-blocking)
-    persistFile(file, bufferCopy);
+    const success = await loadPDF(new Uint8Array(arrayBuffer), resumePage);
+    // Only persist on success — a corrupted or password-protected PDF
+    // must not be saved to IndexedDB, or the resume logic would
+    // re-load a broken file on every app restart.
+    if (success) {
+      persistFile(file, bufferCopy);
+    }
   };
   fr.readAsArrayBuffer(file);
 }
@@ -755,6 +759,7 @@ function handleFile(file) {
 // PDF Loading
 // ============================================================
 
+/** @returns {Promise<boolean>} true if the PDF loaded successfully */
 async function loadPDF(data, resumePage = 1) {
   try {
     if (pdfState.doc) pdfState.doc.destroy();
@@ -813,6 +818,7 @@ async function loadPDF(data, resumePage = 1) {
     checkPresentationMode();
     updateZoomUI();
     announce(`Document loaded, ${pdfState.doc.numPages} pages`);
+    return true;
 
   } catch (err) {
     console.error('Failed to load PDF:', err);
@@ -827,6 +833,7 @@ async function loadPDF(data, resumePage = 1) {
     } else {
       showError('Could not load this PDF. The file may be corrupted.');
     }
+    return false;
   }
 }
 
