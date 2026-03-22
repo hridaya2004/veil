@@ -1,0 +1,20 @@
+{
+  "pageCount": 3,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "fullText": "Portrait Page"
+    },
+    {
+      "width": 842,
+      "height": 595,
+      "fullText": "Landscape Page"
+    },
+    {
+      "width": 612,
+      "height": 792,
+      "fullText": "Back to Portrait"
+    }
+  ]
+}

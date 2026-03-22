@@ -552,6 +552,158 @@ async function generatePunctuation() {
   console.log('Generated test-punctuation.pdf');
 }
 
+// ============================================================
+// 7. test-mixed-sizes.pdf
+//
+// Tests documents with mixed page sizes and orientations.
+//   Page 1: US Letter portrait (612×792) — "Portrait Page"
+//   Page 2: A4 landscape (842×595) — "Landscape Page"
+//   Page 3: US Letter portrait (612×792) — "Back to Portrait"
+// ============================================================
+
+async function generateMixedSizes() {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = 18;
+
+  // Page 1: US Letter portrait
+  const page1 = pdf.addPage([612, 792]);
+  page1.drawText('Portrait Page', { x: 72, y: 700, size, font, color: rgb(0, 0, 0) });
+
+  // Page 2: A4 landscape
+  const page2 = pdf.addPage([842, 595]);
+  page2.drawText('Landscape Page', { x: 72, y: 500, size, font, color: rgb(0, 0, 0) });
+
+  // Page 3: US Letter portrait
+  const page3 = pdf.addPage([612, 792]);
+  page3.drawText('Back to Portrait', { x: 72, y: 700, size, font, color: rgb(0, 0, 0) });
+
+  const pdfBytes = await pdf.save();
+  writeFileSync(join(__dirname, 'test-mixed-sizes.pdf'), pdfBytes);
+
+  const expected = {
+    pageCount: 3,
+    pages: [
+      { width: 612, height: 792, fullText: 'Portrait Page' },
+      { width: 842, height: 595, fullText: 'Landscape Page' },
+      { width: 612, height: 792, fullText: 'Back to Portrait' },
+    ],
+  };
+
+  writeFileSync(join(__dirname, 'test-mixed-sizes.expected.json'), JSON.stringify(expected, null, 2));
+  console.log('Generated test-mixed-sizes.pdf');
+}
+
+// ============================================================
+// 8. test-links.pdf
+//
+// Tests link annotations. Contains text that represents
+// clickable links (external URL, mailto).
+//   Page 1: "Visit Example" (link to https://example.com)
+//           "Send Email" (link to mailto:test@example.com)
+//   Page 2: "Go to page 1" (no annotation — internal links
+//           are complex with pdf-lib)
+//
+// Note: Link annotations are added via pdf-lib's low-level API.
+// If the annotation structure doesn't survive round-tripping,
+// test link behaviour via the app's buildLinkLayer instead.
+// ============================================================
+
+async function generateLinks() {
+  const { PDFName, PDFString, PDFArray, PDFDict, PDFNumber } = await import('pdf-lib');
+
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const size = 18;
+
+  // Page 1
+  const page1 = pdf.addPage([612, 792]);
+
+  // "Visit Example" with external link
+  const text1 = 'Visit Example';
+  const text1X = 72;
+  const text1Y = 700;
+  const text1W = font.widthOfTextAtSize(text1, size);
+  page1.drawText(text1, { x: text1X, y: text1Y, size, font, color: rgb(0, 0, 0.8) });
+
+  // "Send Email" with mailto link
+  const text2 = 'Send Email';
+  const text2X = 72;
+  const text2Y = 660;
+  const text2W = font.widthOfTextAtSize(text2, size);
+  page1.drawText(text2, { x: text2X, y: text2Y, size, font, color: rgb(0, 0, 0.8) });
+
+  // Add link annotations to page 1 using low-level API
+  try {
+    const context = pdf.context;
+
+    // Annotation for "Visit Example"
+    const annot1 = context.obj({
+      Type: 'Annot',
+      Subtype: 'Link',
+      Rect: [text1X, text1Y - 4, text1X + text1W, text1Y + size],
+      Border: [0, 0, 0],
+      A: {
+        Type: 'Action',
+        S: 'URI',
+        URI: PDFString.of('https://example.com'),
+      },
+    });
+
+    // Annotation for "Send Email"
+    const annot2 = context.obj({
+      Type: 'Annot',
+      Subtype: 'Link',
+      Rect: [text2X, text2Y - 4, text2X + text2W, text2Y + size],
+      Border: [0, 0, 0],
+      A: {
+        Type: 'Action',
+        S: 'URI',
+        URI: PDFString.of('mailto:test@example.com'),
+      },
+    });
+
+    const annot1Ref = context.register(annot1);
+    const annot2Ref = context.register(annot2);
+    page1.node.set(PDFName.of('Annots'), context.obj([annot1Ref, annot2Ref]));
+  } catch (e) {
+    console.warn('Warning: Could not add link annotations via low-level API:', e.message);
+    console.warn('Link annotations should be tested via the app\'s buildLinkLayer instead.');
+  }
+
+  // Page 2
+  const page2 = pdf.addPage([612, 792]);
+  page2.drawText('Go to page 1', { x: 72, y: 700, size, font, color: rgb(0, 0, 0) });
+
+  const pdfBytes = await pdf.save();
+  writeFileSync(join(__dirname, 'test-links.pdf'), pdfBytes);
+
+  const expected = {
+    pageCount: 2,
+    pages: [
+      {
+        width: 612,
+        height: 792,
+        fullText: 'Visit Example Send Email',
+        links: [
+          { text: 'Visit Example', url: 'https://example.com' },
+          { text: 'Send Email', url: 'mailto:test@example.com' },
+        ],
+        note: 'Link annotations added via low-level API. If annotations are not preserved, test via buildLinkLayer.',
+      },
+      {
+        width: 612,
+        height: 792,
+        fullText: 'Go to page 1',
+        links: [],
+      },
+    ],
+  };
+
+  writeFileSync(join(__dirname, 'test-links.expected.json'), JSON.stringify(expected, null, 2));
+  console.log('Generated test-links.pdf');
+}
+
 async function main() {
   await generateNativeSimple();
   await generateNativeStyles();
@@ -559,6 +711,8 @@ async function main() {
   await generateAlreadyDark();
   await generateLigatures();
   await generatePunctuation();
+  await generateMixedSizes();
+  await generateLinks();
   console.log('\nAll fixtures generated in', __dirname);
 }
 

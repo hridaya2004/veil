@@ -1,0 +1,27 @@
+{
+  "pageCount": 2,
+  "pages": [
+    {
+      "width": 612,
+      "height": 792,
+      "fullText": "Visit Example Send Email",
+      "links": [
+        {
+          "text": "Visit Example",
+          "url": "https://example.com"
+        },
+        {
+          "text": "Send Email",
+          "url": "mailto:test@example.com"
+        }
+      ],
+      "note": "Link annotations added via low-level API. If annotations are not preserved, test via buildLinkLayer."
+    },
+    {
+      "width": 612,
+      "height": 792,
+      "fullText": "Go to page 1",
+      "links": []
+    }
+  ]
+}
