@@ -73,7 +73,7 @@ describe('isOcrArtifact', () => {
   });
 
   describe('handles real artifacts from our diagnostic data', () => {
-    // These were actually observed in the certificato-protesi-omero OCR output
+    // These were actually observed in real scanned medical document OCR output
     it('"_—" from page border', () => expect(isOcrArtifact('_—')).toBe(true));
     it('"{|" from form border', () => expect(isOcrArtifact('{|')).toBe(true));
     it('"————" from horizontal rule', () => expect(isOcrArtifact('————')).toBe(true));
