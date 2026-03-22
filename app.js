@@ -1814,8 +1814,10 @@ function processRenderQueue() {
     const pageNum = renderPipeline.queue.shift();
     const slot = pdfState.slots.get(pageNum);
 
-    // Skip if already rendered, evicted, or stale
-    if (!slot || slot.rendered || slot.rendering) continue;
+    // Skip if already rendered, evicted, or stale.
+    // State lives in renderState (per-page), not on the slot (per-container).
+    const state = pdfState.renderState.get(pageNum);
+    if (!slot || (state && (state.rendered || state.rendering))) continue;
 
     renderPipeline.active++;
     renderPageIfNeeded(pageNum).finally(() => {
