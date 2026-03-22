@@ -1432,39 +1432,63 @@ async function buildPageSlots() {
   const zoomedScale = pdfState.renderScale;
   const dpr = getDpr();
 
-  // Compute geometry for all pages. Most PDFs have uniform page sizes —
-  // detect this after page 1 and skip getPage() for the rest.
+  // Compute geometry for all pages.
+  //
+  // Most PDFs have uniform page sizes — we detect this by checking
+  // a few sample pages and skip getPage() for the rest if all match.
+  // Mixed-size PDFs (paper with landscape appendices, slides with
+  // handout pages) measure every page individually.
   const firstVp = firstPage.getViewport({ scale: zoomedScale * dpr });
   const round = _isMobileDevice ? Math.round : Math.floor;
   const firstCssW = round(firstVp.width / dpr);
   const firstCssH = round(firstVp.height / dpr);
+
+  // Sample up to 5 pages spread across the document to detect mixed sizes.
+  // If all samples match page 1, assume uniform and skip the rest.
   let uniform = true;
+  const numPages = pdfState.doc.numPages;
+
+  if (numPages > 1) {
+    const sampleIndices = new Set();
+    sampleIndices.add(2);
+    if (numPages >= 4) sampleIndices.add(Math.floor(numPages * 0.25));
+    if (numPages >= 6) sampleIndices.add(Math.floor(numPages * 0.5));
+    if (numPages >= 8) sampleIndices.add(Math.floor(numPages * 0.75));
+    if (numPages >= 3) sampleIndices.add(numPages);
+
+    for (const idx of sampleIndices) {
+      const samplePage = await pdfState.doc.getPage(idx);
+      const sampleVp = samplePage.getViewport({ scale: zoomedScale * dpr });
+      const sW = round(sampleVp.width / dpr);
+      const sH = round(sampleVp.height / dpr);
+      if (sW !== firstCssW || sH !== firstCssH) {
+        uniform = false;
+        break;
+      }
+    }
+  }
 
   // Build geometry table
   let offsetTop = VIEWPORT_PADDING_TOP;
-  for (let i = 1; i <= pdfState.doc.numPages; i++) {
-    let cssW = firstCssW;
-    let cssH = firstCssH;
 
-    if (i > 1) {
-      // Check if this page has different dimensions
+  if (uniform) {
+    // Fast path: all pages have the same dimensions
+    for (let i = 1; i <= numPages; i++) {
+      pdfState.geometry[i] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
+      offsetTop += firstCssH + PAGE_GAP;
+    }
+  } else {
+    // Slow path: measure each page individually
+    pdfState.geometry[1] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
+    offsetTop += firstCssH + PAGE_GAP;
+
+    for (let i = 2; i <= numPages; i++) {
       const page = await pdfState.doc.getPage(i);
       const vp = page.getViewport({ scale: zoomedScale * dpr });
-      cssW = round(vp.width / dpr);
-      cssH = round(vp.height / dpr);
-      if (cssW !== firstCssW || cssH !== firstCssH) uniform = false;
-    }
-
-    pdfState.geometry[i] = { cssWidth: cssW, cssHeight: cssH, offsetTop };
-    offsetTop += cssH + PAGE_GAP;
-
-    // Optimization: if all pages so far are uniform, skip getPage for rest
-    if (uniform && i === 2 && cssW === firstCssW && cssH === firstCssH) {
-      for (let j = 3; j <= pdfState.doc.numPages; j++) {
-        offsetTop = VIEWPORT_PADDING_TOP + (j - 1) * (firstCssH + PAGE_GAP);
-        pdfState.geometry[j] = { cssWidth: firstCssW, cssHeight: firstCssH, offsetTop };
-      }
-      break;
+      const cssW = round(vp.width / dpr);
+      const cssH = round(vp.height / dpr);
+      pdfState.geometry[i] = { cssWidth: cssW, cssHeight: cssH, offsetTop };
+      offsetTop += cssH + PAGE_GAP;
     }
   }
 
