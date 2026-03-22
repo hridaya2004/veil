@@ -1819,6 +1819,7 @@ async function renderPageIfNeeded(pageNum) {
   state.rendering = true;
   const myGen = pdfState.generation;
   state.renderGeneration = myGen;
+  let renderCanvas = null; // tracked for exception-safe pool return
 
   try {
     const page = await pdfState.doc.getPage(pageNum);
@@ -1831,7 +1832,10 @@ async function renderPageIfNeeded(pageNum) {
 
     // Borrow a canvas from the pool instead of creating a new one.
     // This avoids thrashing iOS WebKit's lazy GC of GPU backing stores.
-    const renderCanvas = borrowCanvas(w, h);
+    // IMPORTANT: every exit path after this MUST return the canvas
+    // via returnCanvas(). Without this, the pool shrinks on errors
+    // or generation changes — exactly when memory is most critical.
+    renderCanvas = borrowCanvas(w, h);
 
     // Render + get operator list (+ text content for native PDFs).
     // Store the RenderTask so we can cancel it if the page is evicted.
@@ -1854,7 +1858,7 @@ async function renderPageIfNeeded(pageNum) {
     const opList = results[1];
     const textContent = pdfState.isScanned ? null : results[2];
 
-    if (pdfState.generation !== myGen) return;
+    if (pdfState.generation !== myGen) { returnCanvas(renderCanvas); return; }
 
     // --- Already-dark detection ---
     const isDark = detectAlreadyDark(renderCanvas);
@@ -1909,6 +1913,10 @@ async function renderPageIfNeeded(pageNum) {
     // On memory-constrained devices, release PDF.js internal caches.
     if (_isMemoryConstrained) page.cleanup();
   } catch (err) {
+    // Return the canvas to the pool if it was borrowed before the error.
+    // Without this, every failed render permanently shrinks the pool —
+    // exactly when memory-constrained devices need it most.
+    if (renderCanvas) { returnCanvas(renderCanvas); renderCanvas = null; }
     if (pdfState.generation !== myGen) return;
     if (err?.name !== 'RenderingCancelledException' && err?.message !== 'Rendering cancelled') {
       console.error(`Render page ${pageNum} failed:`, err);

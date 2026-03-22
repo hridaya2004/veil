@@ -513,6 +513,8 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
     const cacheKey = `page-${pageNum}`;
     const cached = ocrCache.get(cacheKey);
     if (cached) {
+      // Cache hit — renderCanvas not needed, return it to the pool
+      ctx.returnCanvas(renderCanvas);
       buildOcrTextLayerDirect(
         slot.textLayer, cached, cached._canvasW, cached._canvasH, cssW, cssH
       );
@@ -526,13 +528,17 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
         pageNum,
         cancelled: false,
         execute: async () => {
-          if (ctx.globalGeneration !== myGen) return;
+          if (ctx.globalGeneration !== myGen) { ctx.returnCanvas(renderCanvas); return; }
 
           let ocrCanvas;
+          let ocrCanvasIsBorrowed = false;
           if (effectiveScale >= OCR_MIN_SCALE) {
             ocrCanvas = renderCanvas;
+            ocrCanvasIsBorrowed = true; // this IS the pool canvas
           } else {
-            renderCanvas.width = 0;
+            // Scale too low for OCR — return the borrowed canvas to the pool
+            // and create a dedicated high-res canvas for Tesseract.
+            ctx.returnCanvas(renderCanvas);
             const ocrViewport = page.getViewport({ scale: OCR_MIN_SCALE });
             ocrCanvas = ctx.createOffscreenCanvas(
               Math.floor(ocrViewport.width),
@@ -546,10 +552,15 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
           }
 
           const worker = await ensureTesseractWorker();
-          if (!worker || ctx.globalGeneration !== myGen) { ocrCanvas.width = 0; return; }
+          if (!worker || ctx.globalGeneration !== myGen) {
+            if (ocrCanvasIsBorrowed) ctx.returnCanvas(ocrCanvas);
+            else ocrCanvas.width = 0;
+            return;
+          }
 
           const processed = preprocessCanvasForOcr(ocrCanvas);
-          ocrCanvas.width = 0;
+          if (ocrCanvasIsBorrowed) ctx.returnCanvas(ocrCanvas);
+          else ocrCanvas.width = 0;
 
           const { data } = await worker.recognize(processed);
           if (ctx.globalGeneration !== myGen) { processed.width = 0; return; }
