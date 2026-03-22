@@ -2093,7 +2093,11 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
       if (item.tx1 !== 0 || item.tx2 !== 0) {
         const angle = Math.atan2(item.tx1, Math.sqrt(item.tx2 * item.tx2 + (item.fontSize * dpr) * (item.fontSize * dpr)));
-        span.style.transform = `rotate(${angle}rad)`;
+        // Combine with existing scaleX if present, instead of overwriting it
+        const existingTransform = span.style.transform;
+        span.style.transform = existingTransform
+          ? `${existingTransform} rotate(${angle}rad)`
+          : `rotate(${angle}rad)`;
         span.style.transformOrigin = '0 100%';
       }
 

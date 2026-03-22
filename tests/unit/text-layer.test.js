@@ -433,7 +433,7 @@ describe('Text transform: scaleX and rotate combination', () => {
     expect(span.style.transform).toContain('rotate');
   });
 
-  it.skip('span with both scaleX and rotate preserves both (BUG: fix #6)', () => {
+  it('span with both scaleX and rotate preserves both', () => {
     // This test documents the bug: currently buildTextLayer sets
     // transform to scaleX first, then overwrites with rotate.
     // After fix #6, both should coexist.
