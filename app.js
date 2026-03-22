@@ -709,7 +709,11 @@ function hideResumeButton() {
 
 function handleFile(file) {
   if (!file) return;
-  if (file.type !== 'application/pdf' && !file.name.endsWith('.pdf')) return;
+  if (file.size === 0) {
+    showError('This file is empty.');
+    return;
+  }
+  if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) return;
   if (file.size > 512 * 1024 * 1024) {
     showError('This file is too large. Maximum size is 512 MB.');
     return;

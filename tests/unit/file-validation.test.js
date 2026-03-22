@@ -3,9 +3,9 @@ import { describe, it, expect } from 'vitest';
 // ============================================================
 // File Validation
 //
-// Replicated from app.js handleFile() for testability.
-// Uses case-insensitive .pdf extension check to handle
-// Android/Windows uppercase filenames.
+// Mirrors the validation logic in app.js handleFile().
+// Case-insensitive .pdf extension check handles Android/Windows
+// uppercase filenames. Zero-byte check catches empty files early.
 // ============================================================
 
 function isValidPdfFile(file) {
