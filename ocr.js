@@ -111,13 +111,17 @@ export function preprocessCanvasForOcr(sourceCanvas) {
 function fingerprint(canvas) {
   if (canvas.width < 8 || canvas.height < 8) return null;
   const fpCtx = canvas.getContext('2d', { willReadFrequently: true });
-  const stepX = Math.floor(canvas.width / 8);
+  const w = canvas.width;
+  const stepX = Math.floor(w / 8);
   const stepY = Math.floor(canvas.height / 8);
+  // Single GPU readback instead of 64 separate getImageData calls.
+  // On budget Android with slow GPU→CPU bus, this is 64x fewer stalls.
+  const data = fpCtx.getImageData(0, 0, canvas.width, canvas.height).data;
   let hash = '';
   for (let y = 0; y < 8; y++) {
     for (let x = 0; x < 8; x++) {
-      const d = fpCtx.getImageData(x * stepX, y * stepY, 1, 1).data;
-      hash += ((d[0] >> 4) << 8 | (d[1] >> 4) << 4 | (d[2] >> 4)).toString(36);
+      const idx = (y * stepY * w + x * stepX) * 4;
+      hash += ((data[idx] >> 4) << 8 | (data[idx + 1] >> 4) << 4 | (data[idx + 2] >> 4)).toString(36);
     }
   }
   return hash;
