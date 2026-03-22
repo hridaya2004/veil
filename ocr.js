@@ -23,7 +23,7 @@ import {
 
 const OCR_MIN_SCALE = 3;
 const OCR_CONTRAST = 1.4;
-const OCR_IMAGE_BUDGET = 4;
+const OCR_IMAGE_BUDGET = 6;
 const OCR_IMAGE_MIN_SIZE = 100;
 
 // ============================================================
@@ -108,54 +108,61 @@ export function preprocessCanvasForOcr(sourceCanvas) {
 // Fingerprinting & Text Detection
 // ============================================================
 
-function fingerprint(canvas) {
-  if (canvas.width < 8 || canvas.height < 8) return null;
-  const fpCtx = canvas.getContext('2d', { willReadFrequently: true });
+/**
+ * Analyzes an image region canvas in a single GPU readback.
+ * Returns { fingerprint, likelyText } — both computed from
+ * the same pixel data, halving the GPU→CPU sync stalls.
+ *
+ * fingerprint: 8×8 grid hash for deduplication (null if canvas too small)
+ * likelyText: true if edge density suggests text content (false if too small)
+ */
+function analyzeImageRegion(canvas) {
   const w = canvas.width;
+  const h = canvas.height;
+
+  // Too small for either analysis
+  if (w < 8 || h < 8) return { fingerprint: null, likelyText: false };
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  // --- Fingerprint: 8×8 grid hash ---
   const stepX = Math.floor(w / 8);
-  const stepY = Math.floor(canvas.height / 8);
-  // Single GPU readback instead of 64 separate getImageData calls.
-  // On budget Android with slow GPU→CPU bus, this is 64x fewer stalls.
-  const data = fpCtx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const stepY = Math.floor(h / 8);
   let hash = '';
-  for (let y = 0; y < 8; y++) {
-    for (let x = 0; x < 8; x++) {
-      const idx = (y * stepY * w + x * stepX) * 4;
+  for (let fy = 0; fy < 8; fy++) {
+    for (let fx = 0; fx < 8; fx++) {
+      const idx = (fy * stepY * w + fx * stepX) * 4;
       hash += ((data[idx] >> 4) << 8 | (data[idx + 1] >> 4) << 4 | (data[idx + 2] >> 4)).toString(36);
     }
   }
-  return hash;
-}
 
-function likelyContainsText(canvas) {
-  const w = canvas.width;
-  const h = canvas.height;
-  if (w < 50 || h < 50) return false;
+  // --- Text detection: edge density ---
+  let likelyText = false;
+  if (w >= 50 && h >= 50) {
+    const step = Math.max(4, Math.floor(Math.min(w, h) / 60));
+    let edges = 0;
+    let samples = 0;
+    const lum = (i) => data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
 
-  const ltCtx = canvas.getContext('2d', { willReadFrequently: true });
-  const step = Math.max(4, Math.floor(Math.min(w, h) / 60));
-  let edges = 0;
-  let samples = 0;
-
-  const data = ltCtx.getImageData(0, 0, w, h).data;
-  const lum = (i) => data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-
-  for (let y = step; y < h - step; y += step) {
-    for (let x = step; x < w - step; x += step) {
-      const idx = (y * w + x) * 4;
-      const idxR = (y * w + x + step) * 4;
-      const idxD = ((y + step) * w + x) * 4;
-      if (idxR < data.length && idxD < data.length) {
-        const l = lum(idx);
-        const diffH = Math.abs(l - lum(idxR));
-        const diffV = Math.abs(l - lum(idxD));
-        if (diffH > 40 || diffV > 40) edges++;
-        samples++;
+    for (let y = step; y < h - step; y += step) {
+      for (let x = step; x < w - step; x += step) {
+        const idx = (y * w + x) * 4;
+        const idxR = (y * w + x + step) * 4;
+        const idxD = ((y + step) * w + x) * 4;
+        if (idxR < data.length && idxD < data.length) {
+          const l = lum(idx);
+          const diffH = Math.abs(l - lum(idxR));
+          const diffV = Math.abs(l - lum(idxD));
+          if (diffH > 40 || diffV > 40) edges++;
+          samples++;
+        }
       }
     }
+    likelyText = samples > 0 && (edges / samples) > 0.015;
   }
 
-  return samples > 0 && (edges / samples) > 0.05;
+  return { fingerprint: hash, likelyText };
 }
 
 function hasValidOcrWords(data) {
@@ -196,6 +203,10 @@ async function processOcrQueue() {
       await job.execute();
     } catch (err) {
       console.warn('OCR job failed:', err);
+    } finally {
+      const slot = ctx.pageSlots.get(job.pageNum);
+      // Clean up the indicator universally (handles silent early-returns too)
+      if (slot) ctx.ocrFinished(slot);
     }
   }
 
@@ -223,9 +234,11 @@ export async function ensureTesseractWorker() {
 
     const navLang = getNavigatorLanguage();
     const langs = navLang ? 'eng+' + navLang : 'eng';
+
     tesseractWorker = await createWorker(langs, 1, {
       logger: () => {},
     });
+
     return tesseractWorker;
   } catch (err) {
     console.warn('Tesseract.js failed to load:', err);
@@ -250,14 +263,18 @@ function rotateCanvas90CW(source) {
   return rotated;
 }
 
-export async function ocrImageRegions(mainCanvas, textLayerDiv, _verticalLayerDiv, regions, dpr, myGen, pageNum) {
+export async function ocrImageRegions(currentSlot, regions, dpr, myGen, pageNum) {
   if (regions.length === 0) return;
-
-  const worker = await ensureTesseractWorker();
-  if (!worker || ctx.globalGeneration !== myGen) return;
 
   for (const region of regions) {
     if (ctx.globalGeneration !== myGen) return;
+    if (ctx.pageSlots.get(pageNum) !== currentSlot) return; // Stale closure abort
+
+    const worker = await ensureTesseractWorker();
+    if (!worker || ctx.globalGeneration !== myGen) return;
+
+    const mainCanvas = currentSlot.mainCanvas;
+    const textLayerDiv = currentSlot.textLayer;
 
     const sx = Math.max(0, region.x);
     const sy = Math.max(0, region.y);
@@ -284,13 +301,16 @@ export async function ocrImageRegions(mainCanvas, textLayerDiv, _verticalLayerDi
         mainCanvas, sx, sy, sw, sh, 0, 0, sw, sh
       );
 
-      const fp = fingerprint(regionCanvas);
+      // Single GPU readback for both fingerprint and text detection.
+      // Before: 2 separate getImageData calls per image region.
+      // After: 1 call, halving GPU→CPU sync stalls.
+      const { fingerprint: fp, likelyText } = analyzeImageRegion(regionCanvas);
       if (fp && ocrFingerprints.has(fp)) {
         regionCanvas.width = 0;
         continue;
       }
 
-      if (!likelyContainsText(regionCanvas)) {
+      if (!likelyText) {
         regionCanvas.width = 0;
         if (fp) ocrFingerprints.set(fp, true);
         continue;
@@ -302,6 +322,9 @@ export async function ocrImageRegions(mainCanvas, textLayerDiv, _verticalLayerDi
         const result = await worker.recognize(processed0);
         data = result.data;
         processed0.width = 0;
+
+
+
         if (ctx.globalGeneration !== myGen) return;
         ocrCache.set(cacheKey, data);
         if (fp) ocrFingerprints.set(fp, true);
@@ -359,6 +382,13 @@ export async function ocrImageVertical(mainCanvas, verticalLayerDiv, region, dpr
   try {
     const { data } = await worker.recognize(processed90);
     processed90.width = 0;
+
+    tesseractUses++;
+    if (tesseractUses >= 5 && tesseractWorker) {
+      tesseractWorker.terminate().catch(() => {});
+      tesseractWorker = null;
+    }
+
     if (ctx.globalGeneration !== myGen) return;
 
     if (hasValidOcrWords(data)) {
@@ -567,6 +597,13 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
           else ocrCanvas.width = 0;
 
           const { data } = await worker.recognize(processed);
+
+          tesseractUses++;
+          if (tesseractUses >= 5 && tesseractWorker) {
+            tesseractWorker.terminate().catch(() => {});
+            tesseractWorker = null;
+          }
+
           if (ctx.globalGeneration !== myGen) { processed.width = 0; return; }
 
           data._canvasW = processed.width;
@@ -578,7 +615,6 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
             buildOcrTextLayerDirect(
               currentSlot.textLayer, data, processed.width, processed.height, cssW, cssH
             );
-            ctx.ocrFinished(currentSlot);
           }
         },
       });
@@ -593,7 +629,7 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
   // OCR on images within native PDFs
   if (regions.length > 0) {
     const candidates = regions
-      .filter(r => r.width >= OCR_IMAGE_MIN_SIZE && r.height >= OCR_IMAGE_MIN_SIZE)
+      .filter(r => (r.width * r.height >= 4000) && r.width >= 20 && r.height >= 20)
       .sort((a, b) => (b.width * b.height) - (a.width * a.height));
 
     state.imageRegionsRaw = candidates.map(r => ({ ...r }));
@@ -617,10 +653,9 @@ export function scheduleTextLayer(slot, state, pageNum, page, renderCanvas, text
           const currentSlot = ctx.pageSlots.get(pageNum);
           if (!currentSlot) return;
           await ocrImageRegions(
-            currentSlot.mainCanvas, currentSlot.textLayer, currentSlot.verticalOcrLayer,
+            currentSlot,
             autoOcr.map(r => ({ ...r })), dpr, myGen, pageNum
           );
-          ctx.ocrFinished(currentSlot);
         },
       });
     }

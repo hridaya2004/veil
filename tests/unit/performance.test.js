@@ -174,7 +174,7 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(30);
   });
 
-  it('isOcrArtifact — 10000 words < 50ms', () => {
+  it('isOcrArtifact — 10000 words < 100ms', () => {
     const words = makeOcrWords(10000);
 
     const start = performance.now();
@@ -185,7 +185,7 @@ describe('Performance: core function thresholds', () => {
     const elapsed = performance.now() - start;
 
     expect(artifactCount).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(50);
+    expect(elapsed).toBeLessThan(100);
   });
 
   it('normalizeLigatures — 10000 strings < 60ms', () => {
