@@ -1148,7 +1148,7 @@ function calculateScale(page) {
   return _calculateScale(
     vp.width, vp.height,
     window.innerWidth, window.innerHeight,
-    48, sidePadding, _isMobileDevice
+    48, sidePadding, fitToWidth
   );
 }
 
@@ -1501,7 +1501,16 @@ const LARGE_DOC_THRESHOLD = 150;
 
 function getDpr() {
   const raw = window.devicePixelRatio || 1;
-  return pdfState.largeDocConstrained ? Math.min(raw, 2) : raw;
+  // Cap DPR on memory-constrained devices (iOS, budget Android).
+  // With fit-to-width, canvases are larger — full 3x DPR exhausts
+  // Jetsam memory budget especially on scanned docs.
+  // Cap DPR on memory-constrained devices (iOS, budget Android).
+  // With fit-to-width, canvases are larger — full 3x DPR exhausts
+  // Jetsam memory budget especially on scanned docs.
+  if (pdfState.largeDocConstrained) return Math.min(raw, 2);
+  if (_isMemoryConstrained) return Math.min(raw, 2);
+  return raw;
+  return raw;
 }
 
 // ============================================================
