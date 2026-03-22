@@ -144,7 +144,7 @@ async function generateNativeSimple() {
 // 2. test-native-styles.pdf
 //
 // Tests the Antigravity bug: text with style transitions.
-//   Line 1: "I hate talking" — "hate" in italic
+//   Line 1: "I hate talking about" — "hate" in italic
 //   Line 2: "If Steal Like an Artist was good" — "Steal Like an Artist" in bold
 //   Line 3: "Normal text here." — all normal (control)
 // ============================================================
@@ -159,7 +159,7 @@ async function generateNativeStyles() {
   const size = 14;
   const spW = regular.widthOfTextAtSize(' ', size);
 
-  // Line 1: "I hate talking" with "hate" in italic
+  // Line 1: "I hate talking about" with "hate" in italic
   const line1Y = 700;
   let x = 72;
 
@@ -175,8 +175,8 @@ async function generateNativeStyles() {
   page.drawText(hate_text, { x, y: line1Y, size, font: italic, color: rgb(0, 0, 0) });
   x += hate_w;
 
-  // " talking"
-  const talking_text = ' talking';
+  // " talking about"
+  const talking_text = ' talking about';
   page.drawText(talking_text, { x, y: line1Y, size, font: regular, color: rgb(0, 0, 0) });
 
   // Line 2: "If Steal Like an Artist was good"
@@ -208,11 +208,11 @@ async function generateNativeStyles() {
       isScanned: false,
       isAlreadyDark: false,
       expectedCopyPaste: {
-        line1: 'I hate talking',
+        line1: 'I hate talking about',
         line2: 'If Steal Like an Artist was good',
         line3: 'Normal text here.',
       },
-      fullText: 'I hate talking If Steal Like an Artist was good Normal text here.',
+      fullText: 'I hate talking about If Steal Like an Artist was good Normal text here.',
     }],
   };
 

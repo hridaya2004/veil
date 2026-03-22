@@ -83,7 +83,7 @@ test.describe('Text selection — Antigravity (style transitions)', () => {
     await waitForTextLayer(page);
   });
 
-  test('selecting "I hate talking" line produces correct text', async ({ page }) => {
+  test('selecting "I hate talking about" line produces correct text', async ({ page }) => {
     const lineText = await page.evaluate(() => {
       const lines = document.querySelectorAll('.page-container[data-page-num="1"] .text-layer .text-line');
       if (lines.length === 0) return null;
@@ -100,10 +100,10 @@ test.describe('Text selection — Antigravity (style transitions)', () => {
 
     expect(lineText).not.toBeNull();
     const normalized = lineText.replace(/\s+/g, ' ').trim();
-    // "I hate talking" should have proper spacing at style transitions
+    // "I hate talking about" should have proper spacing at style transitions
     expect(normalized).toContain('I');
     expect(normalized).toContain('hate');
-    expect(normalized).toContain('talking');
+    expect(normalized).toContain('talking about');
     // No missing spaces between words
     expect(normalized).not.toMatch(/Ihate|hatetalking/);
   });
