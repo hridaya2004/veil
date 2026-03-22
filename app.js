@@ -757,7 +757,7 @@ function handleFile(file) {
 /** @returns {Promise<boolean>} true if the PDF loaded successfully */
 async function loadPDF(data, resumePage = 1) {
   try {
-    if (pdfState.doc) pdfState.doc.destroy();
+    if (pdfState.doc) await pdfState.doc.destroy();
     cleanup();
 
     // Keep the original bytes for iOS document recreation.
@@ -2589,7 +2589,7 @@ fileInput.addEventListener('change', () => {
 // "veil" logo: return to drop zone without reloading the page.
 // Session is preserved — the resume button appears so the user
 // can continue reading or open a new file.
-btnHome.addEventListener('click', (e) => {
+btnHome.addEventListener('click', async (e) => {
   e.preventDefault();
   if (!pdfState.doc) return;
 
@@ -2602,7 +2602,7 @@ btnHome.addEventListener('click', (e) => {
   resetOcrState();
 
   // Destroy PDF.js instance to free memory
-  if (pdfState.doc) { pdfState.doc.destroy(); pdfState.doc = null; }
+  if (pdfState.doc) { await pdfState.doc.destroy(); pdfState.doc = null; }
   pdfState.buffer = null;
   cleanup();
 
