@@ -1665,10 +1665,10 @@ async function resetPdfEngine() {
   renderPipeline.resetting = true;
   const gen = ++pdfState.generation;
 
-  // Cancel all in-flight and queued work — they hold page
-  // references from the old instance that will become invalid.
+  // Cancel in-flight work but preserve OCR cache — text data is tiny
+  // and re-running Tesseract after every engine reset wastes CPU/battery.
   renderPipeline.queue.length = 0;
-  resetOcrState();
+  resetOcrState(true);
 
   try {
     // Destroy the old instance (main thread + worker thread).

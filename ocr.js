@@ -54,11 +54,13 @@ export function initOcr(appContext) {
 
 export { ocrCache, ocrFingerprints, ocrQueue };
 
-export function resetOcrState() {
+export function resetOcrState(preserveCache = false) {
   ocrQueue.forEach(j => { j.cancelled = true; });
   ocrQueue.length = 0;
-  ocrCache.clear();
-  ocrFingerprints.clear();
+  if (!preserveCache) {
+    ocrCache.clear();
+    ocrFingerprints.clear();
+  }
 }
 
 export function enqueueOcrJob(job) {
@@ -274,7 +276,7 @@ export async function ocrImageRegions(mainCanvas, textLayerDiv, _verticalLayerDi
       const regionCanvas = document.createElement('canvas');
       regionCanvas.width = sw;
       regionCanvas.height = sh;
-      regionCanvas.getContext('2d').drawImage(
+      regionCanvas.getContext('2d', { willReadFrequently: true }).drawImage(
         mainCanvas, sx, sy, sw, sh, 0, 0, sw, sh
       );
 
@@ -337,7 +339,7 @@ export async function ocrImageVertical(mainCanvas, verticalLayerDiv, region, dpr
   const regionCanvas = document.createElement('canvas');
   regionCanvas.width = sw;
   regionCanvas.height = sh;
-  regionCanvas.getContext('2d').drawImage(
+  regionCanvas.getContext('2d', { willReadFrequently: true }).drawImage(
     mainCanvas, sx, sy, sw, sh, 0, 0, sw, sh
   );
 
