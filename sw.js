@@ -15,24 +15,26 @@
 
 const CACHE_NAME = 'veil-v1';
 
-// App shell: small, essential, precached at install
+// App shell: small, essential, precached at install.
+// Paths are relative to the service worker location so the app
+// works on any deploy path (root domain, GitHub Pages subpath, etc.).
 const PRECACHE_URLS = [
-  '/',
-  '/reader.html',
-  '/index.html',
-  '/app.js',
-  '/ocr.js',
-  '/export.js',
-  '/session.js',
-  '/core.js',
-  '/style.css',
-  '/landing.css',
-  '/landing.js',
-  '/manifest.json',
-  '/icon/favicon.svg',
-  '/icon/manifest-icon.png',
-  '/icon/manifest.png',
-  '/icon/apple-touch-icon.png',
+  './',
+  './reader.html',
+  './index.html',
+  './app.js',
+  './ocr.js',
+  './export.js',
+  './session.js',
+  './core.js',
+  './style.css',
+  './landing.css',
+  './landing.js',
+  './manifest.json',
+  './icon/favicon.svg',
+  './icon/manifest-icon.png',
+  './icon/manifest.png',
+  './icon/apple-touch-icon.png',
 ];
 
 // CDN resources: cached on first use (cache-first strategy).
