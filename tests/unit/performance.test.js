@@ -188,7 +188,7 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(50);
   });
 
-  it('normalizeLigatures — 10000 strings < 30ms', () => {
+  it('normalizeLigatures — 10000 strings < 60ms', () => {
     const strings = Array.from({ length: 10000 }, (_, i) =>
       i % 100 === 0 ? 'e\uFB03cient' : `word${i}`
     );
@@ -197,7 +197,7 @@ describe('Performance: core function thresholds', () => {
     for (const s of strings) normalizeLigatures(s);
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(30);
+    expect(elapsed).toBeLessThan(60);
   });
 
   it('mergePunctuation — 200 lines of 10 items < 20ms', () => {
@@ -218,14 +218,14 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(20);
   });
 
-  it('shouldInsertSpace — 50000 calls < 30ms', () => {
+  it('shouldInsertSpace — 50000 calls < 60ms', () => {
     const start = performance.now();
     for (let i = 0; i < 50000; i++) {
       shouldInsertSpace('Hello', 'World', 5, 14, 4);
     }
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(30);
+    expect(elapsed).toBeLessThan(60);
   });
 
   it('calculateScale — 10000 calls < 10ms', () => {

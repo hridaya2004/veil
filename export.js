@@ -163,6 +163,14 @@ async function embedLinkAnnotations(outPdf, outPage, annotations) {
       });
 
       if (url) {
+        // Sanitize URL protocol — same whitelist as the viewer.
+        // Without this, a malicious PDF could export javascript: URIs
+        // that the viewer correctly blocks but the exported PDF wouldn't.
+        try {
+          const parsed = new URL(url);
+          if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) continue;
+        } catch (_) { continue; }
+
         const actionDict = context.obj({
           Type: 'Action',
           S: 'URI',
