@@ -410,6 +410,57 @@ describe('buildOcrTextLayerDOM (OCR text layer structure)', () => {
   });
 });
 
+// ============================================================
+// Text transform: scaleX + rotate combination
+//
+// Replicates the buildTextLayer logic for rotated text.
+// BUG: currently scaleX is overwritten by rotate. Fix #6 will
+// combine them into a single transform property.
+// ============================================================
+
+describe('Text transform: scaleX and rotate combination', () => {
+  it('span with scaleX only has scaleX in transform', () => {
+    const span = document.createElement('span');
+    const scaleX = 1.2;
+    span.style.transform = `scaleX(${scaleX})`;
+    expect(span.style.transform).toContain('scaleX');
+  });
+
+  it('span with rotate only has rotate in transform', () => {
+    const span = document.createElement('span');
+    const angle = 0.1;
+    span.style.transform = `rotate(${angle}rad)`;
+    expect(span.style.transform).toContain('rotate');
+  });
+
+  it.skip('span with both scaleX and rotate preserves both (BUG: fix #6)', () => {
+    // This test documents the bug: currently buildTextLayer sets
+    // transform to scaleX first, then overwrites with rotate.
+    // After fix #6, both should coexist.
+    const span = document.createElement('span');
+    const scaleX = 1.2;
+    const angle = 0.05;
+
+    // The CORRECT behavior (after fix):
+    span.style.transform = `scaleX(${scaleX}) rotate(${angle}rad)`;
+    expect(span.style.transform).toContain('scaleX');
+    expect(span.style.transform).toContain('rotate');
+  });
+
+  it('overwriting transform loses previous value (the bug pattern)', () => {
+    // This demonstrates the current buggy pattern in app.js:
+    // First set scaleX, then overwrite with rotate
+    const span = document.createElement('span');
+    span.style.transform = `scaleX(1.2)`;
+    expect(span.style.transform).toContain('scaleX');
+
+    // Overwrite — this is what the bug does
+    span.style.transform = `rotate(0.05rad)`;
+    expect(span.style.transform).not.toContain('scaleX'); // scaleX is lost!
+    expect(span.style.transform).toContain('rotate');
+  });
+});
+
 describe('Punctuation merging in text layer DOM', () => {
   let container;
 

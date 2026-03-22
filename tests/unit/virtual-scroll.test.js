@@ -189,3 +189,69 @@ describe('getDpr', () => {
     expect(getDpr(2, true)).toBe(2);
   });
 });
+
+// ============================================================
+// Canvas Pool — Borrow/Return Balance
+//
+// Replicated pool logic from app.js. The pool is a simple array
+// of reusable canvases. borrowCanvas() pops one (or creates new),
+// returnCanvas() pushes it back. If a canvas is borrowed but never
+// returned (exception, generation change), the pool shrinks — this
+// is the bug that fix #3 addresses.
+// ============================================================
+
+function createCanvasPool(initialSize) {
+  const pool = [];
+  for (let i = 0; i < initialSize; i++) {
+    pool.push({ id: i, inUse: false });
+  }
+  return pool;
+}
+
+function borrowCanvas(pool) {
+  if (pool.length > 0) return pool.pop();
+  return { id: -1, inUse: false }; // fallback: create new
+}
+
+function returnCanvas(pool, canvas) {
+  pool.push(canvas);
+}
+
+describe('Canvas pool borrow/return balance', () => {
+  it('borrow reduces pool size', () => {
+    const pool = createCanvasPool(5);
+    expect(pool.length).toBe(5);
+    borrowCanvas(pool);
+    expect(pool.length).toBe(4);
+  });
+
+  it('return restores pool size', () => {
+    const pool = createCanvasPool(5);
+    const c = borrowCanvas(pool);
+    expect(pool.length).toBe(4);
+    returnCanvas(pool, c);
+    expect(pool.length).toBe(5);
+  });
+
+  it('borrow without return leaks (the bug)', () => {
+    const pool = createCanvasPool(3);
+    borrowCanvas(pool); // simulates a render that throws
+    borrowCanvas(pool); // another leak
+    expect(pool.length).toBe(1); // pool is draining
+  });
+
+  it('try/finally pattern prevents leak', () => {
+    const pool = createCanvasPool(3);
+    // Simulates the fix: always return in finally
+    let canvas;
+    try {
+      canvas = borrowCanvas(pool);
+      throw new Error('simulated render failure');
+    } catch (_) {
+      // error handled
+    } finally {
+      if (canvas) returnCanvas(pool, canvas);
+    }
+    expect(pool.length).toBe(3); // pool restored
+  });
+});
