@@ -1309,6 +1309,14 @@ function assignContainer(poolSlot, pageNum) {
   poolSlot.verticalOcrLayer.style.height = geo.cssHeight + 'px';
   poolSlot.pageLabel.textContent = pageNum;
 
+  // Hide canvases until the new render completes. Without this,
+  // a recycled container briefly shows content from its previous
+  // page assignment (wrong page flash) or appears without dark mode
+  // (the class was removed during eviction). The render will set
+  // visibility back to '' after painting + dark mode + overlay.
+  poolSlot.mainCanvas.style.visibility = 'hidden';
+  poolSlot.overlayCanvas.style.visibility = 'hidden';
+
   poolSlot.assignedPage = pageNum;
   pdfState.slots.set(pageNum, poolSlot);
 
@@ -1824,6 +1832,7 @@ async function renderPageIfNeeded(pageNum) {
   try {
     const page = await pdfState.doc.getPage(pageNum);
     if (pdfState.generation !== myGen) return;
+    if (slot.assignedPage !== pageNum) return;
 
     const dpr = getDpr();
     const scaledViewport = page.getViewport({ scale: pdfState.renderScale * dpr });
@@ -1859,6 +1868,7 @@ async function renderPageIfNeeded(pageNum) {
     const textContent = pdfState.isScanned ? null : results[2];
 
     if (pdfState.generation !== myGen) { returnCanvas(renderCanvas); return; }
+    if (slot.assignedPage !== pageNum) { returnCanvas(renderCanvas); return; }
 
     // --- Already-dark detection ---
     const isDark = detectAlreadyDark(renderCanvas);
@@ -1892,15 +1902,20 @@ async function renderPageIfNeeded(pageNum) {
     }
 
     // --- Text layer ---
+    // scheduleTextLayer takes ownership of renderCanvas: the native path
+    // returns it to the pool synchronously, the scanned path captures it
+    // in the OCR job closure. Either way, we must NOT touch it after this.
     scheduleTextLayer(slot, state, pageNum, page, renderCanvas, textContent, scaledViewport, regions, w, h, dpr, myGen);
+    renderCanvas = null; // ownership transferred — prevent double-return in catch
 
     // --- Link annotations ---
     try {
       const annotations = await page.getAnnotations();
-      if (pdfState.generation === myGen) {
-        buildLinkLayer(slot.element, annotations, scaledViewport, dpr, pageNum);
-      }
-    } catch (_) { /* some pages have no annotations */ }
+      if (pdfState.generation !== myGen || slot.assignedPage !== pageNum) return;
+      buildLinkLayer(slot.element, annotations, scaledViewport, dpr, pageNum);
+    } catch (_) { 
+      if (pdfState.generation !== myGen || slot.assignedPage !== pageNum) return;
+    }
 
     state.rendered = true;
     state._renderTask = null;

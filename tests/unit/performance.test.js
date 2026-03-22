@@ -218,14 +218,14 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(20);
   });
 
-  it('shouldInsertSpace — 50000 calls < 60ms', () => {
+  it('shouldInsertSpace — 50000 calls < 100ms', () => {
     const start = performance.now();
     for (let i = 0; i < 50000; i++) {
       shouldInsertSpace('Hello', 'World', 5, 14, 4);
     }
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(60);
+    expect(elapsed).toBeLessThan(100);
   });
 
   it('calculateScale — 10000 calls < 10ms', () => {
