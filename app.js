@@ -1148,7 +1148,7 @@ function calculateScale(page) {
   return _calculateScale(
     vp.width, vp.height,
     window.innerWidth, window.innerHeight,
-    48, sidePadding, fitToWidth
+    48, sidePadding, _isMobileDevice
   );
 }
 
