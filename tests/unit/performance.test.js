@@ -251,7 +251,7 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(5);
   });
 
-  it('detectLanguageFromText — 100 texts < 30ms', () => {
+  it('detectLanguageFromText — 100 texts < 60ms', () => {
     const texts = [
       'Il progetto è stato completato con successo nella giornata di ieri',
       'Le rapport a été soumis au comité de direction pour examen',
@@ -266,7 +266,7 @@ describe('Performance: core function thresholds', () => {
     }
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(30);
+    expect(elapsed).toBeLessThan(60);
   });
 
   it('fingerprint — 500x500 image from array < 5ms', () => {

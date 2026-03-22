@@ -816,6 +816,10 @@ async function loadPDF(data, resumePage = 1) {
 
   } catch (err) {
     console.error('Failed to load PDF:', err);
+    // Release any PDF.js resources allocated before the failure
+    if (pdfState.doc) {
+      try { pdfState.doc.cleanup(); } catch (_) {}
+    }
     if (err?.name === 'PasswordException') {
       showError('This PDF is password-protected. Please unlock it first.');
     } else if (err?.name === 'InvalidPDFException') {
