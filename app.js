@@ -1897,10 +1897,10 @@ async function renderPageIfNeeded(pageNum) {
     const mainCtx = slot.mainCanvas.getContext('2d');
     mainCtx.drawImage(renderCanvas, 0, 0);
 
-    // Paint overlay canvas
-    slot.overlayCanvas.width = w;
-    slot.overlayCanvas.height = h;
+    // Paint overlay canvas (only allocate backing store when page has image regions)
     if (regions.length > 0) {
+      slot.overlayCanvas.width = w;
+      slot.overlayCanvas.height = h;
       compositeImageRegions(slot.overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
     }
 
