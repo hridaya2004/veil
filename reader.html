@@ -75,6 +75,21 @@
 
       <div class="toolbar-divider"></div>
 
+      <button id="btn-zoom-out" title="Zoom out" aria-label="Zoom out">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+      <span id="zoom-level" class="toolbar-zoom-level">100%</span>
+      <button id="btn-zoom-in" title="Zoom in" aria-label="Zoom in">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+
+      <div class="toolbar-divider"></div>
+
       <button id="btn-toggle" class="toggle-active" title="Toggle dark mode (D)" aria-label="Dark mode" aria-pressed="true" aria-keyshortcuts="d">
         <svg id="icon-dark" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>

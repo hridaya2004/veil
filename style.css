@@ -572,6 +572,20 @@ body {
   white-space: nowrap;
 }
 
+.toolbar-zoom-level {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  min-width: 36px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+  display: none;
+}
+@media (min-width: 700px) {
+  .toolbar-zoom-level { display: inline; }
+}
+
 /* Hide filename and its adjacent divider on small screens.
    The browser tab title already shows "veil - document.pdf". */
 @media (max-width: 699px) {

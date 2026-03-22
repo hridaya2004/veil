@@ -185,6 +185,14 @@ const pdfState = {
   alreadyDark: new Map(),    // boolean per page
   slots: new Map(),          // pageNum → pool container
   renderState: new Map(),    // pageNum → {rendered, rendering, ...}
+  zoomMultiplier: parseFloat(localStorage.getItem('veil-zoom')) || 1.0,
+  get renderScale() {
+    // On phone landscape (short screens), always render at 1x — fit-to-width is optimal.
+    // Foldable/tablet landscape keeps user zoom (screens are tall enough).
+    const zoom = (typeof isPhoneLandscape === 'function' && isPhoneLandscape())
+      ? 1 : this.zoomMultiplier;
+    return this.scale * zoom;
+  },
 };
 // Desktop: generous pool for fluid scrolling (RAM is abundant).
 // Mobile: tight pool to minimize canvas context memory pressure.
@@ -803,6 +811,7 @@ async function loadPDF(data, resumePage = 1) {
     reconcileContainers();
     updateCurrentPageFromScroll();
     checkPresentationMode();
+    updateZoomUI();
     announce(`Document loaded, ${pdfState.doc.numPages} pages`);
 
   } catch (err) {
@@ -1272,6 +1281,18 @@ function assignContainer(poolSlot, pageNum) {
   el.style.height = geo.cssHeight + 'px';
   el.style.scrollSnapAlign = '';
   el.style.display = '';
+
+  // On mobile with zoom >1x, center oversized pages with negative margin
+  // so the middle of the PDF is visible (overflow-x is hidden on mobile)
+  if (_isMobileDevice && geo.cssWidth > window.innerWidth) {
+    const offset = (geo.cssWidth - window.innerWidth) / 2;
+    el.style.marginLeft = -offset + 'px';
+    el.style.marginRight = 'auto';
+  } else {
+    el.style.marginLeft = '0';
+    el.style.marginRight = '0';
+    el.style.margin = '0 auto';
+  }
   el.dataset.pageNum = pageNum;
 
   poolSlot.mainCanvas.style.width = geo.cssWidth + 'px';
@@ -1404,11 +1425,12 @@ async function buildPageSlots() {
   const firstPage = await pdfState.doc.getPage(1);
   const scale = calculateScale(firstPage);
   pdfState.scale = scale;
+  const zoomedScale = pdfState.renderScale;
   const dpr = getDpr();
 
   // Compute geometry for all pages. Most PDFs have uniform page sizes —
   // detect this after page 1 and skip getPage() for the rest.
-  const firstVp = firstPage.getViewport({ scale: scale * dpr });
+  const firstVp = firstPage.getViewport({ scale: zoomedScale * dpr });
   const round = _isMobileDevice ? Math.round : Math.floor;
   const firstCssW = round(firstVp.width / dpr);
   const firstCssH = round(firstVp.height / dpr);
@@ -1423,7 +1445,7 @@ async function buildPageSlots() {
     if (i > 1) {
       // Check if this page has different dimensions
       const page = await pdfState.doc.getPage(i);
-      const vp = page.getViewport({ scale: scale * dpr });
+      const vp = page.getViewport({ scale: zoomedScale * dpr });
       cssW = round(vp.width / dpr);
       cssH = round(vp.height / dpr);
       if (cssW !== firstCssW || cssH !== firstCssH) uniform = false;
@@ -1766,7 +1788,7 @@ async function renderPageIfNeeded(pageNum) {
     if (pdfState.generation !== myGen) return;
 
     const dpr = getDpr();
-    const scaledViewport = page.getViewport({ scale: pdfState.scale * dpr });
+    const scaledViewport = page.getViewport({ scale: pdfState.renderScale * dpr });
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
 
@@ -2509,6 +2531,67 @@ document.addEventListener('keydown', (e) => {
 
 const WHEEL_PAGE_THRESHOLD = 60; // accumulated delta before jumping
 
+// ============================================================
+// Zoom
+// ============================================================
+
+const btnZoomIn = document.getElementById('btn-zoom-in');
+const btnZoomOut = document.getElementById('btn-zoom-out');
+const zoomLevelEl = document.getElementById('zoom-level');
+
+function updateZoomUI() {
+  // Only disable zoom on phone landscape (short screens), not foldable/tablet landscape
+  const isLandscapeTouch = isPhoneLandscape();
+  const effectiveZoom = isLandscapeTouch ? 1 : pdfState.zoomMultiplier;
+  const pct = Math.round(effectiveZoom * 100);
+  if (zoomLevelEl) zoomLevelEl.textContent = `${pct}%`;
+  if (btnZoomIn) btnZoomIn.disabled = isLandscapeTouch || pdfState.zoomMultiplier >= 3;
+  if (btnZoomOut) btnZoomOut.disabled = isLandscapeTouch || pdfState.zoomMultiplier <= 0.5;
+  // Toggle horizontal scroll when zoomed beyond viewport.
+  // Desktop: scrollbar for horizontal panning.
+  // Mobile: keep hidden + negative margin to center the oversized page.
+  if (_isMobileDevice) {
+    viewport.style.overflowX = 'hidden';
+  } else {
+    viewport.style.overflowX = pdfState.zoomMultiplier > 1 ? 'auto' : 'hidden';
+  }
+}
+
+async function rebuildForZoom() {
+  if (!pdfState.doc) return;
+  const pageToRestore = pdfState.currentPage;
+  pdfState.generation++;
+  renderPipeline.queue.length = 0;
+  resetOcrState();
+  scrollState.isFast = false;
+  renderPipeline.sinceReset = 0;
+  renderPipeline.resetPending = false;
+  await buildPageSlots();
+  scrollToPage(pageToRestore, true);
+  reconcileContainers();
+  updateCurrentPageFromScroll();
+  checkPresentationMode();
+  updateZoomUI();
+}
+
+if (btnZoomIn) {
+  btnZoomIn.addEventListener('click', () => {
+    if (pdfState.zoomMultiplier >= 3) return;
+    pdfState.zoomMultiplier = Math.min(3, pdfState.zoomMultiplier + 0.25);
+    localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
+    rebuildForZoom();
+  });
+}
+
+if (btnZoomOut) {
+  btnZoomOut.addEventListener('click', () => {
+    if (pdfState.zoomMultiplier <= 0.5) return;
+    pdfState.zoomMultiplier = Math.max(0.5, pdfState.zoomMultiplier - 0.25);
+    localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
+    rebuildForZoom();
+  });
+}
+
 function checkPresentationMode() {
   if (!pdfState.doc || pdfState.geometry.length <= 1) {
     scrollState.presentationMode = false;
@@ -2516,6 +2599,11 @@ function checkPresentationMode() {
   }
   // Presentations have landscape pages (wider than tall).
   // Papers/books have portrait pages — keep normal scroll for those.
+  // Disable presentation mode when zoomed — zoomed pages need free scroll
+  if (pdfState.zoomMultiplier > 1) {
+    scrollState.presentationMode = false;
+    return;
+  }
   const firstGeo = pdfState.geometry[1];
   scrollState.presentationMode = firstGeo.cssWidth > firstGeo.cssHeight;
 }
@@ -2604,6 +2692,7 @@ window.addEventListener('resize', () => {
     reconcileContainers();
     updateCurrentPageFromScroll();
     checkPresentationMode();
+    updateZoomUI();
 
     // Mobile landscape: toolbar is completely hidden — pure reading.
     // Rotating back to portrait restores normal focus mode behavior.
