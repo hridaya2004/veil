@@ -807,6 +807,9 @@ body {
   left: 0;
   overflow: hidden;
   line-height: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .text-line {

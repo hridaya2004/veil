@@ -2127,6 +2127,12 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       prevStr = item.str;
     }
 
+    // Constrain line width to actual text content so WebKit/Safari
+    // doesn't extend the selection highlight to the full page width
+    if (cursor > 0) {
+      lineDiv.style.width = cursor + 'px';
+    }
+
     fragment.appendChild(lineDiv);
   }
 

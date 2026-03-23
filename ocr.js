@@ -523,6 +523,12 @@ export function buildOcrTextLayerDirect(container, ocrData, canvasW, canvasH, cs
       lineDiv.appendChild(span);
     }
 
+    // Constrain line width to actual text content so WebKit/Safari
+    // doesn't extend the selection highlight to the full page width
+    if (prevWordEnd > 0) {
+      lineDiv.style.width = prevWordEnd + 'px';
+    }
+
     fragment.appendChild(lineDiv);
   }
 
