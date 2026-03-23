@@ -305,14 +305,21 @@ export async function ocrImageRegions(currentSlot, regions, dpr, myGen, pageNum)
       // Before: 2 separate getImageData calls per image region.
       // After: 1 call, halving GPU→CPU sync stalls.
       const { fingerprint: fp, likelyText } = analyzeImageRegion(regionCanvas);
-      if (fp && ocrFingerprints.has(fp)) {
+
+      // Skip images too small for analysis (< 8×8px after scaling)
+      if (!fp) {
+        regionCanvas.width = 0;
+        continue;
+      }
+
+      if (ocrFingerprints.has(fp)) {
         regionCanvas.width = 0;
         continue;
       }
 
       if (!likelyText) {
         regionCanvas.width = 0;
-        if (fp) ocrFingerprints.set(fp, true);
+        ocrFingerprints.set(fp, true);
         continue;
       }
 

@@ -1542,12 +1542,8 @@ function getDpr() {
   // Cap DPR on memory-constrained devices (iOS, budget Android).
   // With fit-to-width, canvases are larger — full 3x DPR exhausts
   // Jetsam memory budget especially on scanned docs.
-  // Cap DPR on memory-constrained devices (iOS, budget Android).
-  // With fit-to-width, canvases are larger — full 3x DPR exhausts
-  // Jetsam memory budget especially on scanned docs.
   if (pdfState.largeDocConstrained) return Math.min(raw, 2);
   if (_isMemoryConstrained) return Math.min(raw, 2);
-  return raw;
   return raw;
 }
 
