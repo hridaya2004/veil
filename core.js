@@ -1,47 +1,157 @@
-// ============================================================
-// Smart Dark PDF Reader - Core Module
-//
-// Pure and testable functions extracted from app.js.
-// No global state, no DOM element references.
-// Can be imported by both browser (app.js) and Node (Vitest).
-// ============================================================
+/* DESIGN
+   ------
+   * This file contains every pure function in veil (math, detection,
+   * text processing) with zero browser dependencies.
+   *
+   * I deliberately separated these from app.js so they can be imported
+   * by both the browser runtime and the Node.js test runner (Vitest).
+   * This is the foundation of Salvatore Sanfilippo's (antirez) insight
+   * that tests give "eyes" to a coding agent: without testable pure
+   * functions, the agent is blind and iterates by guesswork. Every
+   * function here can be verified in under a second with `npm test`.
+   *
+   * The rule for what lives here vs app.js: if a function needs a
+   * canvas, a DOM element, or any global state, it stays in app.js.
+   * If it takes data in and returns data out, it belongs here.
+   *
+   * The file follows this flow:
+   *
+   * 1. CONSTANTS (lines 94-123)
+   *    Thresholds and identity values used across the codebase.
+   *    Each threshold was calibrated on real documents and the comments
+   *    explain why each number was chosen.
+   *
+   * 2. OCR ARTIFACT DETECTION (lines 126-185)
+   *    Filters garbage text from Tesseract's interpretation of borders,
+   *    stamps, and logos in scanned documents.
+   *
+   * 3. MATRIX UTILITIES (lines 188-237)
+   *    PDF coordinate math. A PDF stores positions using a 6-number
+   *    array called the CTM (Current Transformation Matrix) that encodes
+   *    translation, scale, rotation and skew in a single compact form.
+   *    Think of it as GPS coordinates for every object on the page.
+   *    Complication: PDF coordinates start at the bottom-left with Y
+   *    pointing up, but canvas/CSS start at the top-left with Y pointing
+   *    down. These functions handle the conversion.
+   *
+   * 4. IMAGE REGION EXTRACTION (lines 240-306)
+   *    A PDF page is a sequence of drawing instructions ("operators"):
+   *    "draw text here", "place image there", "change the transform".
+   *    I walk this sequence tracking position state to find every
+   *    raster image. This is how veil knows which areas to protect
+   *    from dark mode inversion.
+   *
+   * 5. OVERLAY COMPOSITION (lines 309-329)
+   *    The dark mode trick: CSS `filter: invert()` on the main canvas
+   *    inverts everything (text becomes light, but images become
+   *    wrong too). The overlay canvas sits on top with NO filter, and
+   *    I copy the original image pixels there. Result: dark text with
+   *    original-color images.
+   *
+   * 6. ALREADY-DARK DETECTION (lines 332-379)
+   *    Samples luminance at page edges and corners to detect pages
+   *    that are already dark (slides, dark-themed PDFs). These pages
+   *    skip inversion because inverting an already-dark page makes it light.
+   *
+   * 7. DARK MODE STATE RESOLUTION (lines 382-396)
+   *    Decides whether to apply dark mode on a given page. Three states:
+   *    auto (respects detection), force dark, force light. The user can
+   *    override any page with the toggle button, and the override is
+   *    preserved in the exported PDF.
+   *
+   * 8. TEXT NORMALIZATION (lines 399-416)
+   *    Decomposes typographic ligatures (ﬁ->fi, ﬂ->fl) so copy/paste
+   *    produces normal characters instead of special Unicode glyphs.
+   *
+   * 9. PUNCTUATION MERGING (lines 419-476)
+   *    Fuses tiny standalone punctuation items (3-4px wide periods,
+   *    commas) into the preceding word so they're selectable.
+   *
+   * 10. TEXT LAYER UTILITIES (lines 479-563)
+   *     Line grouping (which words belong on the same line?) and word
+   *     boundary detection (should there be a space between two spans?).
+   *     Used by both the native text layer and the OCR text layer.
+   *
+   * 11. SCALE CALCULATION (lines 566-583)
+   *     Determines how large to render each page. Fit-to-page on desktop,
+   *     fit-to-width on mobile landscape.
+   *
+   * 12. NAVIGATOR LANGUAGE MAPPING (lines 586-632)
+   *     Maps the user's OS language to a Tesseract language code so the
+   *     OCR worker starts with the right model from the beginning.
+   *
+   * 13. SCANNED DOCUMENT DETECTION (lines 635-661)
+   *     Samples multiple pages to determine if the PDF is a scan (one
+   *     full-page image per page, almost no native text).
+   *
+   * 14. OCR LANGUAGE DETECTION (lines 664-810)
+   *     Detects the document language from character frequency and
+   *     function words. Used as a fallback when navigator.languages
+   *     doesn't provide a non-English language.
+*/
 
-// ============================================================
-// Constants
-// ============================================================
 
+// --- CONSTANTS ---
+
+/*
+ * The identity matrix, meaning "no transformation". When applied, things
+ * stay where they are. PDF uses 6 numbers [a b c d e f] to encode
+ * position, scale and rotation in a single array
+ */
 export const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
+
+/*
+ * 40% luminance: below this, a page is considered "already dark" and
+ * inversion is skipped. Calibrated on real dark-themed slides: too low
+ * and beige backgrounds get inverted, too high and grey slides are skipped
+ */
 export const DARK_LUMINANCE_THRESHOLD = 0.4;
+
+/*
+ * Scanned document detection: a page is "scanned" if it has one image
+ * covering >85% of the surface and <50 characters of native text.
+ * Sampling 3-5 pages avoids false positives on photo books
+ */
 export const SCAN_IMAGE_COVERAGE_THRESHOLD = 0.85;
 export const SCAN_TEXT_CHAR_THRESHOLD = 50;
+
+/*
+ * OCR confidence: Tesseract returns 0-100 per word. Real text scores
+ * 60-95%, stamps and logos score 5-20%. 45% catches garbage without
+ * losing legitimate blurry text (which scores 50-70%)
+ */
 export const OCR_CONFIDENCE_THRESHOLD = 45;
 
-// ============================================================
-// OCR Artifact Detection
-//
-// Tesseract interprets non-text elements in scanned documents
-// (borders, lines, stamps, logos) as text characters. These
-// "artifact words" are composed entirely of symbols/punctuation
-// with no letters or digits. Examples: "|", "\", "{|", "————".
-//
-// This filter removes them from the text layer without touching
-// real content. Safe for all document types (code, math, research)
-// because any word with at least one letter or digit passes through.
-//
-// Two rules:
-//   1. Sequences of 2+ line/border characters (dash, pipe, etc.)
-//      are always artifacts: "————", "_—", "||", "=/="
-//   2. Single characters from the "never standalone" set are
-//      artifacts: "|", "\", "€", "©", etc.
-//
-// NOT filtered: "-" (bullet point), "—" (em dash), ".", ":", ";"
-// (legitimate punctuation that may appear as standalone words).
-//
-// References:
-//   - github.com/tesseract-ocr/tesseract/issues/3597 (I → | confusion)
-//   - github.com/tesseract-ocr/tesseract/issues/1465 (extra char insertion)
-//   - tesseract-ocr.github.io/tessdoc/ImproveQuality.html (border artifacts)
-// ============================================================
+
+// --- OCR ARTIFACT DETECTION ---
+
+/*
+ * Tesseract interprets non-text elements in scanned documents
+ * (borders, lines, stamps, logos) as text characters. These
+ * "artifact words" are composed entirely of symbols/punctuation
+ * with no letters or digits. Examples: "|", "\", "{|", "————".
+ *
+ * This filter removes them from the text layer without touching
+ * real content. Safe for all document types (code, math, research)
+ * because any word with at least one letter or digit passes through.
+ *
+ * Two rules:
+ *   1. Sequences of 2+ line/border characters (dash, pipe, etc.)
+ *      are always artifacts: "————", "_—", "||", "=/="
+ *   2. Single characters from the "never standalone" set are
+ *      artifacts: "|", "\", "€", "©", etc.
+ *
+ * NOT filtered: "-" (bullet point), "—" (em dash), ".", ":", ";"
+ * (legitimate punctuation that may appear as standalone words).
+ *
+ * References:
+ *   - github.com/tesseract-ocr/tesseract/issues/3597
+ *     Capital "I" gets misread as pipe "|"
+ *   - github.com/tesseract-ocr/tesseract/issues/1465
+ *     Tesseract inserts extra characters at low confidence
+ *   - tesseract-ocr.github.io/tessdoc/ImproveQuality.html
+ *     Dark borders in scanned documents produce ghost characters
+ */
 
 // Characters that form border/line artifacts when in sequences of 2+
 const OCR_LINE_CHARS_RE = /^[-—–_|\\\/=~]+$/;
@@ -50,7 +160,7 @@ const OCR_LINE_CHARS_RE = /^[-—–_|\\\/=~]+$/;
 // Excludes: - (bullet), — (em dash), . : ; , ! ? (punctuation)
 const OCR_NEVER_STANDALONE_RE = /^[|\\{}[\]©®™€£¥¢°§¶†‡•~^*_=<>\/]+$/;
 
-/**
+/*
  * Returns true if the word is an OCR artifact (non-text noise from
  * borders, lines, stamps, or logos in the scanned document).
  *
@@ -62,26 +172,27 @@ export function isOcrArtifact(text) {
   const t = text.trim();
   if (!t) return true;
 
-  // Any letter or digit in any script → real content, keep it
+  // Any letter or digit in any script -> real content, keep it
   if (/[\p{L}\p{N}]/u.test(t)) return false;
 
-  // Sequences of 2+ line/border characters → artifact
+  // Sequences of 2+ line/border characters -> artifact
   if (t.length >= 2 && OCR_LINE_CHARS_RE.test(t)) return true;
 
-  // Single characters from the "never standalone" set → artifact
+  // Single characters from the "never standalone" set -> artifact
   if (OCR_NEVER_STANDALONE_RE.test(t)) return true;
 
   return false;
 }
 
-// ============================================================
-// OCR TextContent Filtering
-// ============================================================
 
-// ============================================================
-// Matrix Utilities
-// ============================================================
+// --- MATRIX UTILITIES ---
 
+/*
+ * A PDF matrix is 6 numbers: [a b c d e f]. The first four (a,b,c,d)
+ * handle scale, rotation and skew. The last two (e,f) are the X,Y
+ * position. multiplyMatrices combines two transforms into one, like
+ * saying "first move here, then scale by this much" in a single step
+ */
 export function multiplyMatrices(m1, m2) {
   return [
     m1[0] * m2[0] + m1[2] * m2[1],
@@ -100,6 +211,12 @@ export function transformPoint(matrix, x, y) {
   ];
 }
 
+/*
+ * Every image in a PDF starts as a 1×1 square, then gets stretched and
+ * positioned by the transformation matrix. I transform all four corners
+ * of this unit square and take the bounding box. This correctly handles
+ * rotated and skewed images that a naive (x,y,w,h) approach would miss
+ */
 export function computeImageBounds(ctm, viewportTransform) {
   const final = multiplyMatrices(viewportTransform, ctm);
 
@@ -119,18 +236,29 @@ export function computeImageBounds(ctm, viewportTransform) {
   };
 }
 
-// ============================================================
-// Image Region Extraction
-//
-// Walks a PDF.js operator list and tracks the CTM stack to
-// find all raster image positions on the page.
-//
-// `opsMap` must provide numeric codes for:
-//   save, restore, transform, paintFormXObjectBegin,
-//   paintFormXObjectEnd, paintImageXObject,
-//   paintInlineImageXObject, paintImageXObjectRepeat
-// ============================================================
 
+// --- IMAGE REGION EXTRACTION ---
+
+/*
+ * I walk the PDF.js operator list maintaining a CTM stack (save/restore)
+ * to find every raster image on the page. This is how veil knows what
+ * to protect from inversion. Without it, photos, charts and diagrams
+ * would be color-inverted along with the text.
+ *
+ * I chose this approach (public API getOperatorList) over forking PDF.js
+ * because PDF.js has 500k+ lines and upstream updates are frequent.
+ * The operator list is stable across versions.
+ *
+ * Key OPS from PDF.js v5.4.149:
+ *   save:10, restore:11, transform:12    (CTM stack)
+ *   paintFormXObjectBegin:74, End:75     (sub-contexts)
+ *   paintImageXObject:85                 (standard images)
+ *   paintInlineImageXObject:86           (inline images)
+ *   paintImageXObjectRepeat:88           (tiled/repeated images)
+ *
+ * `opsMap` is a bridge object that maps these names to numeric codes,
+ * so this function stays independent of the pdfjsLib import
+ */
 export function extractImageRegions(opList, viewportTransform, opsMap) {
   const regions = [];
   const ctmStack = [];
@@ -144,7 +272,10 @@ export function extractImageRegions(opList, viewportTransform, opsMap) {
     const args = argsArray[i];
 
     if (op === opsMap.save) {
-      if (ctmStack.length > 1000) continue; // guard against malformed PDFs
+      // A malformed PDF could emit millions of save ops without matching
+      // restores, growing the stack without limit. 1000 levels is far
+      // beyond any legitimate nesting (real PDFs rarely exceed 10-20)
+      if (ctmStack.length > 1000) continue;
       ctmStack.push([...ctm]);
     } else if (op === opsMap.restore) {
       ctm = ctmStack.pop() || [...IDENTITY_MATRIX];
@@ -174,10 +305,15 @@ export function extractImageRegions(opList, viewportTransform, opsMap) {
   return regions;
 }
 
-// ============================================================
-// Overlay Composition
-// ============================================================
 
+// --- OVERLAY COMPOSITION ---
+
+/*
+ * After the main canvas is CSS-inverted, the overlay canvas paints
+ * the original (non-inverted) pixels back over the image regions.
+ * The overlay sits above the main canvas with no CSS filter, so the
+ * images appear in their true colors while text around them is dark
+ */
 export function compositeImageRegions(ctx, sourceCanvas, regions, canvasW, canvasH) {
   for (const r of regions) {
     const sx = Math.max(0, r.x);
@@ -192,14 +328,21 @@ export function compositeImageRegions(ctx, sourceCanvas, regions, canvasW, canva
   }
 }
 
-// ============================================================
-// Already-Dark Detection
-//
-// Accepts raw pixel data (Uint8ClampedArray from getImageData)
-// and canvas dimensions. Returns true if the page background
-// is already dark (luminance below threshold).
-// ============================================================
 
+// --- ALREADY-DARK DETECTION ---
+
+/*
+ * I sample luminance at edges and corners because that's where the
+ * page background is most likely exposed (text and images tend to be
+ * centered). A single getImageData reads all pixels once, and sampling
+ * from the same array avoids multiple GPU readbacks.
+ *
+ * The luminance formula (0.299R + 0.587G + 0.114B) weights green
+ * highest because human eyes are most sensitive to green light.
+ * This is the BT.601 standard, the same one WCAG accessibility
+ * guidelines use. It gives better results on warm-toned PDFs than
+ * the alternative (BT.709) which was designed for HD video
+ */
 export function detectAlreadyDark(pixelData, width, height) {
   if (width <= 0 || height <= 0 || pixelData.length === 0) return false;
   const samplePoints = [];
@@ -235,10 +378,15 @@ export function detectAlreadyDark(pixelData, width, height) {
   return avgLuminance < DARK_LUMINANCE_THRESHOLD;
 }
 
-// ============================================================
-// Dark Mode State Resolution
-// ============================================================
 
+// --- DARK MODE STATE RESOLUTION ---
+
+/*
+ * Three states per page: auto (default), force dark, force light.
+ * Auto respects the already-dark detection: an already-dark slide
+ * stays untouched. The user can always override with the toggle button,
+ * and the override is preserved in the exported PDF
+ */
 export function shouldApplyDark(pageNum, pageDarkOverride, pageAlreadyDark) {
   const override = pageDarkOverride.get(pageNum);
   if (override === 'dark') return true;
@@ -247,30 +395,30 @@ export function shouldApplyDark(pageNum, pageDarkOverride, pageAlreadyDark) {
   return true;
 }
 
-// ============================================================
-// Text Normalization
-// ============================================================
 
-/**
- * Normalizes a string using NFKD (Compatibility Decomposition) to
- * decompose typographic ligatures into their constituent characters.
+// --- TEXT NORMALIZATION ---
+
+/*
+ * Some fonts store "fi" as a single glyph (a ligature) instead of two
+ * separate letters. When the user copies text, they get the ligature
+ * character (ﬁ) instead of "f" + "i", which breaks search and looks
+ * wrong in plain text editors.
  *
- * Examples:  ﬁ (U+FB01) → fi,  ﬂ (U+FB02) → fl,  ﬀ (U+FB00) → ff
+ * NFKD ("Compatibility Decomposition") is a Unicode standard operation
+ * that splits these combined characters back into their parts:
+ *   ﬁ -> fi,  ﬂ -> fl,  ﬀ -> ff,  ﬃ -> ffi,  ﬄ -> ffl
  *
- * This is safe for all text — strings without ligatures pass through
- * unchanged. NFKD also decomposes other compatibility characters
- * (e.g. superscripts, fractions) which improves copy/paste fidelity.
+ * Safe for all text: strings without ligatures pass through unchanged
  */
 export function normalizeLigatures(str) {
   if (!str) return str;
   return str.normalize('NFKD');
 }
 
-// ============================================================
-// Punctuation Merging
-// ============================================================
 
-/**
+// --- PUNCTUATION MERGING ---
+
+/*
  * Merges trailing punctuation items into the preceding word.
  *
  * In many PDFs, punctuation marks (., !, ?, ;, :, etc.) are
@@ -281,7 +429,7 @@ export function normalizeLigatures(str) {
  * and merges any item that consists solely of trailing punctuation
  * into the previous item, extending its width to cover both.
  *
- * Items at position 0 (line start) are never merged — punctuation
+ * Items at position 0 (line start) are never merged. Punctuation
  * at the start of a line is unusual and may be intentional (e.g.
  * bullet points, opening quotes).
  *
@@ -327,18 +475,20 @@ export function mergePunctuation(line) {
   return merged;
 }
 
-// ============================================================
-// Text Layer Utilities
-//
-// Shared logic for grouping text items into lines and
-// determining word boundary spacing.
-// ============================================================
 
-/**
+// --- TEXT LAYER UTILITIES ---
+
+/*
  * Groups an array of items (each with `top` and `height`)
- * into lines based on vertical proximity. Items whose `top`
- * differs by less than 50% of the current line height are
- * considered part of the same line.
+ * into lines based on vertical proximity. Two items are on the
+ * same line if the difference in their `top` is less than 50%
+ * of the current line height.
+ *
+ * Why 50%? It needs to be generous enough to keep words with
+ * different baselines on the same line (e.g. superscripts,
+ * mixed font sizes), but strict enough to separate actual lines.
+ * At 50%, two items must overlap vertically by at least half
+ * their height to be grouped together.
  *
  * Returns array of arrays (each sub-array is a line).
  * Items are pre-sorted by top then left.
@@ -372,19 +522,32 @@ export function groupItemsIntoLines(items) {
   return lines;
 }
 
-/**
+/*
  * Determines whether a TextNode space should be inserted
  * between two adjacent text items at a style boundary.
  *
- * Returns { insertSpace: boolean, adjustedGap: number }
+ * The problem: when a PDF switches font mid-line (e.g. "I " in
+ * regular followed by "hate" in italic), the space can end up
+ * trapped inside an inline-block span. CSS white-space collapsing
+ * silently eats trailing spaces inside inline-block elements, so
+ * "I hate talking about" becomes "Ihatetalking about" in the clipboard.
  *
- * Three scenarios (Antigravity fix):
- *   1. prevStr ends with whitespace → space in DOM, preserved
- *      by white-space:pre. No TextNode needed.
- *   2. item.str starts with whitespace → same.
- *   3. Neither has whitespace but geometric gap > 15% of
- *      fontSize → insert TextNode(' '), adjust gap by
- *      subtracting spaceAdvance.
+ * The fix has two parts:
+ *   - CSS `white-space: pre` on all spans (preserves trailing spaces)
+ *   - This function decides when to insert an explicit TextNode(' ')
+ *
+ * Three scenarios:
+ *   1. prevStr ends with whitespace: space is already in the DOM,
+ *      white-space:pre preserves it. No TextNode needed.
+ *   2. itemStr starts with whitespace: same logic.
+ *   3. Neither has whitespace but the geometric gap between the two
+ *      items is > 15% of the fontSize: insert a TextNode(' ') and
+ *      reduce the gap by the width of a space character.
+ *
+ * The 15% threshold was chosen because smaller gaps are typically
+ * kerning (intentional tight spacing), not word boundaries.
+ *
+ * Returns { insertSpace: boolean, adjustedGap: number }
  */
 export function shouldInsertSpace(prevStr, itemStr, gap, fontSize, spaceAdvance) {
   if (!prevStr) return { insertSpace: false, adjustedGap: gap };
@@ -399,10 +562,16 @@ export function shouldInsertSpace(prevStr, itemStr, gap, fontSize, spaceAdvance)
   return { insertSpace: false, adjustedGap: gap };
 }
 
-// ============================================================
-// Scale Calculation
-// ============================================================
 
+// --- SCALE CALCULATION ---
+
+/*
+ * I chose fit-to-page (min of width and height constraint) as the default
+ * because the first page should be fully visible on load. On mobile landscape,
+ * fitToWidth ignores the height constraint because the user scrolls vertically,
+ * and horizontal content shouldn't be clipped. Cap at 3x prevents absurdly
+ * large canvases on ultrawide monitors
+ */
 export function calculateScale(pageWidth, pageHeight, windowWidth, windowHeight, toolbarHeight = 48, padding = 16, fitToWidth = false) {
   if (pageWidth <= 0 || pageHeight <= 0) return 1;
   const availW = windowWidth - padding;
@@ -413,13 +582,18 @@ export function calculateScale(pageWidth, pageHeight, windowWidth, windowHeight,
   return Math.min(availW / pageWidth, availH / pageHeight, 3);
 }
 
-// ============================================================
-// Navigator Language Mapping
-//
-// Maps the user's OS language (from navigator.languages) to a
-// Tesseract language code. This lets us create the OCR worker
-// with the right language from the start — no scout pass needed.
-// ============================================================
+
+// --- NAVIGATOR LANGUAGE MAPPING ---
+
+/*
+ * I use navigator.languages (the OS language preferences) instead of
+ * asking the user to pick a language. This is the Apple approach: zero
+ * questions, the system already knows. Tesseract uses an LSTM neural
+ * network (a type of AI that reads sequences of shapes, letter by letter)
+ * to recognize characters regardless of language model. The model
+ * only affects confidence scoring and word boundaries. So eng+ita
+ * recognizes both English and Italian text without asking
+ */
 
 const BCP47_TO_TESSERACT = {
   it: 'ita', fr: 'fra', de: 'deu', es: 'spa', pt: 'por',
@@ -429,19 +603,19 @@ const BCP47_TO_TESSERACT = {
   tr: 'tur', uk: 'ukr', hi: 'hin', th: 'tha', vi: 'vie',
 };
 
-/**
+/*
  * Returns the Tesseract language code for the user's primary
  * non-English language, or null if the user's system is English-only.
  *
  * Reads navigator.languages (the OS language preferences) and maps
  * the first non-English entry to a Tesseract code. This is privacy-
- * respecting — the user explicitly configured these languages in
+ * respecting: the user explicitly configured these languages in
  * their OS settings.
  *
  * Examples:
- *   ['it-IT', 'en-US'] → 'ita'
- *   ['en-US']           → null
- *   ['de-DE', 'en-GB']  → 'deu'
+ *   ['it-IT', 'en-US'] -> 'ita'
+ *   ['en-US']          -> null
+ *   ['de-DE', 'en-GB'] -> 'deu'
  */
 export function getNavigatorLanguage() {
   const langs = (typeof navigator !== 'undefined' && navigator.languages)
@@ -457,34 +631,57 @@ export function getNavigatorLanguage() {
   return null;
 }
 
-// ============================================================
-// Scanned Document Detection (logic only)
-//
-// Given arrays of { charCount, maxImageCoverage } from sampled
-// pages, returns true if ALL pages match the scanned pattern.
-// ============================================================
 
-// ============================================================
-// OCR Language Detection
-//
-// Detects the language of OCR'd text using character frequency
-// and common function-word patterns. Designed to work with
-// Tesseract's English-only scout pass: the LSTM engine recognizes
-// individual characters (including accents) even without the
-// correct language model, so accented characters and short
-// function words are reliable signals.
-//
-// Returns a Tesseract language code: 'eng', 'ita', 'fra', etc.
-// Returns 'eng' when confidence is too low to switch (safe default).
-// ============================================================
+// --- SCANNED DOCUMENT DETECTION ---
+
+/*
+ * A scanned PDF is one image per page with almost no native text.
+ * I sample 3-5 pages spread across the document (not just page 1)
+ * because a photo book could have full-page images on some pages
+ * but mixed layout on others. ALL sampled pages must match the
+ * pattern for the document to be classified as scanned.
+ *
+ * When detected, two things change:
+ * 1. Image protection is skipped (the image IS the content)
+ * 2. OCR runs automatically to make text selectable
+ */
+
+// Returns true only if ALL sampled pages match the scanned pattern.
+// A single page with real text or without a dominant image breaks the match,
+// preventing false positives on photo books or mixed documents
+export function isScannedPattern(pageSamples) {
+  if (pageSamples.length === 0) return false;
+
+  for (const sample of pageSamples) {
+    if (sample.charCount >= SCAN_TEXT_CHAR_THRESHOLD) return false;
+    if (sample.maxImageCoverage < SCAN_IMAGE_COVERAGE_THRESHOLD) return false;
+  }
+
+  return true;
+}
+
+
+// --- OCR LANGUAGE DETECTION ---
+
+/*
+ * I detect language from character frequency and function words
+ * rather than using an external library. The LSTM engine recognizes
+ * accented characters (è, ñ, ü) even with the English model loaded,
+ * so they're reliable signals. Function words
+ * ("il", "la", "der", "les") confirm the detection.
+ *
+ * Threshold calibrated at 6 to reject false positives from English
+ * loanwords (café, résumé, naïve) while still catching real
+ * non-English text with few distinctive markers
+ */
 
 const LANG_PROFILES = [
   {
     code: 'ita',
-    // Accented characters distinctive to Italian (è, à, ù, ò, ì — NOT é which is shared with French)
+    // Accented characters distinctive to Italian (è, à, ù, ò, ì but NOT é which is shared with French)
     chars: /[èàùòì]/g,
     charWeight: 3,
-    // Common Italian function words — includes very short words (e, al, si)
+    // Common Italian function words, includes very short words (e, al, si)
     // that are distinctively Italian as standalone tokens
     words: /\b(il|la|di|che|per|una|del|con|dei|gli|nel|dal|alla|dalla|nella|delle|sono|della|questo|questa|anche|come|dopo|ogni|prima|stato|tutti|essere|al|si|lo|le|un|suo|sua|nei)\b/gi,
     wordWeight: 2,
@@ -498,7 +695,7 @@ const LANG_PROFILES = [
     // Only highly distinctive French chars (not é which appears in loanwords)
     chars: /[êëçœîôûæ]/g,
     charWeight: 3,
-    // é gets lower weight — it appears in English loanwords (café, résumé)
+    // é gets lower weight because it appears in English loanwords (café, résumé)
     sharedChars: /[é]/g,
     sharedCharWeight: 1,
     words: /\b(le|la|de|les|des|une|est|que|dans|pour|sur|avec|sont|cette|mais|nous|vous|tout|elle|leur|peut|fait|bien|plus|qui|pas)\b/gi,
@@ -532,13 +729,16 @@ const LANG_PROFILES = [
 // while still detecting real non-English text with few distinctive markers.
 const LANG_DETECT_THRESHOLD = 6;
 
+// Scores each language profile against the input text and returns
+// the best match. Falls back to 'eng' when the score is below
+// threshold, which is the safe default (English covers most Latin text)
 export function detectLanguageFromText(text) {
   if (!text || text.length < 20) return 'eng';
 
   const lower = text.toLowerCase();
 
   // Non-Latin script detection (character ranges).
-  // These are checked first because they're unambiguous — if 20%+ of
+  // These are checked first because they're unambiguous: if 20%+ of
   // characters are Cyrillic/Arabic or 10%+ are CJK, that's definitive.
   const cyrillicCount = (text.match(/[\u0400-\u04FF]/g) || []).length;
   if (cyrillicCount > text.length * 0.2) return 'rus';
@@ -570,15 +770,15 @@ export function detectLanguageFromText(text) {
     }
 
     // Shared characters that appear in multiple languages (low weight).
-    // These contribute to score but are NOT considered distinctive —
-    // they can't trigger a language switch on their own. This prevents
+    // These contribute to score but are NOT considered distinctive,
+    // so they can't trigger a language switch on their own. This prevents
     // English loanwords (café, résumé, naïve) from false-triggering French.
     if (profile.sharedChars) {
       const shared = lower.match(profile.sharedChars);
       if (shared) score += shared.length * (profile.sharedCharWeight || 1);
     }
 
-    // Function words — distinctive evidence
+    // Function words (distinctive evidence)
     const wordMatches = lower.match(profile.words);
     if (wordMatches) {
       score += wordMatches.length * profile.wordWeight;
@@ -607,15 +807,4 @@ export function detectLanguageFromText(text) {
   }
 
   return bestScore >= LANG_DETECT_THRESHOLD ? bestCode : 'eng';
-}
-
-export function isScannedPattern(pageSamples) {
-  if (pageSamples.length === 0) return false;
-
-  for (const sample of pageSamples) {
-    if (sample.charCount >= SCAN_TEXT_CHAR_THRESHOLD) return false;
-    if (sample.maxImageCoverage < SCAN_IMAGE_COVERAGE_THRESHOLD) return false;
-  }
-
-  return true;
 }
