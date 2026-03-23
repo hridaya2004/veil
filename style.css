@@ -815,6 +815,11 @@ body {
 .text-line {
   white-space: nowrap;
   box-sizing: border-box;
+  pointer-events: none;
+}
+
+.text-layer span {
+  pointer-events: auto;
 }
 
 .text-layer span {
