@@ -1,5 +1,5 @@
 // ============================================================
-// Veil — Session Persistence (Pure Storage Layer)
+// veil — Session Persistence (Pure Storage Layer)
 //
 // IndexedDB operations for saving/loading PDF sessions.
 // No DOM dependencies — pure data storage.

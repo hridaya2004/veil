@@ -1,5 +1,5 @@
 /* ============================================================
-   Veil — Smart Dark PDF Reader
+   veil — Smart Dark PDF Reader
    Design system inherited from landing page.
    ============================================================ */
 
@@ -189,7 +189,7 @@ body {
   border-color: rgba(212, 163, 115, 0.4);
 }
 
-/* --- Veil transition layers ---
+/* --- veil transition layers ---
    Three panels that slide right when a PDF loads, creating
    a parallax curtain-opening effect. Each layer is a different
    shade of the warm palette, moving at a different speed.
@@ -232,7 +232,7 @@ body {
   transform: translateX(100%);
 }
 
-/* Veil opening: let clicks through to the reader underneath */
+/* veil opening: let clicks through to the reader underneath */
 #drop-zone.veil-opening {
   pointer-events: none;
 }

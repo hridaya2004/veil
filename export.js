@@ -1,5 +1,5 @@
 // ============================================================
-// Veil — Export Module
+// veil — Export Module
 //
 // Renders each page with dark mode, composites original images,
 // embeds invisible text layer, and assembles a new PDF via pdf-lib.

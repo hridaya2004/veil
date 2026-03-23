@@ -1,6 +1,6 @@
 {
-  "name": "Veil",
-  "short_name": "Veil",
+  "name": "veil",
+  "short_name": "veil",
   "description": "Dark mode PDFs without destroying your images",
   "start_url": "./reader.html",
   "scope": "./",

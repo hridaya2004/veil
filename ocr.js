@@ -1,5 +1,5 @@
 // ============================================================
-// Veil — OCR Module
+// veil — OCR Module
 //
 // All Tesseract.js integration: worker lifecycle, page OCR,
 // image region OCR, text layer construction, job queue.

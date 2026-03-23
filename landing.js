@@ -66,7 +66,7 @@
     baSlider.style.left = pos + "%";
     const rounded = Math.round(pos);
     baSlider.setAttribute("aria-valuenow", rounded);
-    baSlider.setAttribute("aria-valuetext", `Showing ${rounded}% Veil, ${100 - rounded}% Standard`);
+    baSlider.setAttribute("aria-valuetext", `Showing ${rounded}% veil, ${100 - rounded}% Standard`);
   }
 
   function moveSlider(cx) {

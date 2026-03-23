@@ -1,5 +1,5 @@
 // ============================================================
-// Veil Service Worker
+// veil — Service Worker
 //
 // Caching strategy:
 // 1. Precache: app shell files (HTML, CSS, JS) — installed with SW
@@ -7,7 +7,7 @@
 //    — cached on first use, served from cache forever after
 // 3. Network-first: Google Fonts CSS (may update font subsets)
 //
-// Update strategy: NO skipWaiting(). Veil is a document app — the
+// Update strategy: NO skipWaiting(). veil is a document app, the
 // user may have a PDF open for days. Forcing activation while
 // reading could invalidate cached worker scripts and crash the
 // session. The new SW activates naturally when all tabs close.
