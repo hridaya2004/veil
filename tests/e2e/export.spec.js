@@ -92,7 +92,7 @@ test.describe('Export', () => {
 
   test('export respects per-page dark mode override', async ({ page }) => {
     // Toggle dark mode off on the current page (force light)
-    await page.click('#btn-dark', { force: true });
+    await page.click('#btn-toggle', { force: true });
 
     // The page should no longer have dark-active class
     const isDark = await page.evaluate(() => {
