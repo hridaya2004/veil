@@ -359,6 +359,17 @@ document.addEventListener('mousemove', (e) => {
   }
 }, { passive: true });
 
+// Touch: after tapping a toolbar button, restart the auto-hide timer.
+// On touch devices, the :hover state persists after tap (there's no
+// mouseout event), so the mousemove handler above sees overToolbar=true
+// forever and keeps cancelling the hide timer. This click handler
+// overrides that by explicitly restarting the countdown
+toolbar.addEventListener('click', () => {
+  if (window.matchMedia('(pointer: coarse)').matches) {
+    resetFocusTimer();
+  }
+});
+
 // Touch: tap in the top zone when toolbar is hidden reveals it.
 // In mobile landscape the toolbar is completely hidden (no reveal
 // mechanism) — the user rotates to portrait for toolbar actions.
@@ -374,11 +385,23 @@ document.addEventListener('touchstart', (e) => {
   }
 }, { passive: false });
 
-// Keyboard: Tab reveals toolbar when hidden (accessibility)
-// F to toggle focus mode
+// Keyboard: Tab reveals toolbar when hidden (accessibility).
+// The timer is longer (6 seconds) because keyboard users,
+// especially those with motor impairments, need more time to
+// navigate between buttons. Each Tab inside the toolbar resets
+// the timer so it never expires while the user is still navigating
+const FOCUS_DELAY_KEYBOARD = 6000;
+
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Tab' && !readerEl.hidden && toolbar.classList.contains('toolbar-hidden')) {
-    exitFocusMode();
+  if (e.key === 'Tab' && !readerEl.hidden) {
+    if (toolbar.classList.contains('toolbar-hidden')) {
+      exitFocusMode();
+    }
+    // Use the longer keyboard timer whenever Tab is pressed.
+    // This covers both the initial reveal (toolbar was hidden) and
+    // subsequent Tab presses while navigating between buttons
+    clearTimeout(uiState.focusTimer);
+    uiState.focusTimer = setTimeout(() => { uiState.focusTimer = null; enterFocusMode(); }, FOCUS_DELAY_KEYBOARD);
   }
   if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey
       && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
