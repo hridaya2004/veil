@@ -1,3 +1,32 @@
+<!--
+  DESIGN
+  ------
+  This is the landing page, the first thing a visitor sees. Its job
+  is to communicate the problem (dark mode destroys images in PDFs),
+  show the solution (before/after comparison), and get the user to
+  the reader with zero friction ("Start reading", one click, no signup).
+
+  The page is built in vanilla HTML/CSS/JS with no framework and no
+  build step, consistent with the rest of veil.
+
+  Structure:
+  1. Navbar with wordmark, GitHub, Support, and CTA
+  2. Hero with rotating text, before/after slider, and badges
+  3. Exploded layers animation (scroll-driven, built in landing.js)
+  4. OCR callout (unique feature, no other reader does this)
+  5. Workflow cards (export, links, offline)
+  6. Donate section (Ko-fi, free forever)
+  7. Footer with credits and links
+
+  The before/after slider is a clipped overlay: the veil side sits
+  on top of the "others" side, clipped with CSS clip-path. Dragging
+  the slider changes the clip-path percentage. Both sides show the
+  same document layout so the comparison is pixel-aligned.
+
+  The page transitions to the reader via a CSS overlay that fades
+  from the landing background color (#2a1f1a) to the reader
+  background (#0a0806), masking the loading time.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,7 +59,7 @@
   <a href="#main-content" class="skip-link">Skip to content</a>
   <!-- Ambient glow -->
 
-  <!-- ═══ NAVBAR ═══ -->
+  <!-- --- NAVBAR --- -->
   <nav id="navbar" aria-label="Main navigation">
     <div class="nav-logo">
       <span class="nav-wordmark" aria-label="veil">
@@ -43,7 +72,7 @@ veil
     <a href="reader.html" class="nav-cta" aria-label="Open veil">Open veil</a>
   </nav>
 
-  <!-- ═══ HERO ═══ -->
+  <!-- --- HERO --- -->
   <section class="hero" id="main-content">
     <div class="hero-badge desktop-only">Open Source <span class="sep">/</span> No AI <span class="sep">/</span> 100% Private</div>
     <h1>Dark mode PDFs<br><span class="hero-sub">without destroying your</span><br><span id="rotating-text" class="hero-accent" aria-live="polite" aria-atomic="true">histology slides</span></h1>
@@ -54,7 +83,7 @@ veil
       <p>Free forever <span class="sep">/</span> No signup <span class="sep">/</span> Works offline</p>
     </div>
 
-    <!-- ═══ BEFORE/AFTER ═══ -->
+    <!-- --- BEFORE/AFTER SLIDER --- -->
     <div class="ba-wrap">
       <div class="ba-container" id="ba-container" aria-label="Compare veil with other PDF readers">
         <!-- Others side (background) -->
@@ -119,7 +148,7 @@ veil
     </div>
   </section>
 
-  <!-- ═══ EXPLODED LAYERS ═══ -->
+  <!-- --- EXPLODED LAYERS --- -->
   <section class="layers-section" id="layers-section">
     <h2>Three layers, one experience</h2>
     <p class="layers-sub">What happens when you drop a PDF</p>
@@ -152,7 +181,7 @@ veil
 
   <div class="section-spacer"></div>
 
-  <!-- ═══ OCR CALLOUT ═══ -->
+  <!-- --- OCR CALLOUT --- -->
   <section class="ocr-section">
     <div class="ocr-card">
       <div class="ocr-badge">Only in veil</div>
@@ -165,7 +194,7 @@ veil
     </div>
   </section>
 
-  <!-- ═══ WORKFLOW ═══ -->
+  <!-- --- WORKFLOW --- -->
   <section class="workflow-section">
     <div class="workflow-header">
       <h2>Take it with you</h2>
@@ -196,7 +225,7 @@ veil
     </div>
   </section>
 
-  <!-- ═══ DONATE ═══ -->
+  <!-- --- DONATE --- -->
   <section class="donate-section">
     <div class="donate-card">
       <p class="donate-text donate-narrative">Built for the researcher reading papers at 2 AM, the medical student reviewing slides before rounds, and anyone who thinks a PDF reader should respect both their eyes and their images.</p>
@@ -205,13 +234,11 @@ veil
     </div>
   </section>
 
-  <!-- ═══ FOOTER ═══ -->
+  <!-- --- FOOTER --- -->
   <footer>
     <div class="footer-credits">
       <div class="footer-logo">
-        <span class="footer-wordmark" aria-label="veil">
-          <span class="footer-v">v</span><span class="footer-eil">eil</span>
-        </span>
+        <span class="footer-wordmark" aria-label="veil">veil</span>
       </div>
       <span class="footer-slash">/</span>
       <span>MIT License</span>

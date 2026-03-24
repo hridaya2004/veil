@@ -1062,14 +1062,6 @@ footer {
   line-height: 1;
   color: var(--text-muted);
 }
-.footer-v {
-  position: relative;
-  z-index: 1;
-}
-.footer-eil {
-  position: relative;
-  z-index: 1;
-}
 .footer-slash { color: #4a3e35; }
 .footer-credits a {
   color: var(--text-muted);
