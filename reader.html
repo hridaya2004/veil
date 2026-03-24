@@ -1,3 +1,32 @@
+<!--
+  DESIGN
+  ------
+  This is the PDF reader, the core of veil. The page has three states:
+
+  1. Drop zone: the first thing the user sees. A wordmark, a tagline,
+     and an invisible file input. On desktop the entire screen is a drop
+     target. On mobile a "Browse PDF" button opens the native file picker.
+     Three veil layers (dark divs) slide apart when a PDF loads, creating
+     a curtain-parting effect that masks the loading time.
+
+  2. Reader: the toolbar pill at the top, the PDF viewport below.
+     The toolbar contains navigation, zoom, dark mode toggle, and export.
+     It auto-hides after a timeout (focus mode) to maximize reading space.
+     Page containers inside the viewport are created dynamically by app.js
+     using virtual scrolling (only 7-15 containers exist at any time).
+
+  3. App loader: a pulsing "veil" wordmark shown while IndexedDB
+     deserializes the saved PDF on mobile. Hardcoded in HTML (not JS)
+     so it appears instantly from the service worker precache.
+
+  Accessibility: every interactive element has aria-label, the page
+  counter uses aria-live, toolbar buttons have aria-keyshortcuts,
+  a screen reader announcer div broadcasts dynamic events, and
+  the dark mode toggle uses aria-pressed.
+
+  Security: Content-Security-Policy restricts script sources to self
+  and the three CDNs used by the app. Inline scripts are blocked.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17,6 +46,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <!-- Hint the browser to start downloading PDF.js before the import
+       statement in app.js is parsed. Saves ~100-200ms on first load -->
   <link rel="modulepreload" href="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs">
 </head>
 <body>
@@ -24,7 +55,10 @@
   <!-- Page transition: amber glow that fades out on arrival -->
   <div id="page-transition" class="page-transition-overlay active" aria-hidden="true"></div>
 
-  <!-- Drop Zone -->
+  <!-- Drop Zone: the entire div is the drop target on desktop.
+       The file input is visually hidden (sr-only) but still in the
+       layout so Safari iOS recognizes the <label> association.
+       Using hidden or display:none would break the file picker on Safari -->
   <div id="drop-zone" role="button" tabindex="0" aria-label="Drop a PDF file or click to browse">
     <input type="file" id="file-input" accept=".pdf" class="sr-only">
 
@@ -32,7 +66,7 @@
 
     <div class="drop-hero">
       <div class="drop-wordmark" aria-label="veil">
-        <span class="drop-v">v</span><span class="drop-eil">eil</span>
+veil
       </div>
       <p class="drop-tagline drop-tagline-desktop">Drop a PDF, protect your eyes</p>
       <p class="drop-tagline drop-tagline-mobile">Protect your eyes</p>
@@ -50,9 +84,9 @@
   <!-- Reader -->
   <div id="reader" hidden>
     <header id="toolbar">
-      <a href="#" class="toolbar-logo" title="Open another file" id="btn-home">
+      <a href="#" class="toolbar-logo" title="Back to drop zone" id="btn-home">
         <span class="nav-wordmark" aria-label="veil">
-          <span class="nav-v">v</span><span class="nav-eil">eil</span>
+veil
         </span>
       </a>
 
@@ -116,9 +150,11 @@
 
     </header>
 
-    <main id="viewport" aria-label="PDF document">
-      <!-- Page containers are created dynamically by app.js -->
-    </main>
+    <!-- The viewport is intentionally empty in the HTML. app.js creates
+         a scroll spacer and 7-15 recycled page containers at runtime
+         via virtual scrolling. Only pages near the viewport exist in
+         the DOM at any given time -->
+    <main id="viewport" aria-label="PDF document"></main>
 
     <div id="error-banner" hidden role="alert" aria-live="assertive">
       <span id="error-message"></span>
@@ -147,10 +183,13 @@
        the PDF is loaded or the drop zone is shown. -->
   <div id="app-loader" hidden>
     <div class="app-loader-wordmark">
-      <span class="app-loader-v">v</span><span>eil</span>
+veil
     </div>
   </div>
 
+  <!-- app.js is a module (deferred by default, runs after HTML parsing).
+       sw-register.js is a classic script (runs immediately) so the
+       service worker starts caching resources as early as possible -->
   <script type="module" src="app.js"></script>
   <script src="sw-register.js"></script>
 </body>

@@ -289,14 +289,6 @@ body {
 }
 
 
-.drop-v {
-  position: relative;
-  z-index: 1;
-}
-.drop-eil {
-  position: relative;
-  z-index: 1;
-}
 
 .drop-tagline {
   font-size: var(--text-base);
@@ -546,14 +538,6 @@ body {
 }
 @media (min-width: 700px) {
   .nav-wordmark { font-size: var(--text-lg); }
-}
-.nav-v {
-  position: relative;
-  z-index: 1;
-}
-.nav-eil {
-  position: relative;
-  z-index: 1;
 }
 
 .toolbar-divider {
@@ -1224,9 +1208,6 @@ div.ocr-loading:not(.page-container)::before {
   animation: loader-pulse 1.5s ease-in-out infinite;
 }
 
-.app-loader-v {
-  display: inline-block;
-}
 
 @keyframes loader-pulse {
   0%, 100% { opacity: 0.4; }

@@ -178,14 +178,6 @@ nav.scrolled {
     font-size: var(--text-md); 
   } 
 }
-.nav-v {
-  position: relative;
-  z-index: 1;
-}
-.nav-eil {
-  position: relative;
-  z-index: 1;
-}
 .nav-divider {
   width: 1px;
   height: 14px;
