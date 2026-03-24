@@ -1,22 +1,67 @@
-/* ═══════════════════════════════════════
-   VEIL LANDING — Vanilla JS
-   ═══════════════════════════════════════ */
+/* DESIGN
+   ------
+   * This file powers the landing page interactions: the before/after
+   * slider, the exploded layers animation, the rotating text, and
+   * the page transition to the reader.
+   *
+   * Everything is wrapped in an IIFE (Immediately Invoked Function
+   * Expression): a function that runs immediately and creates a private
+   * scope for all variables inside. Without it, variables like `pos`
+   * and `dragging` would be visible to every other script on the page,
+   * including browser extensions (ad blockers, dark mode tools) that
+   * could accidentally overwrite them. The other JS files (app.js,
+   * ocr.js, etc.) don't need this because they're loaded as ES modules
+   * which have their own private scope by default.
+   *
+   * Key UX decisions:
+   *
+   * - The before/after slider uses direction detection on touch: I
+   *   wait for 4px of movement before deciding if the user is dragging
+   *   horizontally (move the slider) or vertically (scroll the page).
+   *   Without this, horizontal drags on the slider would hijack the
+   *   page scroll on mobile.
+   *
+   * - The exploded layers animation is scroll-driven, not time-based.
+   *   As the user scrolls, the three PDF layers separate to reveal
+   *   the architecture. I use an easeInOut curve so the animation
+   *   An "easing" curve makes the movement start slow, accelerate in
+   *   the middle, and slow down at the end, like a physical object
+   *   with inertia instead of a robotic linear motion.
+   *
+   * - The page transition to the reader uses a CSS overlay that fades
+   *   to the reader's background color. This masks the loading time
+   *   of the reader page, so the user never sees a white flash or an
+   *   empty page.
+   *
+   * - All animations respect prefers-reduced-motion: if the user has
+   *   reduced motion enabled, the rotating text stops cycling, the
+   *   layer animation disables, and the page transition is instant.
+   *
+   * The file follows this flow:
+   *
+   * 1. NAVBAR SCROLL (lines 55-61)
+   * 2. ROTATING TEXT (lines 64-83)
+   * 3. BEFORE/AFTER SLIDER (lines 86-163)
+   * 4. EXPLODED LAYERS (lines 166-399)
+   * 5. PAGE TRANSITION (lines 402-425)
+*/
 
 (function () {
   "use strict";
 
   const isMobile = () => window.innerWidth < 700;
 
-  /* ═══ NAVBAR SCROLL ═══ */
+
+  // --- NAVBAR SCROLL ---
   const nav = document.getElementById("navbar");
   window.addEventListener("scroll", () => {
     nav.classList.toggle("scrolled", window.scrollY > 50);
   }, { passive: true });
 
-  /* ═══ REDUCED MOTION CHECK ═══ */
   const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  /* ═══ ROTATING TEXT ═══ */
+
+  // --- ROTATING TEXT ---
   const WORDS = [
     "histology slides", "research charts", "circuit diagrams",
     "X-ray scans", "architecture plans", "data visualizations",
@@ -37,7 +82,11 @@
     }, 2600);
   }
 
-  /* ═══ BEFORE/AFTER BAR CHARTS ═══ */
+
+  // --- BEFORE/AFTER SLIDER ---
+
+  // Bar chart colors and heights for the demo documents
+  // (veil side shows original colors, "others" side shows inverted)
   const veilColors = ["#e74c3c", "#2ecc71", "#3498db", "#9b59b6", "#f39c12", "#1abc9c"];
   const othersColors = ["#18b3c3", "#d1338e", "#cb6724", "#64a649", "#0c63ed", "#e54363"];
   const heights = [0.6, 0.85, 0.45, 0.72, 0.9, 0.55];
@@ -52,7 +101,7 @@
   buildBars(document.getElementById("veil-bars"), veilColors);
   buildBars(document.getElementById("others-bars"), othersColors);
 
-  /* ═══ BEFORE/AFTER SLIDER ═══ */
+  // Slider position and drag state
   let pos = 50;
   const baContainer = document.getElementById("ba-container");
   const baVeil = document.getElementById("ba-veil");
@@ -86,7 +135,9 @@
   window.addEventListener("mousemove", (e) => { if (dragging) moveSlider(e.clientX); });
   window.addEventListener("mouseup", () => { dragging = false; });
 
-  // Mobile: touch only on slider, with direction detection
+  // Touch: direction detection prevents horizontal slider drags from
+  // hijacking the page scroll. I wait for 4px of movement before
+  // committing to horizontal (move slider) or vertical (scroll page)
   baSlider.addEventListener("touchstart", (e) => {
     touchStartPos = { x: e.touches[0].clientX, y: e.touches[0].clientY };
   }, { passive: true });
@@ -111,7 +162,17 @@
     directionLocked = null;
   });
 
-  /* ═══ EXPLODED LAYERS ═══ */
+
+  // --- EXPLODED LAYERS ---
+
+  /*
+   * The three PDF layers (original, dark mode, protected images) separate
+   * as the user scrolls, revealing the architecture visually. The animation
+   * is scroll-driven: scrollProgress goes from 0 (layers stacked) to 1
+   * (layers fully separated). I apply an easeInOut curve so the movement
+   * feels physical, not linear. Clicking replays the animation over 2
+   * seconds using requestAnimationFrame
+   */
   const layersSection = document.getElementById("layers-section");
   const layersStack = document.getElementById("layers-stack");
   const annotLeft = document.getElementById("annot-left");
@@ -209,7 +270,7 @@
     const sunSize = mob ? 9 : 13;
     const sS = Math.round(imgH * 0.22);
 
-    // Chart bars (original colors — this layer protects them)
+    // Chart bars (original colors, this layer protects them)
     const barColors = ["#e74c3c","#2ecc71","#3498db","#9b59b6","#f39c12","#1abc9c"];
     const barHeights = [0.6, 0.85, 0.45, 0.72, 0.9, 0.55];
     let barsHtml = "";
@@ -258,7 +319,7 @@
     const margin = mob ? "0 12px" : "0 16px";
     const gap = mob ? 4 : 6;
 
-    // Chart (bar graph) — matches before/after section
+    // Chart (bar graph), matches before/after section
     const chartBg = inverted ? "#070709" : "#f8f6f3";
     const barColors = inverted
       ? ["#18b3c3","#d1338e","#cb6724","#64a649","#0c63ed","#e54363"]
@@ -269,7 +330,7 @@
       barsHtml += `<div style="flex:1;height:${barHeights[i]*100}%;background:${barColors[i]};border-radius:1px 1px 0 0;opacity:0.9"></div>`;
     }
 
-    // Landscape image — matches before/after section exactly
+    // Landscape image, matches before/after section exactly
     const bg = inverted
       ? "linear-gradient(180deg,#a45c26,#783114 50%,#572715)"
       : "linear-gradient(180deg,#5ba3d9,#87CEEB 50%,#a8d8ea)";
@@ -325,7 +386,7 @@
   // Initial build
   buildLayers();
 
-  // Rebuild on resize — but only when the viewport width actually changes.
+  // Rebuild on resize, but only when the viewport width actually changes.
   // Pinch-to-zoom on mobile fires resize events without changing innerWidth,
   // which would cause layers to rebuild with incorrect dimensions.
   let resizeTimer;
@@ -337,7 +398,12 @@
     resizeTimer = setTimeout(() => buildLayers(), 100);
   });
 
-  /* ═══ PAGE TRANSITION ═══ */
+  
+  // --- PAGE TRANSITION ---
+
+  // Fade overlay from landing background color to reader background color.
+  // This masks the reader's loading time so the user never sees a white
+  // flash or an empty page between the two
   if (!prefersReducedMotion) {
     const overlay = document.getElementById("page-transition");
     document.querySelectorAll('a[href="reader.html"]').forEach(link => {
