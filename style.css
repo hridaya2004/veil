@@ -1,7 +1,68 @@
-/* ============================================================
-   veil — Smart Dark PDF Reader
-   Design system inherited from landing page.
-   ============================================================ */
+/* DESIGN
+   ------
+   * This stylesheet controls the entire visual experience of the
+   * reader and the drop zone.
+   *
+   * I chose a warm dark palette (amber on near-black) instead of the
+   * typical cold blue-black because extended reading requires comfort.
+   * Pure black (#000) with pure white text causes halation (glowing
+   * edges around letters) on OLED screens. The warm greys (#0a0806,
+   * #1a1510) and cream text (#f5efe2) reduce this while maintaining
+   * high contrast.
+   *
+   * The design system uses CSS custom properties (:root tokens) for
+   * every color, spacing value, radius, and z-index. This ensures
+   * visual consistency and makes theme changes a matter of updating
+   * the :root block without touching any component.
+   *
+   * Key CSS decisions:
+   * - IBM Plex Sans: warm and open proportions that complement the
+   *   amber palette. Technical enough for a developer tool but not
+   *   cold like Inter or geometric like Roboto
+   * - Spacing scale on 4px base (Refactoring UI methodology)
+   * - Selection color is standard blue (Jakob's Law: the user expects
+   *   blue selection, not amber). Amber is only for UI elements
+   * - Focus mode: toolbar transitions with opacity + translateY.
+   *   Scroll does NOT interrupt focus mode (reading is the primary action)
+   * - Mobile: pointer:coarse queries instead of width breakpoints so
+   *   tablets and foldables get the right treatment regardless of
+   *   screen size
+   * - Safari flex selection fix: display:flex + align-items:flex-start
+   *   on .text-layer forces WebKit to shrink-wrap line divs to their
+   *   content width, preventing selection highlight from extending to
+   *   the page edge
+   *
+   * The stylesheet follows this flow:
+   *
+   * 1. RESET (lines 65-73)
+   * 2. DESIGN TOKENS (lines 76-170)
+   * 3. BASE (lines 173-193)
+   * 4. PAGE TRANSITION (lines 196-216)
+   * 5. DROP ZONE (lines 219-565)
+   *    Includes: veil transition layers, wordmark, tagline,
+   *    browse button, focus styles, high contrast
+   * 6. TOOLBAR (lines 568-787)
+   *    Floating pill, navigation, zoom, dark mode toggle, filename
+   * 7. READER LAYOUT (lines 790-797)
+   * 8. VIEWPORT (lines 800-832)
+   * 9. PAGE CONTAINER (lines 835-870)
+   * 10. DARK MODE FILTER (lines 873-888)
+   * 11. TEXT LAYER (lines 891-978)
+   *     Selection, OCR image regions, vertical OCR layer
+   * 12. LINK ANNOTATIONS (lines 981-1000)
+   * 13. PAGE NUMBER LABEL (lines 1003-1007)
+   * 14. ERROR BANNER (lines 1010-1069)
+   * 15. EXPORT PROGRESS (lines 1072-1129)
+   * 16. OCR LOADING INDICATOR (lines 1132-1228)
+   * 17. ACCESSIBILITY (lines 1231-1264)
+   *     prefers-reduced-motion, prefers-contrast, focus-visible
+   * 18. UTILITIES (lines 1267-1285)
+   * 19. MOBILE LANDSCAPE (lines 1288-1316)
+   * 20. APP SHELL LOADER (lines 1319-1353)
+*/
+
+
+/* --- RESET --- */
 
 *,
 *::before,
@@ -11,9 +72,12 @@
   box-sizing: border-box;
 }
 
+
+/* --- DESIGN TOKENS --- */
+
 :root {
   /* Warm dark palette (from landing page design system) */
-  --bg-deep: #0a0806;          /* App background — very dark warm */
+  --bg-deep: #0a0806;          /* App background, very dark warm */
   --bg-surface: #1a1510;       /* Cards, elevated surfaces */
   --bg-elevated: #241e18;      /* Hover states, toolbar */
   --text-primary: #f5efe2;     /* Cream, not pure white */
@@ -59,6 +123,7 @@
   --space-10: 40px;
   --space-12: 48px;
   --space-16: 64px;
+
   /* Typography scale */
   --text-2xs: 11px;
   --text-xs: 12px;
@@ -83,7 +148,7 @@
   --leading-normal: 1.6;
   --leading-relaxed: 1.7;
 
-  /* Durations & easing */
+  /* Durations and easing */
   --duration-fast: 0.2s;
   --duration-medium: 0.3s;
   --duration-slow: 0.4s;
@@ -104,10 +169,20 @@
   --z-transition: 999;
 }
 
+
+/* --- BASE --- */
+
 html {
   background: var(--bg-deep);
 }
 
+/*
+ * Font stack: IBM Plex Sans is the primary (loaded from Google Fonts).
+ * If it fails (offline on first visit, CDN down), the fallbacks ensure
+ * the user sees their OS native font instead of a generic serif:
+ * -apple-system (Safari), BlinkMacSystemFont (Chrome on Mac),
+ * Segoe UI (Windows), system-ui (universal), sans-serif (last resort)
+ */
 body {
   font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: var(--bg-deep);
@@ -117,9 +192,8 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ============================================================
-   Page Transition — amber glow
-   ============================================================ */
+
+/* --- PAGE TRANSITION --- */
 
 .page-transition-overlay {
   position: fixed;
@@ -141,9 +215,8 @@ body {
   }
 }
 
-/* ============================================================
-   Drop Zone
-   ============================================================ */
+
+/* --- DROP ZONE --- */
 
 #drop-zone {
   position: fixed;
@@ -163,8 +236,13 @@ body {
   #drop-zone { cursor: default; }
 }
 
-/* Drag-over: the top veil layer lightens subtly to acknowledge
-   the drag, and a dashed border confirms "drop here". */
+/*
+ * Drag-over feedback (Jakob's Law): the dashed border is a universal
+ * pattern that every user recognizes as "drop here". The top veil layer
+ * lightens subtly to acknowledge the drag. On touch devices (pointer:
+ * coarse) the dashed border is hidden because drag-and-drop doesn't
+ * exist on mobile
+ */
 #drop-zone.drag-over .veil-layer-1 {
   background: var(--drag-over-bg);
 }
@@ -189,11 +267,15 @@ body {
   border-color: rgba(212, 163, 115, 0.4);
 }
 
-/* --- veil transition layers ---
-   Three panels that slide right when a PDF loads, creating
-   a parallax curtain-opening effect. Each layer is a different
-   shade of the warm palette, moving at a different speed.
-   The reader is already rendering behind them. */
+
+/* --- VEIL TRANSITION LAYERS --- */
+
+/*
+ * Three panels that slide right when a PDF loads, creating a
+ * parallax curtain-opening effect. Each layer is a different shade
+ * of the warm palette, moving at a different speed. The reader is
+ * already rendering behind them so the transition masks load time
+ */
 
 .veil-layer {
   position: absolute;
@@ -257,7 +339,8 @@ body {
   }
 }
 
-/* --- Wordmark --- */
+
+/* --- WORDMARK --- */
 
 .drop-hero {
   display: flex;
@@ -306,7 +389,7 @@ body {
   .drop-tagline-mobile { display: none; }
 }
 
-/* Primary CTA — mobile only. Same style as landing page .cta-btn */
+/* Primary CTA, mobile only. Same style as landing page .cta-btn */
 .drop-browse-btn {
   display: inline-flex;
   align-items: center;
@@ -328,7 +411,7 @@ body {
   background: var(--accent-active);
   transform: scale(0.97);
 }
-/* Hide on mouse devices — "click anywhere" replaces the button */
+/* Hide on mouse devices, "click anywhere" replaces the button */
 @media (pointer: fine) {
   .drop-browse-btn { display: none; }
 }
@@ -417,7 +500,7 @@ body {
 }
 
 
-/* --- "What is veil?" link --- */
+/* --- WHAT IS VEIL LINK --- */
 
 .drop-about {
   position: fixed;
@@ -437,7 +520,8 @@ body {
   .drop-about { left: 48px; }
 }
 
-/* --- Focus styles --- */
+
+/* --- FOCUS STYLES --- */
 
 #drop-zone:focus-visible {
   outline: none;
@@ -463,7 +547,8 @@ body {
   outline-offset: 3px;
 }
 
-/* --- Prefers contrast: more --- */
+
+/* --- DROP ZONE HIGH CONTRAST --- */
 
 @media (prefers-contrast: more) {
   .drop-tagline { color: var(--text-primary); }
@@ -479,9 +564,8 @@ body {
   }
 }
 
-/* ============================================================
-   Toolbar — Floating pill with backdrop blur
-   ============================================================ */
+
+/* --- TOOLBAR --- */
 
 #toolbar {
   position: fixed;
@@ -508,7 +592,14 @@ body {
   }
 }
 
-/* Focus mode: toolbar hidden */
+/*
+ * Focus mode: the toolbar fades out and slides up after 1.5 seconds
+ * of inactivity (2.5s on mobile). Scroll does NOT interrupt focus
+ * mode because reading (scrolling through pages) is the primary
+ * action and the toolbar should not keep reappearing while the
+ * user is reading. The toolbar returns on mouse near the top edge
+ * (desktop) or tap in the top zone (mobile)
+ */
 #toolbar.toolbar-hidden {
   opacity: 0;
   transform: translateX(-50%) translateY(-20px);
@@ -526,7 +617,7 @@ body {
 }
 .toolbar-logo:hover { opacity: 0.7; }
 
-/* Double-layer wordmark — shared between reader toolbar and landing navbar */
+/* Double-layer wordmark, shared between reader toolbar and landing navbar */
 .nav-wordmark {
   position: relative;
   font-family: 'IBM Plex Sans', sans-serif;
@@ -570,8 +661,10 @@ body {
   .toolbar-zoom-level { display: inline; }
 }
 
-/* Hide filename and its adjacent divider on small screens.
-   The browser tab title already shows "veil - document.pdf". */
+/*
+ * Hide filename and its adjacent divider on small screens.
+ * The browser tab title already shows "veil - document.pdf"
+ */
 @media (max-width: 699px) {
   .toolbar-filename,
   .toolbar-filename-divider {
@@ -693,9 +786,8 @@ body {
   }
 }
 
-/* ============================================================
-   Reader Layout
-   ============================================================ */
+
+/* --- READER LAYOUT --- */
 
 #reader {
   display: flex;
@@ -704,9 +796,8 @@ body {
   background: var(--bg-deep);
 }
 
-/* ============================================================
-   Viewport (Continuous Scroll)
-   ============================================================ */
+
+/* --- VIEWPORT --- */
 
 #viewport {
   flex: 1;
@@ -718,7 +809,7 @@ body {
      context that blocks pointer events on the toolbar. */
   z-index: var(--z-viewport);
 
-  /* Native scrollbar — visible on desktop & Android */
+  /* Native scrollbar, visible on desktop and Android */
   scrollbar-width: thin;
   scrollbar-color: rgba(212, 163, 115, 0.25) transparent;
 }
@@ -741,10 +832,15 @@ body {
 }
 
 
-/* ============================================================
-   Page Container
-   ============================================================ */
+/* --- PAGE CONTAINER --- */
 
+/*
+ * The dark background (#1e1e1e) on both page-container and page-canvas
+ * prevents a white flash when pages are evicted and re-rendered during
+ * scroll. Without it, the canvas backing store is released (width=0)
+ * and the browser shows the default transparent/white background for a
+ * frame before the new render completes
+ */
 .page-container {
   position: relative;
   box-shadow: var(--shadow-page);
@@ -773,18 +869,47 @@ body {
   display: block;
 }
 
-/* ============================================================
-   Dark Mode Filter
-   ============================================================ */
 
+/* --- DARK MODE FILTER --- */
+
+/*
+ * I chose 0.86 instead of 1.0 for the inversion strength because
+ * full inversion produces harsh pure black (#000) and pure white
+ * (#fff) which are uncomfortable for extended reading. At 0.86,
+ * a white PDF background becomes a soft dark grey (~#242424) and
+ * black text becomes an off-white (~#dbdbdb). The hue-rotate(180deg)
+ * corrects the color shift that invert alone would cause.
+ *
+ * This filter is GPU-accelerated (applied by the browser's compositor,
+ * not by JavaScript) so it costs zero main-thread time
+ */
 .page-canvas.dark-active {
   filter: invert(0.86) hue-rotate(180deg);
 }
 
-/* ============================================================
-   Text Layer
-   ============================================================ */
 
+/* --- TEXT LAYER --- */
+
+/*
+ * The text layer sits on top of the canvas with invisible text
+ * (color: transparent) positioned exactly over the rendered words.
+ * The user sees the canvas but selects the invisible spans.
+ *
+ * I use display:flex + align-items:flex-start on the text layer
+ * so each .text-line div shrinks to its content width. Without
+ * this, Safari desktop extends the selection highlight to the
+ * full page width because block-level divs inherit the parent's
+ * width and WebKit paints selection on the entire block box.
+ *
+ * pointer-events: none on .text-line and auto on spans ensures
+ * touch devices target the actual text spans, not the wrapper div.
+ * This is a hardening measure for iOS selection behavior.
+ *
+ * white-space: pre on spans preserves trailing spaces that CSS
+ * would normally collapse inside inline-block elements. Without
+ * it, "the " followed by "quick" would copy as "thequick" because
+ * the space at the end of the inline-block gets eaten
+ */
 .text-layer {
   position: absolute;
   top: 0;
@@ -814,15 +939,23 @@ body {
   white-space: pre;
 }
 
+/*
+ * Selection color is standard blue, not amber. Jakob's Law: the user
+ * expects blue selection because every other app uses blue. Amber
+ * is reserved for UI elements (buttons, borders, accents). Using
+ * amber for selection would feel "wrong" even if it matched the palette
+ */
 .text-layer span::selection,
 .text-layer br::selection,
 .text-line::selection {
   background: var(--selection);
 }
 
-/* Darker selection for text inside images — images typically have
-   light/white backgrounds where the standard selection is
-   too faint to see. */
+/*
+ * Darker selection for text inside images. Images typically have
+ * light/white backgrounds where the standard selection is too
+ * faint to see
+ */
 .ocr-image-region span::selection {
   background: rgba(107, 138, 205, 0.35);
 }
@@ -844,9 +977,8 @@ body {
   pointer-events: auto;
 }
 
-/* ============================================================
-   Link Annotations
-   ============================================================ */
+
+/* --- LINK ANNOTATIONS --- */
 
 .link-annot {
   display: block;
@@ -867,17 +999,15 @@ body {
   background: rgba(212, 163, 115, 0.12);
 }
 
-/* ============================================================
-   Page Number Label
-   ============================================================ */
+
+/* --- PAGE NUMBER LABEL --- */
 
 .page-label {
   display: none;
 }
 
-/* ============================================================
-   Error Banner
-   ============================================================ */
+
+/* --- ERROR BANNER --- */
 
 #error-banner,
 #info-banner {
@@ -938,13 +1068,8 @@ body {
   opacity: 1;
 }
 
-/* ============================================================
-   iOS Export Warning
-   ============================================================ */
 
-/* ============================================================
-   Export Progress
-   ============================================================ */
+/* --- EXPORT PROGRESS --- */
 
 #export-progress {
   position: fixed;
@@ -1003,19 +1128,24 @@ body {
   opacity: 1;
 }
 
-/* ============================================================
-   OCR Loading Indicator
 
-   A warm amber light sweeps along the perimeter of a page or
-   image when the user tries to select text before OCR finishes.
-   The effect is triggered on-demand (not shown until the user
-   actually attempts interaction) and fades out gracefully once
-   the text becomes selectable.
+/* --- OCR LOADING INDICATOR --- */
 
-   Uses @property to animate a CSS custom property (--ocr-angle)
-   inside a conic-gradient — the only way to get smooth rotation
-   of a gradient without JavaScript animation frames.
-   ============================================================ */
+/*
+ * A warm amber light sweeps along the perimeter of a page or image
+ * when the user tries to select text before OCR finishes. The key
+ * UX insight: I show this only on-demand (when the user actually
+ * tries to interact), not automatically. If the OCR finishes before
+ * the user touches the page, they never see a loading indicator at
+ * all. The system works silently in the background.
+ *
+ * The technique uses @property to register --ocr-angle as an
+ * animatable custom property. This is the only way to smoothly
+ * rotate a CSS gradient without JavaScript animation frames.
+ * The conic-gradient creates a moving highlight, and mask-composite
+ * (below) subtracts the content box to leave only a thin perimeter
+ * ring of light
+ */
 
 @property --ocr-angle {
   syntax: '<angle>';
@@ -1041,8 +1171,8 @@ body {
     transparent 24%
   );
   /* Mask trick: the gradient fills the entire area, but the mask
-     subtracts the content box — leaving only a thin perimeter ring.
-     The padding controls the ring thickness. */
+     subtracts the content box, leaving only a thin perimeter ring.
+     The padding controls the ring thickness */
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);
@@ -1089,7 +1219,7 @@ div.ocr-loading:not(.page-container)::before {
   }
 }
 
-/* Respect user motion preferences — toolbar, banners */
+/* Respect user motion preferences, toolbar, banners */
 @media (prefers-reduced-motion: reduce) {
   #toolbar { transition: none; }
   #info-banner { transition: none; }
@@ -1097,9 +1227,8 @@ div.ocr-loading:not(.page-container)::before {
   .link-annot { transition: none; }
 }
 
-/* ============================================================
-   High Contrast
-   ============================================================ */
+
+/* --- ACCESSIBILITY --- */
 
 @media (prefers-contrast: more) {
   #toolbar {
@@ -1134,14 +1263,15 @@ div.ocr-loading:not(.page-container)::before {
   }
 }
 
-/* ============================================================
-   Utilities
-   ============================================================ */
 
-/* Visually hidden but accessible — required for iOS Safari which
-   refuses to open file pickers for inputs with the HTML hidden attribute.
-   The input stays in the layout (technically visible to WebKit) but
-   is invisible and takes no space. */
+/* --- UTILITIES --- */
+
+/*
+ * Visually hidden but accessible, required for iOS Safari which
+ * refuses to open file pickers for inputs with the HTML hidden
+ * attribute. The input stays in the layout (technically visible
+ * to WebKit) but is invisible and takes no space
+ */
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1154,18 +1284,19 @@ div.ocr-loading:not(.page-container)::before {
   border: 0;
 }
 
-/* ============================================================
-   Mobile Landscape — Fit-to-Width Mode
 
-   On phone screens held sideways, the viewport is very short
-   (~350px) but wide. Fit-to-page would shrink text to illeggible
-   size. Instead, we fit to width and let the user scroll vertically
-   within each page — turning landscape into a natural magnifier.
+/* --- MOBILE LANDSCAPE --- */
 
-   Tighter padding and reduced gap maximize the precious vertical
-   space. The toolbar hides on scroll down via JS (see app.js
-   isMobileLandscape + scroll listener).
-   ============================================================ */
+/*
+ * On phone screens held sideways, the viewport is very short
+ * (~350px) but wide. Fit-to-page would shrink text to illegible
+ * size. Instead, I fit to width and let the user scroll vertically
+ * within each page, turning landscape into a natural magnifier.
+ *
+ * Tighter padding and reduced gap maximize the precious vertical
+ * space. The toolbar is completely hidden in phone landscape
+ * (see app.js isPhoneLandscape)
+ */
 
 /* Phone landscape: compact shadow */
 @media (pointer: coarse) and (orientation: landscape) and (max-height: 500px) {
@@ -1174,20 +1305,23 @@ div.ocr-loading:not(.page-container)::before {
   }
 }
 
-/* Tablet landscape: same fit-to-width rendering as phone,
-   but toolbar stays visible and more vertical space available */
+/*
+ * Tablet landscape: same fit-to-width rendering as phone,
+ * but toolbar stays visible and more vertical space available
+ */
 @media (pointer: coarse) and (orientation: landscape) and (min-height: 501px) {
   .page-container {
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
   }
 }
 
-/* ============================================================
-   App Shell Loader
 
-   Shown while IndexedDB deserializes the saved PDF on return
-   visits. Hardcoded in HTML for instant display from precache.
-   ============================================================ */
+/* --- APP SHELL LOADER --- */
+
+/*
+ * Shown while IndexedDB deserializes the saved PDF on return
+ * visits. Hardcoded in HTML for instant display from precache
+ */
 
 #app-loader {
   position: fixed;
