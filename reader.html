@@ -151,11 +151,6 @@
   </div>
 
   <script type="module" src="app.js"></script>
-  <script>
-    // Register service worker (non-blocking, outside the module)
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    }
-  </script>
+  <script src="sw-register.js"></script>
 </body>
 </html>

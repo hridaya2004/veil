@@ -79,6 +79,7 @@ const PRECACHE_URLS = [
   './style.css',
   './landing.css',
   './landing.js',
+  './sw-register.js',
   './manifest.json',
   './icon/favicon.svg',
   './icon/manifest-icon.png',
