@@ -1,4 +1,63 @@
-/* ═══ DESIGN TOKENS ═══ */
+/* DESIGN
+   ------
+   * This stylesheet controls the landing page. The visual identity
+   * is warm and organic: amber accents on a dark brown base (#2a1f1a),
+   * not the cold blue-black typical of developer tools. The palette
+   * was inherited from a personal design system ("coffee and sand")
+   * and adapted for the dark theme.
+   *
+   * The page was originally built in React, then converted to vanilla
+   * HTML/CSS/JS because React contradicted the project's philosophy
+   * of "pure engineering, no black boxes". The conversion eliminated
+   * ~42KB of runtime and made the source directly inspectable.
+   *
+   * Key decisions:
+   * - The before/after slider works by layering two identical document
+   *   mockups on top of each other. The veil side is clipped with CSS
+   *   clip-path (a property that cuts the visible area of an element
+   *   to a shape). Dragging the slider changes the clip percentage,
+   *   revealing more or less of each side
+   * - The rotating text in the hero cycles through 15 items that each
+   *   represent a different user segment (histology slides for medical
+   *   students, research charts for academics, circuit diagrams for
+   *   engineers). Every visitor should recognize their own use case
+   * - The exploded layers animation is entirely scroll-driven (no
+   *   timers). CSS handles the visual properties, JS calculates the
+   *   scroll progress and sets inline styles
+   * - The navbar uses backdrop-filter:blur (a CSS property that blurs
+   *   everything behind the element, creating a frosted glass effect).
+   *   Browsers that don't support it get a solid background fallback
+   * - All animations respect prefers-reduced-motion: the rotating
+   *   text freezes, the layer animation stops, transitions become
+   *   instant. This is a system setting that users with vestibular
+   *   disorders or motion sensitivity enable in their OS preferences
+   * - High contrast mode (prefers-contrast:more) increases text
+   *   opacity and border visibility for users who need stronger
+   *   visual separation
+   *
+   * The stylesheet follows this flow:
+   *
+   * 1. DESIGN TOKENS (lines 59-141)
+   * 2. RESET AND BASE (lines 144-158)
+   * 3. UTILITY (lines 161-190)
+   * 4. NAVBAR (lines 193-293)
+   * 5. HERO (lines 296-430)
+   * 6. BEFORE/AFTER (lines 433-737)
+   * 7. EXPLODED LAYERS (lines 740-878)
+   * 8. OCR (lines 881-979)
+   * 9. WORKFLOW (lines 982-1069)
+   * 10. DONATE (lines 1072-1134)
+   * 11. FOOTER (lines 1137-1185)
+   * 12. LAYER DOCUMENT ELEMENTS (lines 1188-1240)
+   * 13. FOCUS STYLES (lines 1243-1253)
+   * 14. PAGE TRANSITION (lines 1256-1279)
+   * 15. REDUCED MOTION (lines 1282-1323)
+   * 16. HIGH CONTRAST (lines 1326-1349)
+*/
+
+
+/* --- DESIGN TOKENS --- */
+
 :root {
   /* Palette */
   --bg-base: #2a1f1a;
@@ -74,14 +133,16 @@
   --leading-relaxed: 1.65;
   --leading-loose: 1.7;
 
-  /* Durations & easing */
+  /* Durations and easing */
   --duration-fast: 0.2s;
   --duration-medium: 0.3s;
   --duration-slow: 0.4s;
   --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* ═══ RESET & BASE ═══ */
+
+/* --- RESET AND BASE --- */
+
 *, *::before, *::after { 
   margin: 0; 
   padding: 0; 
@@ -96,7 +157,9 @@ body {
   overflow-x: hidden;
 }
 
-/* ═══ UTILITY ═══ */
+
+/* --- UTILITY --- */
+
 .skip-link {
   position: absolute;
   top: -100px;
@@ -120,14 +183,22 @@ body {
   .mobile-only { display: none !important; }
 }
 
-/* Slash separators — reduced opacity + breathing room */
+/* Slash separators, reduced opacity + breathing room */
 .sep {
   opacity: 0.35;
   margin: 0 0.35em;
 }
 
 
-/* ═══ NAVBAR ═══ */
+/* --- NAVBAR --- */
+
+/*
+ * Floating pill navbar centered at the top. The backdrop-filter
+ * creates a frosted glass effect by blurring the page content
+ * behind the navbar. saturate(1.4) makes the blurred colors
+ * slightly more vivid so they don't look washed out.
+ * -webkit- prefix needed for Safari compatibility
+ */
 nav {
   position: fixed;
   top: 18px;
@@ -145,6 +216,8 @@ nav {
   border: 1px solid rgba(212,163,115,0.07);
   transition: all 0.4s var(--ease-spring);
 }
+
+/* Compact on scroll: smaller padding, tighter gap, more opaque */
 nav.scrolled {
   top: 10px;
   padding: var(--space-1) var(--space-4);
@@ -219,7 +292,9 @@ nav.scrolled {
 }
 }
 
-/* ═══ HERO ═══ */
+
+/* --- HERO --- */
+
 .hero {
   min-height: 100vh;
   display: flex;
@@ -354,7 +429,16 @@ h1 {
   .hero-meta p { font-size: var(--text-sm); }
 }
 
-/* ═══ BEFORE/AFTER ═══ */
+
+/* --- BEFORE/AFTER --- */
+
+/*
+ * Two identical document mockups layered on top of each other.
+ * The "standard" side (inverted colors, broken images) is the
+ * background. The veil side (correct colors, protected images)
+ * is clipped over it using clip-path. The slider moves the
+ * clip boundary so the user can drag to compare
+ */
 .ba-wrap {
   margin-top: var(--space-10);
   width: 100%;
@@ -368,10 +452,19 @@ h1 {
 .ba-container {
   position: relative;
   width: 100%;
-  /* Fallback for browsers without aspect-ratio (Safari < 15) */
+  /*
+   * Aspect ratio 7:5 for older Safari (< 15) that doesn't support
+   * the aspect-ratio property. The trick: padding-bottom as a
+   * percentage is calculated relative to the element's WIDTH, not
+   * its height (counterintuitive but it's in the CSS spec). So if
+   * the element is 300px wide, padding-bottom:140% creates 420px
+   * of padding (300 x 1.4 = 420). With height:0 the only visible
+   * height is the padding, giving a 300x420 box, which is exactly
+   * the 7:5 ratio (420 / 300 = 1.4). This hack has worked on every
+   * browser since 2012
+   */
   height: 0;
   padding-bottom: 140%;
-  /* 7/5 = 1.4 */;
   border-radius: var(--radius-lg);
   overflow: hidden;
   cursor: ew-resize;
@@ -643,7 +736,16 @@ h1 {
   justify-content: center;
 }
 
-/* ═══ EXPLODED LAYERS ═══ */
+
+/* --- EXPLODED LAYERS --- */
+
+/*
+ * Three PDF layers (original, dark inverted, protected images)
+ * that separate as the user scrolls. The visual positions are
+ * set by landing.js via inline styles based on scroll progress.
+ * CSS handles the appearance (shadows, borders, perspective),
+ * JS handles the animation math
+ */
 .layers-section {
   padding: 50px var(--space-4) var(--space-10);
   max-width: 900px;
@@ -775,7 +877,12 @@ h1 {
   } 
 }
 
-/* ═══ OCR ═══ */
+
+/* --- OCR --- */
+
+/* OCR on images inside native PDFs is a feature no other web PDF
+ * reader offers. The card is visually prominent to communicate this
+ * differentiator clearly */
 .ocr-section {
   padding: var(--space-10) var(--space-5);
   max-width: 680px;
@@ -871,7 +978,9 @@ h1 {
 }
 }
 
-/* ═══ WORKFLOW ═══ */
+
+/* --- WORKFLOW --- */
+
 .workflow-section {
   padding: var(--space-5) var(--space-5) var(--space-10);
   max-width: 680px;
@@ -959,7 +1068,9 @@ h1 {
   .wf-desc { font-size: var(--text-base); }
 }
 
-/* ═══ DONATE ═══ */
+
+/* --- DONATE --- */
+
 .donate-section {
   padding: var(--space-10) var(--space-5);
   position: relative;
@@ -1022,7 +1133,9 @@ h1 {
   transform: scale(0.97);
 }
 
-/* ═══ FOOTER ═══ */
+
+/* --- FOOTER --- */
+
 footer {
   padding: var(--space-6) var(--space-5) var(--space-8);
   text-align: center;
@@ -1071,7 +1184,9 @@ footer {
 .footer-credits a:hover { color: var(--accent); }
 .footer-credits a:active { color: #8a6a42; }
 
-/* ═══ LAYER DOCUMENT ELEMENTS (built by JS) ═══ */
+
+/* --- LAYER DOCUMENT ELEMENTS (BUILT BY JS) --- */
+
 .doc-layer {
   position: absolute;
   left: 0;
@@ -1124,7 +1239,9 @@ footer {
   transition: none;
 }
 
-/* ═══ FOCUS STYLES ═══ */
+
+/* --- FOCUS STYLES --- */
+
 .nav-link:focus-visible, .footer-credits a:focus-visible {
   outline: 2px solid rgba(212,163,115,0.6);
   outline-offset: 3px;
@@ -1135,7 +1252,15 @@ footer {
   outline-offset: 3px;
 }
 
-/* ═══ PAGE TRANSITION ═══ */
+
+/* --- PAGE TRANSITION --- */
+
+/*
+ * Full-screen overlay that fades from the landing background color
+ * to the reader background color when the user clicks "Start reading".
+ * This masks the reader's loading time so the user never sees a
+ * white flash or a half-loaded page between the two
+ */
 .page-transition-overlay {
   position: fixed;
   inset: 0;
@@ -1153,7 +1278,16 @@ footer {
   background: #241e18;
 }
 
-/* ═══ REDUCED MOTION ═══ */
+
+/* --- REDUCED MOTION --- */
+
+/*
+ * Users with vestibular disorders or motion sensitivity enable
+ * "Reduce motion" in their OS accessibility settings. This media
+ * query detects that preference and disables all animations:
+ * transitions become near-instant (0.01ms), the rotating text
+ * stops cycling, and the page transition overlay disappears
+ */
 @media (prefers-reduced-motion: reduce) {
   /* Kill smooth scroll */
   html { scroll-behavior: auto; }
@@ -1188,7 +1322,9 @@ footer {
   .layers-stack { cursor: default; }
 }
 
-/* ═══ HIGH CONTRAST ═══ */
+
+/* --- HIGH CONTRAST --- */
+
 @media (prefers-contrast: more) {
   /* Text */
   .hero-sub { color: rgba(245,239,226,0.7); }
