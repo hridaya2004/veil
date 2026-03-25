@@ -110,18 +110,18 @@
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (lines 2340-2533)
+   * 22. MULTI-COLUMN HELPERS (lines 2341-2534)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (lines 2536-2639)
-   * 24. DARK MODE LOGIC (lines 2642-2675)
-   * 25. CURRENT PAGE TRACKING (lines 2678-2707)
-   * 26. TOGGLE BUTTON STATE (lines 2710-2735)
-   * 27. NAVIGATION (lines 2738-2838)
-   * 28. EVENT LISTENERS (lines 2841-3053)
+   * 23. LINK ANNOTATION LAYER (lines 2557-2660)
+   * 24. DARK MODE LOGIC (lines 2663-2696)
+   * 25. CURRENT PAGE TRACKING (lines 2699-2728)
+   * 26. TOGGLE BUTTON STATE (lines 2731-2756)
+   * 27. NAVIGATION (lines 2759-2859)
+   * 28. EVENT LISTENERS (lines 2862-3074)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (lines 3056-3178)
-   * 30. RESIZE (lines 3181-3245)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (lines 3248-3308)
+   * 29. ZOOM (lines 3077-3199)
+   * 30. RESIZE (lines 3202-3266)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (lines 3269-3329)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -2337,6 +2337,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   }
 }
 
+
 // --- MULTI-COLUMN HELPERS (only used when columns are detected) ---
 
 /*
@@ -2451,23 +2452,43 @@ function detectColumnGroupsFromLines(lines) {
  * contaminate each other's vertical positioning.
  */
 function buildLinesIntoContainer(container, lines, measureCtx, spaceAdvance, dpr) {
-  let prevBottom = 0;
-
-  for (const rawLine of lines) {
+  // Pre-process: sort and merge each line, compute top and height
+  const processed = lines.map(rawLine => {
     rawLine.sort((a, b) => a.left - b.left);
     const line = mergePunctuation(rawLine);
+    const lt = line[0].top;
+    const lh = Math.max(...line.map(it => it.height));
+    return { line, lt, lh };
+  });
+
+  let prevBottom = 0;
+
+  for (let idx = 0; idx < processed.length; idx++) {
+    const { line, lt, lh } = processed[idx];
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
 
-    const lt = line[0].top;
-    const lh = Math.max(...line.map(it => it.height));
-
     const vGap = Math.max(0, lt - prevBottom);
-    lineDiv.style.paddingTop = vGap + 'px';
-    lineDiv.style.height = (lh + vGap) + 'px';
 
-    prevBottom = lt + lh;
+    // Extend each line's box to reach the next line, eliminating
+    // dead space between rows. Without this, moving the cursor
+    // even 1px below a line drops into a void and the browser
+    // jumps the selection to a distant paragraph. With it, the
+    // user must deliberately reach the next line to select it.
+    // The result feels intentional: the selection follows the
+    // reader's pace instead of racing ahead of it.
+    let extendedLh = lh;
+    if (idx + 1 < processed.length) {
+      const nextTop = processed[idx + 1].lt;
+      const gapBelow = nextTop - (lt + lh);
+      if (gapBelow > 0) extendedLh = lh + gapBelow;
+    }
+
+    lineDiv.style.paddingTop = vGap + 'px';
+    lineDiv.style.height = (extendedLh + vGap) + 'px';
+
+    prevBottom = lt + extendedLh;
 
     let cursor = 0;
     let prevStr = '';
