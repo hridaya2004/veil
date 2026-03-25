@@ -34,31 +34,32 @@
    *
    * The stylesheet follows this flow:
    *
-   * 1. RESET (lines 65-73)
-   * 2. DESIGN TOKENS (lines 76-170)
-   * 3. BASE (lines 173-193)
-   * 4. PAGE TRANSITION (lines 196-216)
-   * 5. DROP ZONE (lines 219-565)
+   * 1. RESET (lines 66-74)
+   * 2. DESIGN TOKENS (lines 77-171)
+   * 3. BASE (lines 174-194)
+   * 4. PAGE TRANSITION (lines 197-217)
+   * 5. DROP ZONE (lines 220-566)
    *    Includes: veil transition layers, wordmark, tagline,
    *    browse button, focus styles, high contrast
-   * 6. TOOLBAR (lines 568-787)
+   * 6. TOOLBAR (lines 569-788)
    *    Floating pill, navigation, zoom, dark mode toggle, filename
-   * 7. READER LAYOUT (lines 790-797)
-   * 8. VIEWPORT (lines 800-832)
-   * 9. PAGE CONTAINER (lines 835-870)
-   * 10. DARK MODE FILTER (lines 873-888)
-   * 11. TEXT LAYER (lines 891-978)
-   *     Selection, OCR image regions, vertical OCR layer
-   * 12. LINK ANNOTATIONS (lines 981-1000)
-   * 13. PAGE NUMBER LABEL (lines 1003-1007)
-   * 14. ERROR BANNER (lines 1010-1069)
-   * 15. EXPORT PROGRESS (lines 1072-1129)
-   * 16. OCR LOADING INDICATOR (lines 1132-1228)
-   * 17. ACCESSIBILITY (lines 1231-1264)
+   * 7. READER LAYOUT (lines 791-798)
+   * 8. VIEWPORT (lines 801-833)
+   * 9. PAGE CONTAINER (lines 836-871)
+   * 10. DARK MODE FILTER (lines 874-889)
+   * 11. TEXT LAYER (lines 892-998)
+   *     Selection, multi-column flex wrapper, OCR image regions,
+   *     vertical OCR layer
+   * 12. LINK ANNOTATIONS (lines 1001-1020)
+   * 13. PAGE NUMBER LABEL (lines 1023-1027)
+   * 14. ERROR BANNER (lines 1030-1089)
+   * 15. EXPORT PROGRESS (lines 1092-1149)
+   * 16. OCR LOADING INDICATOR (lines 1152-1248)
+   * 17. ACCESSIBILITY (lines 1251-1284)
    *     prefers-reduced-motion, prefers-contrast, focus-visible
-   * 18. UTILITIES (lines 1267-1285)
-   * 19. MOBILE LANDSCAPE (lines 1288-1316)
-   * 20. APP SHELL LOADER (lines 1319-1353)
+   * 18. UTILITIES (lines 1287-1305)
+   * 19. MOBILE LANDSCAPE (lines 1308-1336)
+   * 20. APP SHELL LOADER (lines 1339-1373)
 */
 
 
@@ -919,6 +920,25 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+}
+
+/*
+ * Multi-column layout: flex-row wrapper keeps columns side by side
+ * entirely in flow. No position:absolute, so the browser produces
+ * smooth unbroken selection across header and columns.
+ */
+.columns-wrapper {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.text-column {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  flex-shrink: 0;
 }
 
 .text-line {

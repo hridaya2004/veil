@@ -85,38 +85,43 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 191-278)
-   * 2. STATE (lines 281-311)
-   * 3. DOM REFERENCES (lines 314-363)
-   * 4. FOCUS MODE (lines 366-527)
-   * 5. ERROR DISPLAY (lines 530-587)
-   * 6. SESSION PERSISTENCE (lines 590-855)
-   * 7. FILE HANDLING (lines 858-901)
-   * 8. PDF LOADING (lines 904-982)
-   * 9. SCANNED DOCUMENT DETECTION (lines 985-1045)
-   * 10. OCR LOADING INDICATOR (lines 1048-1280)
-   * 11. CLEANUP (lines 1283-1292)
-   * 12. SCALE CALCULATION (lines 1295-1321)
-   * 13. VIRTUAL SCROLLING (lines 1324-1711)
+   * 1. CONSTANTS (lines 196-283)
+   * 2. STATE (lines 286-316)
+   * 3. DOM REFERENCES (lines 319-368)
+   * 4. FOCUS MODE (lines 371-532)
+   * 5. ERROR DISPLAY (lines 535-592)
+   * 6. SESSION PERSISTENCE (lines 595-860)
+   * 7. FILE HANDLING (lines 863-906)
+   * 8. PDF LOADING (lines 909-987)
+   * 9. SCANNED DOCUMENT DETECTION (lines 990-1050)
+   * 10. OCR LOADING INDICATOR (lines 1053-1285)
+   * 11. CLEANUP (lines 1288-1297)
+   * 12. SCALE CALCULATION (lines 1300-1326)
+   * 13. VIRTUAL SCROLLING (lines 1329-1726)
    *     Page geometry, container pool, reconciliation, eviction
-   * 14. DEVICE DETECTION AND MEMORY PROFILES (lines 1714-1759)
-   * 15. UNIFIED SCROLL COORDINATOR (lines 1762-1811)
-   * 16. CANVAS POOL (lines 1814-1855)
-   * 17. ENGINE RESET (lines 1858-1947)
-   * 18. RENDER QUEUE (lines 1950-2024)
-   * 19. PAGE RENDERING (lines 2027-2150)
-   * 20. ALREADY-DARK DETECTION (lines 2153-2168)
-   * 21. TEXT LAYER (lines 2171-2331)
-   * 22. LINK ANNOTATION LAYER (lines 2334-2437)
-   * 23. DARK MODE LOGIC (lines 2440-2473)
-   * 24. CURRENT PAGE TRACKING (lines 2476-2505)
-   * 25. TOGGLE BUTTON STATE (lines 2508-2533)
-   * 26. NAVIGATION (lines 2536-2636)
-   * 27. EVENT LISTENERS (lines 2639-2851)
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (lines 1729-1774)
+   * 15. UNIFIED SCROLL COORDINATOR (lines 1777-1826)
+   * 16. CANVAS POOL (lines 1829-1870)
+   * 17. ENGINE RESET (lines 1873-1962)
+   * 18. RENDER QUEUE (lines 1965-2039)
+   * 19. PAGE RENDERING (lines 2042-2165)
+   * 20. ALREADY-DARK DETECTION (lines 2168-2183)
+   * 21. TEXT LAYER (lines 2186-2337)
+   *     Single-column: flow layout with paddingTop advancement.
+   *     Multi-column: detected via backward Y jump in content stream,
+   *     rendered with flex-row wrapper keeping everything in flow.
+   * 22. MULTI-COLUMN HELPERS (lines 2340-2533)
+   *     Column detection, order-preserving grouping, line builder
+   * 23. LINK ANNOTATION LAYER (lines 2536-2639)
+   * 24. DARK MODE LOGIC (lines 2642-2675)
+   * 25. CURRENT PAGE TRACKING (lines 2678-2707)
+   * 26. TOGGLE BUTTON STATE (lines 2710-2735)
+   * 27. NAVIGATION (lines 2738-2838)
+   * 28. EVENT LISTENERS (lines 2841-3053)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 28. ZOOM (lines 2854-2976)
-   * 29. RESIZE (lines 2979-3043)
-   * 30. APP SHELL LOADER AND BOOTSTRAP (lines 3046-3106)
+   * 29. ZOOM (lines 3056-3178)
+   * 30. RESIZE (lines 3181-3245)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (lines 3248-3308)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -2239,20 +2244,213 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
   if (items.length === 0) return;
 
-  // --- Step 2: Group into lines (uses core.groupItemsIntoLines) ---
-  const lines = groupItemsIntoLines(items);
+  // --- Step 2: Detect multi-column layout ---
+  // Quick O(n) scan: if Y jumps backward significantly between
+  // consecutive items, this is a multi-column document. The check
+  // runs on raw items before any grouping so it does not affect
+  // the single-column path in any way.
+  const isMultiColumn = detectMultiColumnItems(items);
 
-  // --- Step 3: Build DOM with continuous flow ---
-  const fragment = document.createDocumentFragment();
+  if (!isMultiColumn) {
+    // --- SINGLE COLUMN: original path, untouched ---
+    const lines = groupItemsIntoLines(items);
+    const fragment = document.createDocumentFragment();
+    const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
+    measureCtx.font = `${inheritedFontSize}px sans-serif`;
+    const spaceAdvance = measureCtx.measureText(' ').width;
+    buildLinesIntoContainer(fragment, lines, measureCtx, spaceAdvance, dpr);
+    container.appendChild(fragment);
+  } else {
+    // --- MULTI COLUMN: flex-row layout ---
+    // Group preserving content stream order so columns don't merge
+    const lines = groupItemsPreservingOrder(items);
+    const colGroups = detectColumnGroupsFromLines(lines);
+    const columnStartY = colGroups[1][0][0].top;
 
-  // When I insert a TextNode(' ') between spans for copy/paste,
-  // that space takes up width in the layout. I need to know exactly
-  // how wide it is so I can subtract it from the next span's margin,
-  // keeping the horizontal positions aligned with the PDF
-  const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
-  measureCtx.font = `${inheritedFontSize}px sans-serif`;
-  const spaceAdvance = measureCtx.measureText(' ').width;
+    // Separate header lines (above column start) from column 1
+    const headerLines = [];
+    const col1Lines = [];
+    for (const line of colGroups[0]) {
+      if (line[0].top < columnStartY) {
+        headerLines.push(line);
+      } else {
+        col1Lines.push(line);
+      }
+    }
 
+    const fragment = document.createDocumentFragment();
+    const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
+    measureCtx.font = `${inheritedFontSize}px sans-serif`;
+    const spaceAdvance = measureCtx.measureText(' ').width;
+
+    // Header in normal flow (identical to single-column rendering)
+    if (headerLines.length > 0) {
+      buildLinesIntoContainer(fragment, headerLines, measureCtx, spaceAdvance, dpr);
+    }
+
+    // Calculate gap between header bottom and column start
+    let headerBottom = 0;
+    if (headerLines.length > 0) {
+      const last = headerLines[headerLines.length - 1];
+      headerBottom = last[0].top + Math.max(...last.map(it => it.height));
+    }
+
+    // Flex-row wrapper: columns side by side, entirely in flow
+    const wrapper = document.createElement('div');
+    wrapper.className = 'columns-wrapper';
+    wrapper.style.marginTop = Math.max(0, columnStartY - headerBottom) + 'px';
+
+    // Build each column
+    const allCols = [col1Lines, ...colGroups.slice(1)];
+    let prevColRight = 0;
+
+    for (let c = 0; c < allCols.length; c++) {
+      const colLines = allCols[c];
+      if (colLines.length === 0) continue;
+
+      // Column geometry from items
+      let colLeft = Infinity, colRight = 0;
+      for (const line of colLines) {
+        for (const item of line) {
+          if (item.left < colLeft) colLeft = item.left;
+          const r = item.left + (item.pdfWidth || item.width || 0);
+          if (r > colRight) colRight = r;
+        }
+      }
+
+      const colDiv = document.createElement('div');
+      colDiv.className = 'text-column';
+      colDiv.style.width = (colRight - colLeft) + 'px';
+      colDiv.style.marginLeft = (c === 0 ? colLeft : colLeft - prevColRight) + 'px';
+      prevColRight = colRight;
+
+      // Adjust coordinates: X relative to column left, Y relative to column start
+      const adjusted = colLines.map(line =>
+        line.map(item => ({ ...item, left: item.left - colLeft, top: item.top - columnStartY }))
+      );
+      buildLinesIntoContainer(colDiv, adjusted, measureCtx, spaceAdvance, dpr);
+      wrapper.appendChild(colDiv);
+    }
+
+    fragment.appendChild(wrapper);
+    container.appendChild(fragment);
+  }
+}
+
+// --- MULTI-COLUMN HELPERS (only used when columns are detected) ---
+
+/*
+ * Academic papers typically use two-column layouts: a full-width
+ * header (title, authors, abstract) followed by two narrow columns
+ * of body text. PDF.js getTextContent() returns items in content
+ * stream order, which for LaTeX-generated papers is: header items
+ * top-to-bottom, then column 1 top-to-bottom, then column 2
+ * top-to-bottom.
+ *
+ * The single-column path (groupItemsIntoLines with global Y-sort)
+ * merges both columns because items at the same Y end up on the
+ * same line. The multi-column path preserves content stream order
+ * so columns stay separate, then renders each column inside a
+ * flex-row wrapper. Everything stays in flow layout — no
+ * position:absolute — so the browser produces smooth unbroken
+ * selection highlighting across header and columns.
+ *
+ * The multi-column path activates only when detectMultiColumnItems
+ * finds a backward Y jump. Single-column documents take the
+ * original path with zero changes.
+ */
+
+/*
+ * Scans raw items for a significant backward Y jump. In a
+ * single-column document, Y always increases (top to bottom).
+ * When Y drops back by more than 3x the item height, it means
+ * the content stream moved from the bottom of one column to the
+ * top of the next. The 3x threshold avoids false positives from
+ * superscripts or slight baseline variations.
+ */
+function detectMultiColumnItems(items) {
+  let maxTop = 0;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].top > maxTop) maxTop = items[i].top;
+    // Y jumped back by more than 3x the item height: column break
+    if (i > 0 && items[i].top < maxTop - items[i].height * 3) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Groups items into lines like groupItemsIntoLines in core.js, but
+ * without the global Y-sort. Items stay in content stream order so
+ * column 1 and column 2 items at the same Y are never merged. The
+ * same 50% height threshold and per-line left-to-right sort are
+ * applied. This function lives in app.js (not core.js) because it
+ * is specific to the multi-column rendering path.
+ */
+function groupItemsPreservingOrder(items) {
+  if (items.length === 0) return [];
+  const lines = [];
+  let currentLine = [items[0]];
+  let lineTop = items[0].top;
+  let lineHeight = items[0].height;
+  for (let i = 1; i < items.length; i++) {
+    const item = items[i];
+    const threshold = lineHeight * 0.5;
+    if (Math.abs(item.top - lineTop) < threshold) {
+      currentLine.push(item);
+      if (item.height > lineHeight) lineHeight = item.height;
+    } else {
+      currentLine.sort((a, b) => a.left - b.left);
+      lines.push(currentLine);
+      currentLine = [item];
+      lineTop = item.top;
+      lineHeight = item.height;
+    }
+  }
+  currentLine.sort((a, b) => a.left - b.left);
+  lines.push(currentLine);
+  return lines;
+}
+
+/*
+ * Walks grouped lines in order and splits them into column groups
+ * wherever the Y coordinate jumps backward significantly. The
+ * first group typically contains the header lines followed by
+ * column 1. Subsequent groups are columns 2, 3, etc. The
+ * threshold (one line height backward) prevents false positives
+ * from superscripts or baseline variations within a paragraph.
+ */
+function detectColumnGroupsFromLines(lines) {
+  if (lines.length <= 1) return [lines];
+  const groups = [];
+  let currentGroup = [lines[0]];
+  for (let i = 1; i < lines.length; i++) {
+    const prevTop = lines[i - 1][0].top;
+    const currTop = lines[i][0].top;
+    const prevHeight = Math.max(...lines[i - 1].map(it => it.height));
+    if (currTop < prevTop - prevHeight) {
+      groups.push(currentGroup);
+      currentGroup = [lines[i]];
+    } else {
+      currentGroup.push(lines[i]);
+    }
+  }
+  groups.push(currentGroup);
+  return groups;
+}
+
+/*
+ * Builds text-line divs into a container from an array of grouped
+ * lines. Extracted from the original inline loop in buildTextLayer
+ * so it can serve both paths: single-column (container = fragment,
+ * all lines sorted by Y) and multi-column (container = column div,
+ * lines with Y adjusted relative to column start). The flow layout
+ * with paddingTop advancement is identical in both cases, but each
+ * column starts with prevBottom = 0 independently so columns never
+ * contaminate each other's vertical positioning.
+ */
+function buildLinesIntoContainer(container, lines, measureCtx, spaceAdvance, dpr) {
   let prevBottom = 0;
 
   for (const rawLine of lines) {
@@ -2281,7 +2479,6 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       const gap = item.left - cursor;
       let adjustedGap = gap;
 
-      // Should there be a space between this span and the previous one?
       if (cursor > 0) {
         const result = shouldInsertSpace(
           prevStr, item.str, gap, item.fontSize, spaceAdvance
@@ -2315,7 +2512,6 @@ function buildTextLayer(container, textContent, viewport, dpr) {
 
       if (item.tx1 !== 0 || item.tx2 !== 0) {
         const angle = Math.atan2(item.tx1, Math.sqrt(item.tx2 * item.tx2 + (item.fontSize * dpr) * (item.fontSize * dpr)));
-        // Combine with existing scaleX if present, instead of overwriting it
         const existingTransform = span.style.transform;
         span.style.transform = existingTransform
           ? `${existingTransform} rotate(${angle}rad)`
@@ -2328,16 +2524,12 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       prevStr = item.str;
     }
 
-    // Without this, Safari highlights the entire page width when
-    // selecting text (see the flex selection fix in style.css)
     if (cursor > 0) {
       lineDiv.style.width = cursor + 'px';
     }
 
-    fragment.appendChild(lineDiv);
+    container.appendChild(lineDiv);
   }
-
-  container.appendChild(fragment);
 }
 
 
@@ -2841,7 +3033,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'd') toggleDarkMode();
 });
 
-// --- PRESENTATION MODE ---
+// --- Presentation mode ---
 
 /*
  * When pages fill most of the viewport (landscape slides), continuous
