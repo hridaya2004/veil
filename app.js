@@ -1409,12 +1409,18 @@ function getOrCreateRenderState(pageNum) {
   return state;
 }
 
-// Binary search: find first page whose bottom edge > viewTop
+// Binary search: find first page whose bottom edge > viewTop.
+// When the user clicks "veil" to go back and loads a new PDF,
+// geometry gets cleared but the scroll listener still fires one
+// last time. Without the guards, that last call would read an
+// undefined entry and crash.
 function binarySearchFirstVisible(viewTop) {
+  if (!pdfState.doc) return 1;
   let lo = 1, hi = pdfState.doc.numPages;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
     const pg = pdfState.geometry[mid];
+    if (!pg) return lo;
     if (pg.offsetTop + pg.cssHeight < viewTop) {
       lo = mid + 1;
     } else {
@@ -1425,14 +1431,16 @@ function binarySearchFirstVisible(viewTop) {
 }
 
 function getVisiblePageRange() {
+  if (!pdfState.doc) return null;
   const scrollTop = viewport.scrollTop;
   const viewportHeight = viewport.clientHeight;
   const viewBottom = scrollTop + viewportHeight;
 
   let firstVisible = binarySearchFirstVisible(scrollTop);
   let lastVisible = firstVisible;
-  while (lastVisible < pdfState.doc.numPages &&
-    pdfState.geometry[lastVisible + 1].offsetTop < viewBottom) {
+  while (lastVisible < pdfState.doc.numPages) {
+    const nextGeo = pdfState.geometry[lastVisible + 1];
+    if (!nextGeo || nextGeo.offsetTop >= viewBottom) break;
     lastVisible++;
   }
 
@@ -1580,7 +1588,9 @@ function evictContainer(poolSlot) {
 function reconcileContainers() {
   if (!pdfState.doc || pdfState.doc.numPages === 0) return;
 
-  const { rangeStart, rangeEnd } = getVisiblePageRange();
+  const range = getVisiblePageRange();
+  if (!range) return;
+  const { rangeStart, rangeEnd } = range;
   const needed = new Set();
   for (let p = rangeStart; p <= rangeEnd; p++) needed.add(p);
 
