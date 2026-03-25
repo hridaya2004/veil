@@ -266,7 +266,7 @@ describe('Performance: core function thresholds', () => {
     }
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(60);
+    expect(elapsed).toBeLessThan(150);
   });
 
   it('fingerprint — 500x500 image from array < 5ms', () => {

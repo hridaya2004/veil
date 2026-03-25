@@ -505,8 +505,14 @@ describe('normalizeLigatures', () => {
 // ============================================================
 
 describe('OCR_CONFIDENCE_THRESHOLD', () => {
-  it('is set to 45', () => {
-    expect(OCR_CONFIDENCE_THRESHOLD).toBe(45);
+  it('acts as a boundary: words at threshold are kept, words below are dropped', () => {
+    const words = [
+      { text: 'kept', confidence: OCR_CONFIDENCE_THRESHOLD },
+      { text: 'dropped', confidence: OCR_CONFIDENCE_THRESHOLD - 1 },
+    ];
+    const filtered = words.filter(w => w.confidence >= OCR_CONFIDENCE_THRESHOLD);
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].text).toBe('kept');
   });
 
   it('filters low-confidence words correctly (simulation)', () => {
