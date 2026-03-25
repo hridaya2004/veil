@@ -1,6 +1,6 @@
 {
-  "name": "smart-dark-pdf-reader",
-  "version": "0.3.0",
+  "name": "veil",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
