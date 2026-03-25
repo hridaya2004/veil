@@ -1,20 +1,125 @@
-// ============================================================
-// Smart Dark PDF Reader - v0.3
-//
-// New in v0.3:
-//   - Already-dark detection: pages with dark backgrounds
-//     skip inversion automatically
-//   - Text layer: selectable/copyable text overlay
-//   - Continuous scroll: all pages in a column with
-//     IntersectionObserver-based lazy rendering
-//   - Softer inversion: invert(0.86) instead of invert(1)
-//
-// Run with a local server:
-//   python3 -m http.server 8000
-//   then open http://localhost:8000
-// ============================================================
+/* DESIGN
+   ------
+   * This is the main orchestrator of veil. It wires together the
+   * rendering pipeline, the UI, and the browser APIs into a single
+   * sequential flow. I deliberately kept it as one file rather than
+   * splitting into app-render.js, app-ui.js, etc. because the state
+   * is shared and the functions are intrinsically coupled: focus mode
+   * needs to know about scroll, zoom needs to know about rendering,
+   * rendering needs to know about eviction. Splitting would distribute
+   * the complexity across files without reducing it, and the resulting
+   * modules would not be reusable or independently testable. The
+   * modules I did extract (core.js, ocr.js, export.js, session.js)
+   * are genuinely independent and can be taken into another project.
+   *
+   * The pure functions live in core.js, the OCR pipeline in ocr.js,
+   * the export in export.js, the session persistence in session.js.
+   * This file is the glue that connects them to the DOM and to
+   * each other.
+   *
+   * State is organized in 4 objects declared at the top of the file:
+   * - pdfState: the loaded document, its geometry, and rendering state
+   * - renderPipeline: the canvas pool, render queue, and spacer element
+   * - scrollState: velocity detection and presentation mode
+   * - uiState: focus mode timers, error timeouts, zoom hints
+   *
+   * Key architectural decisions:
+   *
+   * - Virtual scrolling with recycled containers: instead of creating
+   *   one DOM container per page (which exhausted GPU memory on 500+
+   *   page documents), I maintain a pool of 7-15 containers that get
+   *   repositioned as the user scrolls. The document appears continuous
+   *   but only a handful of pages exist in the DOM at any time
+   *
+   * - Canvas pool: reusable offscreen canvases for PDF.js rendering.
+   *   Borrowing and returning canvases instead of creating new ones
+   *   avoids GPU context allocation churn on every page render
+   *
+   * - Engine reset on memory-constrained devices: PDF.js accumulates
+   *   internal state (font programs, decoded images, XRef tables) in
+   *   its worker thread. After a threshold of page renders (15 on
+   *   large documents on iOS and Android with 4GB or less RAM, 40 on
+   *   desktop), I destroy and recreate the entire PDF.js instance to
+   *   release that state. The user never notices because the visible
+   *   canvases stay painted during the reset
+   *
+   * - Unified scroll coordinator: a single scroll listener reads
+   *   scrollTop once per frame and dispatches to velocity detection,
+   *   container reconciliation, and page position saving. Three
+   *   separate listeners were causing 6-15ms of layout reflow per
+   *   frame on Android budget devices
+   *
+   * - Focus mode: the toolbar auto-hides after 1.5 seconds (2.5 on
+   *   mobile) to maximize reading space. Scroll does NOT interrupt
+   *   focus mode because reading (scrolling through pages) is the
+   *   primary action. The toolbar returns on mouse near top edge,
+   *   tap in the top zone, or Tab key (with a longer 6-second timeout
+   *   for keyboard users who need more time to navigate)
+   *
+   * - File System Access API on desktop: when the user picks a file
+   *   via the file picker, I store a lightweight file handle (~30
+   *   bytes) in IndexedDB. On next visit, the browser asks permission
+   *   to re-read the original file from disk, zero duplication. Safari
+   *   doesn't support this API, so dropped files there fall back to
+   *   the mobile path. Mobile stores the full ArrayBuffer in IndexedDB
+   *   (up to 120MB). The file lives on the device's storage (not RAM),
+   *   but at boot the entire buffer must be deserialized into RAM to
+   *   give it to PDF.js. 120MB is the limit where a budget tablet can
+   *   still deserialize without running out of memory before the UI
+   *   appears
+   *
+   * - Clean clipboard: the copy event is intercepted to strip the
+   *   invisible text layer's styling (color:transparent, dark
+   *   background). The pasted text arrives in the target app's
+   *   default font with no veil artifacts
+   *
+   * The test suite (305 unit + 52 e2e) acts as the "eyes" for this
+   * file, following Salvatore Sanfilippo's (antirez) insight that
+   * without tests, a coding agent iterates blind. The pure functions
+   * are tested in core.js. The integration (does the page render,
+   * is text selectable, does export produce a valid PDF) is tested
+   * via Playwright e2e.
+   *
+   * If you read from top to bottom, you're reading the story of what
+   * happens when a user opens veil and drops a PDF.
+   *
+   * The file follows this flow:
+   *
+   * 1. CONSTANTS (lines 191-278)
+   * 2. STATE (lines 281-311)
+   * 3. DOM REFERENCES (lines 314-363)
+   * 4. FOCUS MODE (lines 366-527)
+   * 5. ERROR DISPLAY (lines 530-587)
+   * 6. SESSION PERSISTENCE (lines 590-855)
+   * 7. FILE HANDLING (lines 858-901)
+   * 8. PDF LOADING (lines 904-982)
+   * 9. SCANNED DOCUMENT DETECTION (lines 985-1045)
+   * 10. OCR LOADING INDICATOR (lines 1048-1280)
+   * 11. CLEANUP (lines 1283-1292)
+   * 12. SCALE CALCULATION (lines 1295-1321)
+   * 13. VIRTUAL SCROLLING (lines 1324-1711)
+   *     Page geometry, container pool, reconciliation, eviction
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (lines 1714-1759)
+   * 15. UNIFIED SCROLL COORDINATOR (lines 1762-1811)
+   * 16. CANVAS POOL (lines 1814-1855)
+   * 17. ENGINE RESET (lines 1858-1944)
+   * 18. RENDER QUEUE (lines 1947-2021)
+   * 19. PAGE RENDERING (lines 2024-2147)
+   * 20. ALREADY-DARK DETECTION (lines 2150-2165)
+   * 21. TEXT LAYER (lines 2168-2328)
+   * 22. LINK ANNOTATION LAYER (lines 2331-2434)
+   * 23. DARK MODE LOGIC (lines 2437-2470)
+   * 24. CURRENT PAGE TRACKING (lines 2473-2502)
+   * 25. TOGGLE BUTTON STATE (lines 2505-2530)
+   * 26. NAVIGATION (lines 2533-2633)
+   * 27. EVENT LISTENERS (lines 2636-2848)
+   *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
+   * 28. ZOOM (lines 2851-2973)
+   * 29. RESIZE (lines 2976-3040)
+   * 30. APP SHELL LOADER AND BOOTSTRAP (lines 3043-3103)
+*/
 
-// CDN dependencies — single source of truth for all external library URLs.
+// CDN dependencies, single source of truth for all external library URLs.
 // Update version numbers here only; they propagate to all import sites.
 const DEPS = {
   PDFJS:        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs',
@@ -82,19 +187,20 @@ import {
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = DEPS.PDFJS_WORKER;
 
-// ============================================================
-// Constants
-// ============================================================
 
-// Yield to the UI thread without setTimeout.
-//
-// In background tabs, browsers throttle setTimeout to a minimum
-// of 1 second per call. For a 352-page export, that's 352 extra
-// seconds of dead waiting. MessageChannel.postMessage is NOT
-// throttled — it fires at full speed regardless of tab visibility.
-//
-// This is the same technique React Scheduler uses internally for
-// its concurrent mode work loop.
+// --- CONSTANTS ---
+
+/*
+ * Yield to the UI thread without setTimeout.
+ *
+ * In background tabs, browsers throttle setTimeout to a minimum
+ * of 1 second per call. For a 352-page export, that's 352 extra
+ * seconds of dead waiting. MessageChannel.postMessage is NOT
+ * throttled, it fires at full speed regardless of tab visibility.
+ *
+ * This is the same technique React Scheduler uses internally for
+ * its concurrent mode work loop.
+ */
 const yieldToUI = (() => {
   const channel = new MessageChannel();
   return () => new Promise(resolve => {
@@ -143,9 +249,21 @@ const supportsCtxFilter = (() => {
   } catch (_) { return false; }
 })();
 
-// Baseline offset ratio: measured at runtime via canvas.measureText().
-// Tells us exactly where the browser places the baseline within
-// a line-box of height = font-size. This varies by OS/font.
+/*
+ * Where does the browser place the baseline (the invisible line
+ * where letters "sit") inside a text line? Letters like "g" and "p"
+ * hang below it (descenders), letters like "h" and "l" rise above
+ * it (ascenders). The exact position depends on the OS and font.
+ *
+ * I measure this at runtime by drawing text on a hidden canvas and
+ * reading fontBoundingBoxAscent (how far above the baseline the font
+ * reaches) and fontBoundingBoxDescent (how far below). The ratio
+ * tells us what fraction of the font size is above the baseline.
+ *
+ * Without this, the text layer would be vertically misaligned with
+ * the canvas on some operating systems. The measurement is done once
+ * at 100px for precision (the /200 is because 2 * 100px fontSize)
+ */
 const BASELINE_RATIO = (() => {
   try {
     const c = document.createElement('canvas');
@@ -153,23 +271,14 @@ const BASELINE_RATIO = (() => {
     ctx.font = '100px sans-serif';
     const m = ctx.measureText('Hg');
     if (m.fontBoundingBoxAscent != null && m.fontBoundingBoxDescent != null) {
-      // CSS baseline position within a line-height:1 line box:
-      // baseline = top + fontSize/2 + (ascent - descent) / 2
-      // So: top = baseline - fontSize * ratio
-      // where ratio = 0.5 + (ascent - descent) / (2 * fontSize)
       return 0.5 + (m.fontBoundingBoxAscent - m.fontBoundingBoxDescent) / 200;
     }
   } catch (e) { /* fall through */ }
   return 0.85; // safe fallback
 })();
 
-// Matrix utilities, image region extraction, dark detection,
-// text layer helpers, and other pure functions are in core.js.
-// Imported above — see the import block at the top of this file.
 
-// ============================================================
-// State
-// ============================================================
+// --- STATE ---
 
 const pdfState = {
   doc: null,
@@ -183,11 +292,11 @@ const pdfState = {
   currentPage: 1,
   darkOverride: new Map(),   // 'auto' | 'dark' | 'light' per page
   alreadyDark: new Map(),    // boolean per page
-  slots: new Map(),          // pageNum → pool container
-  renderState: new Map(),    // pageNum → {rendered, rendering, ...}
+  slots: new Map(),          // pageNum -> pool container
+  renderState: new Map(),    // pageNum -> {rendered, rendering, ...}
   zoomMultiplier: parseFloat(localStorage.getItem('veil-zoom')) || 1.0,
   get renderScale() {
-    // On phone landscape (short screens), always render at 1x — fit-to-width is optimal.
+    // On phone landscape, always render at 1x, fit-to-width is optimal.
     // Foldable/tablet landscape keeps user zoom (screens are tall enough).
     const zoom = (typeof isPhoneLandscape === 'function' && isPhoneLandscape())
       ? 1 : this.zoomMultiplier;
@@ -201,18 +310,8 @@ const VIRTUAL_BUFFER = _memConstrainedEarly ? 1 : window.matchMedia('(pointer: f
 const PAGE_GAP = 40; // px between pages (matches CSS gap)
 const VIEWPORT_PADDING_TOP = 64; // space for floating toolbar
 
-// Monotonically increasing, bumped on new PDF load or resize
 
-// true if the document is detected as scanned (full-page images, no text).
-// When true, image protection is skipped so CSS inversion covers the whole page.
-
-
-
-
-
-// ============================================================
-// DOM References
-// ============================================================
+// --- DOM REFERENCES ---
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -242,17 +341,17 @@ const errorBanner = document.getElementById('error-banner');
 const infoBanner = document.getElementById('info-banner');
 const infoMessage = document.getElementById('info-message');
 
-// iOS detection — all browsers on iOS use WebKit (Apple policy),
+// iOS detection, all browsers on iOS use WebKit (Apple policy),
 // so they ALL share the same Jetsam memory limits. This detects
 // the device, not the browser engine.
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
   || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 // Detect true mobile OS (phones and tablets, not 2-in-1 laptops).
-// Surface Pro / Chromebook with touch pass through — they have
+// Surface Pro / Chromebook with touch pass through, they have
 // desktop-class RAM and browser capabilities for export.
 const isMobileOS = isIOS || /Android|HarmonyOS|Mobile|Opera Mini/i.test(navigator.userAgent);
 
-// Hide export on mobile — browser sandbox memory limits make
+// Hide export on mobile, browser sandbox memory limits make
 // Tesseract OCR + PDF generation crash on documents over ~50 pages.
 if (isMobileOS) {
   btnExport.style.display = 'none';
@@ -263,18 +362,19 @@ const errorDismiss = document.getElementById('error-dismiss');
 const fileNameEl = document.getElementById('file-name');
 const toolbar = document.getElementById('toolbar');
 
-// ============================================================
-// Focus Mode
-//
-// After 3 seconds of no mouse movement, the toolbar fades out.
-// The reader becomes pure content — just the PDF.
-//
-// The toolbar reappears ONLY when the mouse approaches the top
-// edge of the window (top 60px). Moving the mouse elsewhere
-// does NOT bring it back — reading should be uninterrupted.
-//
-// Keyboard shortcut: F to toggle manually.
-// ============================================================
+
+// --- FOCUS MODE ---
+
+/*
+ * After 1.5 seconds of inactivity (2.5 on mobile), the toolbar
+ * fades out and the reader becomes pure content. I deliberately
+ * chose not to reset the timer on scroll because reading IS
+ * scrolling. Only explicit interactions bring it back: mouse near
+ * the top edge (300ms dwell to avoid accidental triggers), tap in
+ * the top zone on mobile, or Tab key (with a longer 6-second
+ * timeout for keyboard users who may need more time to navigate
+ * between buttons)
+ */
 
 const uiState = {
   focusTimer: null,
@@ -306,8 +406,12 @@ function enterFocusMode() {
 }
 
 function exitFocusMode() {
-  // Mobile landscape: toolbar stays hidden unconditionally.
-  // The user rotates to portrait to access toolbar actions.
+  // In phone landscape the viewport is very short (~350px). The
+  // toolbar trigger zone (top 35px) overlaps with where the user
+  // is reading and selecting text. Scrolling up or trying to
+  // select text near the top of the page would constantly trigger
+  // the toolbar. I keep it hidden entirely in landscape and the
+  // user rotates to portrait for toolbar actions
   if (isPhoneLandscape()) return;
   toolbar.classList.remove('toolbar-hidden');
   // Restore toolbar elements to tab order
@@ -322,8 +426,13 @@ function resetFocusTimer() {
   uiState.focusTimer = setTimeout(() => { uiState.focusTimer = null; enterFocusMode(); }, FOCUS_DELAY);
 }
 
-// Mouse near top edge: show toolbar after dwelling briefly.
-// Throttled to ~30fps to avoid timer churn during trackpad scroll.
+/*
+ * The toolbar reappears when the mouse stays in the top 35px for
+ * at least 300ms. If the mouse just passes through quickly (e.g.
+ * moving to the browser tab bar), the toolbar stays hidden.
+ * Throttled with requestAnimationFrame so the mousemove handler
+ * doesn't fire hundreds of times per second during trackpad scrolling
+ */
 
 document.addEventListener('mousemove', (e) => {
   if (uiState.mouseMoveThrottled || !readerEl || readerEl.hidden) return;
@@ -359,11 +468,13 @@ document.addEventListener('mousemove', (e) => {
   }
 }, { passive: true });
 
-// Touch: after tapping a toolbar button, restart the auto-hide timer.
-// On touch devices, the :hover state persists after tap (there's no
-// mouseout event), so the mousemove handler above sees overToolbar=true
-// forever and keeps cancelling the hide timer. This click handler
-// overrides that by explicitly restarting the countdown
+/*
+ * Touch: after tapping a toolbar button, restart the auto-hide timer.
+ * On touch devices, the :hover state persists after tap (there's no
+ * mouseout event), so the mousemove handler above sees overToolbar=true
+ * forever and keeps cancelling the hide timer. This click handler
+ * overrides that by explicitly restarting the countdown
+ */
 toolbar.addEventListener('click', () => {
   if (window.matchMedia('(pointer: coarse)').matches) {
     resetFocusTimer();
@@ -372,7 +483,7 @@ toolbar.addEventListener('click', () => {
 
 // Touch: tap in the top zone when toolbar is hidden reveals it.
 // In mobile landscape the toolbar is completely hidden (no reveal
-// mechanism) — the user rotates to portrait for toolbar actions.
+// mechanism), the user rotates to portrait for toolbar actions.
 document.addEventListener('touchstart', (e) => {
   if (!readerEl || readerEl.hidden) return;
   if (!toolbar.classList.contains('toolbar-hidden')) return;
@@ -385,11 +496,15 @@ document.addEventListener('touchstart', (e) => {
   }
 }, { passive: false });
 
-// Keyboard: Tab reveals toolbar when hidden (accessibility).
-// The timer is longer (6 seconds) because keyboard users,
-// especially those with motor impairments, need more time to
-// navigate between buttons. Each Tab inside the toolbar resets
-// the timer so it never expires while the user is still navigating
+/*
+ * Keyboard shortcuts:
+ * - Tab reveals the toolbar when hidden (accessibility). The timer
+ *   is longer (6 seconds vs 1.5) because keyboard users, especially
+ *   those with motor impairments, need more time to navigate between
+ *   buttons. Each Tab resets the timer so it never expires while the
+ *   user is still navigating
+ * - F toggles focus mode manually (show/hide toolbar)
+ */
 const FOCUS_DELAY_KEYBOARD = 6000;
 
 document.addEventListener('keydown', (e) => {
@@ -397,9 +512,6 @@ document.addEventListener('keydown', (e) => {
     if (toolbar.classList.contains('toolbar-hidden')) {
       exitFocusMode();
     }
-    // Use the longer keyboard timer whenever Tab is pressed.
-    // This covers both the initial reveal (toolbar was hidden) and
-    // subsequent Tab presses while navigating between buttons
     clearTimeout(uiState.focusTimer);
     uiState.focusTimer = setTimeout(() => { uiState.focusTimer = null; enterFocusMode(); }, FOCUS_DELAY_KEYBOARD);
   }
@@ -414,10 +526,8 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ============================================================
-// Error Display
-// ============================================================
 
+// --- ERROR DISPLAY ---
 
 function showError(msg, duration = 8000) {
   errorMessage.textContent = msg;
@@ -449,11 +559,17 @@ infoBanner.addEventListener('click', () => {
   if (uiState.infoTimeout) clearTimeout(uiState.infoTimeout);
 });
 
-// Pinch-to-zoom hint: on mobile, portrait pages are rendered at
-// a lower scale than landscape. When the user zooms in and then
-// back out, suggest landscape. Shown once per session, triggered
-// on zoom-out — the moment the user realizes the quality isn't
-// enough and returns to normal view.
+/*
+ * Pinch-to-zoom hint: on mobile portrait, pages are rendered at a
+ * lower scale than landscape so they look blurry when zoomed in.
+ * I show the hint on zoom-OUT (not zoom-in) because during zoom-in
+ * the user's viewport is magnified and shifted, so a banner would
+ * appear off-screen or in an unexpected position. On zoom-out, the
+ * user returns to the normal view and sees the suggestion naturally.
+ * It's also the moment they realize the quality wasn't enough.
+ * Shown once per session, only in portrait (no point suggesting
+ * landscape if already in landscape)
+ */
 if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
     if (uiState.zoomHintShown || !pdfState.doc) return;
@@ -465,24 +581,38 @@ if (window.matchMedia('(pointer: coarse)').matches && window.visualViewport) {
     } else if (uiState.hasZoomedIn && scale < 1.1) {
       uiState.hasZoomedIn = false;
       uiState.zoomHintShown = true;
-      showInfo('For best visual quality, try landscape mode.');
+      showInfo('For best visual quality, try landscape mode.', 8000);
     }
   });
 }
 
-// ============================================================
-// Session Persistence (PWA Resume)
-//
-// Hybrid architecture:
-// - Desktop (File System Access API): save a file handle (~30 bytes)
-//   in IndexedDB. On resume, the browser asks permission and reads
-//   the original file from disk. Zero duplication.
-// - Mobile (iOS/Android): save the ArrayBuffer in IndexedDB.
-//   LRU 1 slot — only the last PDF is kept. Limit ~120MB to avoid
-//   RAM spike on boot when deserializing.
-// - Both: page number + filename in localStorage (survives SW updates)
-// ============================================================
 
+// --- SESSION PERSISTENCE ---
+
+/*
+ * Hybrid architecture for resuming where the user left off:
+ * - Desktop (File System Access API): saves a file handle (~30
+ *   bytes) in IndexedDB. On resume, the browser asks permission
+ *   and reads the original file from disk. Zero duplication
+ * - Mobile: saves the full ArrayBuffer in IndexedDB. Only one PDF
+ *   at a time (each save clears the previous, see session.js).
+ *   Files above 120MB are not saved to avoid a RAM spike when
+ *   deserializing at boot
+ * - Both: page number + filename in localStorage so the user
+ *   returns to the exact page they were reading
+ *
+ * For files too large to save in IndexedDB (above 120MB), I still
+ * save the filename and page number in localStorage. On next visit,
+ * the drop zone shows "You were on page X" with the filename. When
+ * the user drops the same file again, the filename matches and veil
+ * automatically jumps to the saved page. One gesture to recover the
+ * full session, even without the file being stored.
+ *
+ * I chose not to show a warning ("file too large to save") because
+ * it would scare the user without offering an action. The silent
+ * fallback gives them the best possible experience without asking
+ * them to worry about storage limits
+ */
 
 function savePagePosition() {
   if (!pdfState.doc) return;
@@ -511,14 +641,12 @@ async function persistFile(file, arrayBuffer) {
     localStorage.setItem('veil-page', '1');
     await saveSession({ type: 'handle', handle: file._handle, filename });
   } else if (arrayBuffer.byteLength <= SESSION_MAX_SIZE) {
-    // Mobile: save the full ArrayBuffer (LRU 1 slot)
+    // Mobile: save the full ArrayBuffer (one at a time, previous is cleared)
     localStorage.setItem('veil-filename', filename);
     localStorage.setItem('veil-page', '1');
     await saveSession({ type: 'buffer', buffer: arrayBuffer, filename });
   } else {
-    // File too large for IndexedDB — clear any stale file from
-    // IndexedDB (previous smaller file) but keep filename + page
-    // in localStorage as a reminder for the resume screen.
+    // Too large for IndexedDB, graceful fallback (see block comment above)
     await clearSession();
     localStorage.setItem('veil-filename', filename);
     localStorage.setItem('veil-page', '1');
@@ -535,7 +663,7 @@ async function restoreSession(forceButton = false) {
   const sessionData = await loadSession();
   if (!sessionData) {
     if (forceButton && pdfState.buffer) {
-      // User clicked "veil" while reading a large file — the PDF is
+      // User clicked "veil" while reading a large file, the PDF is
       // still in memory even though it wasn't persisted to IndexedDB.
       // Show a clickable resume button that reloads from the buffer.
       showResumeButton(savedFilename, async () => {
@@ -552,8 +680,6 @@ async function restoreSession(forceButton = false) {
         }
       });
     } else {
-      // Cold start with no file in IndexedDB — show a non-actionable
-      // reminder of where the user was, with Browse PDF as primary.
       showResumeReminder(savedFilename, savedPage);
     }
     return false;
@@ -561,11 +687,13 @@ async function restoreSession(forceButton = false) {
 
   try {
     if (sessionData.type === 'handle') {
-      // Desktop File System Access API: requestPermission() requires
-      // a user gesture (Transient User Activation). We cannot call it
-      // at page load — Chrome silently denies it. Instead, show a
-      // resume button on the drop zone. The user clicks once, the
-      // browser approves, and the file loads from disk.
+      /*
+       * Desktop File System Access API: requestPermission() requires
+       * a user gesture (Transient User Activation). We cannot call it
+       * at page load, Chrome silently denies it. Instead, show a
+       * resume button on the drop zone. The user clicks once, the
+       * browser approves, and the file loads from disk.
+       */
       showResumeButton(savedFilename, async () => {
         try {
           const permission = await sessionData.handle.requestPermission({ mode: 'read' });
@@ -587,7 +715,7 @@ async function restoreSession(forceButton = false) {
       return false; // drop zone stays visible (with resume button)
     } else if (sessionData.type === 'buffer') {
       if (forceButton) {
-        // User explicitly returned to drop zone — show resume button
+        // User explicitly returned to drop zone, show resume button
         showResumeButton(savedFilename, async () => {
           try {
             if (loader) loader.hidden = false;
@@ -604,7 +732,7 @@ async function restoreSession(forceButton = false) {
         });
         return false;
       }
-      // Natural reopen — auto-restore without click
+      // Natural reopen, auto-restore without click
       if (loader) loader.hidden = false;
       pdfState.fileName = savedFilename.replace(/\.pdf$/i, '');
       if (fileNameEl) fileNameEl.textContent = savedFilename;
@@ -726,9 +854,8 @@ function hideResumeButton() {
   document.querySelectorAll('.drop-tagline').forEach(el => el.style.display = '');
 }
 
-// ============================================================
-// File Handling
-// ============================================================
+
+// --- FILE HANDLING ---
 
 function handleFile(file) {
   if (!file) return;
@@ -759,11 +886,11 @@ function handleFile(file) {
   const fr = new FileReader();
   fr.onload = async (e) => {
     const arrayBuffer = e.target.result;
-    // Copy the buffer BEFORE loadPDF — PDF.js may transfer (detach)
+    // Copy the buffer BEFORE loadPDF, PDF.js may transfer (detach)
     // the original ArrayBuffer to its worker thread.
     const bufferCopy = arrayBuffer.slice(0);
     const success = await loadPDF(new Uint8Array(arrayBuffer), resumePage);
-    // Only persist on success — a corrupted or password-protected PDF
+    // Only persist on success, a corrupted or password-protected PDF
     // must not be saved to IndexedDB, or the resume logic would
     // re-load a broken file on every app restart.
     if (success) {
@@ -773,11 +900,10 @@ function handleFile(file) {
   fr.readAsArrayBuffer(file);
 }
 
-// ============================================================
-// PDF Loading
-// ============================================================
 
-/** @returns {Promise<boolean>} true if the PDF loaded successfully */
+// --- PDF LOADING ---
+
+// Returns true if the PDF loaded successfully, false on error
 async function loadPDF(data, resumePage = 1) {
   try {
     if (pdfState.doc) await pdfState.doc.destroy();
@@ -816,7 +942,7 @@ async function loadPDF(data, resumePage = 1) {
     await buildPageSlots();
     // Wait one frame for the browser to reflow the new spacer/pool DOM.
     // Without this, reconcileContainers() may see stale viewport dimensions
-    // (especially after cleanup → rebuild when returning from reader).
+    // (especially after cleanup -> rebuild when returning from reader).
     await new Promise(r => requestAnimationFrame(r));
     // Scroll to the target page (page 1 for new files, saved page for resume)
     // Restore dark mode overrides from previous session
@@ -855,18 +981,20 @@ async function loadPDF(data, resumePage = 1) {
   }
 }
 
-// ============================================================
-// Scanned Document Detection
-//
-// Samples 3-5 pages spread across the document. If ALL sampled
-// pages have a single large image covering >85% of the page
-// area AND <50 characters of text, the document is scanned.
-//
-// When scanned, image protection is skipped: CSS inversion
-// covers the entire page including the scan image, turning
-// black-on-white text into white-on-dark. This is correct
-// because the "image" IS the text content.
-// ============================================================
+
+// --- SCANNED DOCUMENT DETECTION ---
+
+/*
+ * Samples up to 5 pages spread across the document: always the
+ * first, plus the last, 25%, 50%, and 75% positions depending
+ * on document length. If ALL sampled pages have a single large
+ * image covering >85% of the page area and <50 characters of
+ * native text, the document is classified as scanned. When
+ * scanned, image protection is skipped because the "image" IS
+ * the text content: CSS inversion covers the entire page, turning
+ * black-on-white scanned text into white-on-dark. OCR then runs
+ * automatically to make the text selectable
+ */
 
 async function detectScannedDocument() {
   if (!pdfState.doc || pdfState.doc.numPages === 0) return false;
@@ -917,23 +1045,20 @@ async function detectScannedDocument() {
 }
 
 
+// --- OCR LOADING INDICATOR ---
 
-
-
-// ============================================================
-// OCR Loading Indicator
-//
-// The loading animation is deliberately invisible by default.
-// It only appears when the user tries to interact (select text)
-// with a page whose OCR hasn't finished yet. Most of the time,
-// OCR completes in background before the user even tries — so
-// they never see the indicator. When they do, a warm amber light
-// sweeps along the page perimeter until the text becomes selectable.
-//
-// For scanned documents: the animation covers the entire page.
-// For native PDFs: it covers individual image regions (since the
-// body text is already selectable — only images need OCR).
-// ============================================================
+/*
+ * The loading animation is deliberately invisible by default. It
+ * only appears when the user tries to interact (select text) with
+ * a page whose OCR hasn't finished yet. Most of the time, OCR
+ * completes in the background before the user even tries, so they
+ * never see the indicator. When they do, a warm amber light sweeps
+ * along the page perimeter until the text becomes selectable.
+ *
+ * For scanned documents: the animation covers the entire page.
+ * For native PDFs: it covers individual image regions (the body
+ * text is already selectable, only images need OCR)
+ */
 
 function cleanupOcrIndicators(slot) {
   const fadeOut = (el) => {
@@ -964,9 +1089,9 @@ function ocrFinished(slot) {
   setTimeout(() => cleanupOcrIndicators(slot), 100);
 }
 
-/**
+/*
  * Checks whether a CSS-space point (x,y relative to the page container)
- * falls inside one of the known image regions on this page.
+ * falls inside one of the known image regions on this page
  */
 function hitTestImageRegion(stateOrSlot, x, y) {
   for (const r of stateOrSlot.imageRegionsCss) {
@@ -977,18 +1102,19 @@ function hitTestImageRegion(stateOrSlot, x, y) {
   return null;
 }
 
-/**
+/*
  * Shows the OCR loading animation when the user tries to select
- * text that isn't ready yet.
+ * text that isn't ready yet
  */
 function showOcrLoading(slot, region) {
   const pageNum = slot.assignedPage;
   const state = pageNum != null ? pdfState.renderState.get(pageNum) : null;
   if (!state || !state.ocrInProgress) return;
 
-  // Don't show the indicator if OCR started recently (< 500ms ago).
-  // When Tesseract resources are SW-cached, OCR completes in 1-2s.
-  // Flashing the indicator for sub-second OCR is distracting.
+  // Don't show the indicator if OCR started less than 500ms ago.
+  // When Tesseract resources are cached by the service worker,
+  // OCR finishes in 1-2 seconds. Showing the animation for half
+  // a second and then removing it would be an unexplained flash
   if (state._ocrStartTime && (Date.now() - state._ocrStartTime) < 500) return;
 
   if (pdfState.isScanned) {
@@ -1014,10 +1140,12 @@ function showOcrLoading(slot, region) {
   }
 }
 
-// If the user successfully selects text inside an OCR image region,
-// the OCR is ready — kill the indicator for that region.
-// We check that the selection is specifically inside an .ocr-image-region,
-// not in native text that happens to be adjacent to the image.
+/*
+ * If the user successfully selects text inside an OCR image region,
+ * the OCR is ready, kill the indicator for that region.
+ * We check that the selection is specifically inside an .ocr-image-region,
+ * not in native text that happens to be adjacent to the image.
+ */
 document.addEventListener('selectionchange', () => {
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
@@ -1048,11 +1176,15 @@ document.addEventListener('selectionchange', () => {
   if (slot) cleanupOcrIndicators(slot);
 });
 
-// Force clean clipboard on copy. The text layer uses color:transparent
-// on a dark background — without this, pasting into Word/Pages/Notion
-// carries those invisible styles (black bg + transparent text).
-// Setting both text/plain and text/html ensures every target app gets
-// clean, unstyled content: LaTeX editors use plain, rich editors use HTML.
+/*
+ * Clean clipboard on copy. Without this, pasting into Word, Pages,
+ * Notion, Gmail, etc... would carry the text layer's invisible styles
+ * (dark background + transparent text). I intercept the copy event
+ * and set both text/plain (for code editors, terminals, LaTeX
+ * tools) and text/html (for rich text apps like Word and Google
+ * Docs). The pasted text arrives in the target app's default font
+ * with no veil artifacts, regardless of where the user pastes it
+ */
 document.addEventListener('copy', (e) => {
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed) return;
@@ -1070,12 +1202,19 @@ document.addEventListener('copy', (e) => {
   e.preventDefault();
 });
 
-// Listen for selection attempts on pages with pending OCR.
-// On touch: require a long press (350ms hold without movement) to
-// distinguish "trying to select text" from "scrolling past".
-// On mouse/pen: trigger immediately (no ambiguity with scroll).
-const OCR_PRESS_DELAY = 350; // ms — shorter than iOS native long press (500ms)
-const OCR_PRESS_MOVE_TOLERANCE = 10; // px — finger jitter allowance
+/*
+ * Listen for selection attempts on pages with pending OCR.
+ * On touch: require a long press (350ms hold without movement) to
+ * distinguish "trying to select text" from "scrolling past".
+ * On mouse/pen (stylus, like Samsung S Pen): trigger immediately
+ * (no ambiguity with scroll, these are precision input devices).
+ */
+const OCR_PRESS_DELAY = 350; // ms, shorter than iOS native long press (500ms)
+
+// A finger is never perfectly still on a touchscreen. Even when
+// holding steady, natural hand tremor causes 2-5px of movement.
+// 10px tolerates that tremor without confusing it with a scroll
+const OCR_PRESS_MOVE_TOLERANCE = 10;
 
 function triggerOcrIndicator(e) {
   const container = e.target.closest('.page-container');
@@ -1141,9 +1280,7 @@ document.addEventListener('pointercancel', () => {
 });
 
 
-// ============================================================
-// Cleanup
-// ============================================================
+// --- CLEANUP ---
 
 function cleanup() {
   viewport.innerHTML = '';
@@ -1154,18 +1291,20 @@ function cleanup() {
   renderPipeline.spacer = null;
 }
 
-// ============================================================
-// Scale Calculation
-// ============================================================
 
-// Phone landscape: small screen held sideways. Toolbar hidden, fit-to-width.
+// --- SCALE CALCULATION ---
+
+// Height < 500px distinguishes phones from tablets in landscape.
+// Phones get the toolbar hidden entirely (see exitFocusMode).
+// Tablets have enough vertical space to keep it visible
 function isPhoneLandscape() {
   return window.matchMedia('(pointer: coarse)').matches &&
     window.matchMedia('(orientation: landscape)').matches &&
     window.innerHeight < 500;
 }
 
-// Any touch device in landscape (phone + tablet). Fit-to-width for both.
+// Both phone and tablet in landscape use fit-to-width because
+// on touch devices vertical scrolling within the page is natural
 function isTouchLandscape() {
   return window.matchMedia('(pointer: coarse)').matches &&
     window.matchMedia('(orientation: landscape)').matches;
@@ -1181,20 +1320,23 @@ function calculateScale(page) {
   );
 }
 
-// ============================================================
-// Virtual Scrolling: Page Geometry + Container Pool
-//
-// Instead of creating one container per page (O(N) DOM nodes,
-// 2N canvas contexts), we maintain a small pool of recycled
-// containers. A spacer div provides the correct scroll height
-// for the native scrollbar. During scroll, containers are
-// repositioned and reassigned to whichever pages are visible.
-//
-// Why: 505 pages × 2 canvases = 1010 CanvasRenderingContext2D.
-// Even zeroed, each context holds GPU state in the compositor.
-// On 4GB devices this alone triggers OOM. With 7 containers
-// (14 contexts), memory is O(1) regardless of document length.
-// ============================================================
+
+// --- VIRTUAL SCROLLING ---
+
+/*
+ * The document looks like a continuous scroll of all pages, but only
+ * 7 containers (mobile) or 15 containers (desktop) actually exist in
+ * the DOM. As the user scrolls, containers are recycled: detached from
+ * one page, repositioned, and assigned to another. A spacer div with
+ * the correct total height gives the browser a native scrollbar that
+ * behaves as if all pages were in the DOM.
+ *
+ * Without this, a 505-page PDF would create 1010 canvas elements
+ * (2 per page: main + overlay). Each canvas holds GPU memory even
+ * when empty. On the Samsung Tab S6 Lite (4GB RAM), one of the
+ * devices I tested on, this alone crashed Chrome. With recycled
+ * containers, memory stays constant regardless of document length
+ */
 
 const renderPipeline = {
   spacer: null,
@@ -1311,8 +1453,17 @@ function assignContainer(poolSlot, pageNum) {
   el.style.scrollSnapAlign = '';
   el.style.display = '';
 
-  // On mobile with zoom >1x, center oversized pages with negative margin
-  // so the middle of the PDF is visible (overflow-x is hidden on mobile)
+  /*
+   * When the user zooms in on mobile, the page becomes wider than
+   * the screen. On desktop this creates a horizontal scrollbar, but
+   * on mobile horizontal scroll doesn't exist (overflow-x is hidden
+   * because horizontal swiping would conflict with the reading
+   * experience). Without correction, the left edge of the page
+   * would stay at x=0 and the right side would be clipped, pushing
+   * the center of the text off-screen. I shift the page left by
+   * half the overflow so the center of the PDF aligns with the
+   * center of the screen
+   */
   if (_isMobileDevice && geo.cssWidth > window.innerWidth) {
     const offset = (geo.cssWidth - window.innerWidth) / 2;
     el.style.marginLeft = -offset + 'px';
@@ -1334,22 +1485,26 @@ function assignContainer(poolSlot, pageNum) {
   poolSlot.verticalOcrLayer.style.height = geo.cssHeight + 'px';
   poolSlot.pageLabel.textContent = pageNum;
 
-  // Hide canvases until the new render completes. Without this,
-  // a recycled container briefly shows content from its previous
-  // page assignment (wrong page flash) or appears without dark mode
-  // (the class was removed during eviction). The render will set
-  // visibility back to '' after painting + dark mode + overlay.
+  /*
+   * Hide canvases until the new render completes. Without this,
+   * a recycled container briefly shows content from its previous
+   * page assignment (wrong page flash) or appears without dark mode
+   * (the class was removed during eviction). The render will set
+   * visibility back to '' after painting + dark mode + overlay.
+   */
   poolSlot.mainCanvas.style.visibility = 'hidden';
   poolSlot.overlayCanvas.style.visibility = 'hidden';
 
   poolSlot.assignedPage = pageNum;
   pdfState.slots.set(pageNum, poolSlot);
 
-  // Don't render immediately — schedule it. During scroll animation,
-  // containers get repositioned at 60fps but PDF.js rendering only
-  // starts when the scroll settles. Pre-rendered pages (already in
-  // the pool) appear instantly; new ones show the placeholder until
-  // the debounced render fires.
+  /*
+   * Don't render immediately, schedule it. During scroll animation,
+   * containers get repositioned at 60fps but PDF.js rendering only
+   * starts when the scroll settles. Pre-rendered pages (already in
+   * the pool) appear instantly; new ones show the placeholder until
+   * the debounced render fires.
+   */
   scheduleRender(pageNum);
 }
 
@@ -1456,28 +1611,34 @@ async function buildPageSlots() {
   pdfState.slots.clear();
   pdfState.renderState.clear();
   renderPipeline.pool.length = 0;
-  pdfState.geometry = [null]; // index 0 unused (pages are 1-based)
+  // Pages are numbered 1, 2, 3... but arrays start at 0. I put null
+  // at index 0 so geometry[1] is page 1, geometry[5] is page 5
+  pdfState.geometry = [null];
 
-  // Determine scale from first page
   const firstPage = await pdfState.doc.getPage(1);
   const scale = calculateScale(firstPage);
   pdfState.scale = scale;
   const zoomedScale = pdfState.renderScale;
   const dpr = getDpr();
 
-  // Compute geometry for all pages.
-  //
-  // Most PDFs have uniform page sizes — we detect this by checking
-  // a few sample pages and skip getPage() for the rest if all match.
-  // Mixed-size PDFs (paper with landscape appendices, slides with
-  // handout pages) measure every page individually.
+  /*
+   * Calculate the width and height (in CSS pixels) of every page so
+   * the virtual scrolling spacer has the correct total height and
+   * each container can be sized before rendering starts.
+   *
+   * Calling getPage() on all 500 pages would be slow, but most PDFs
+   * have uniform page sizes (all A4, all Letter). I sample 5 pages
+   * spread across the document: if they all match the first page,
+   * I assume all pages are the same and skip the rest. Only mixed-
+   * size PDFs (paper with landscape appendices) measure every page
+   * individually. Slower, but without correct dimensions the virtual
+   * scrolling would position pages in the wrong space
+   */
   const firstVp = firstPage.getViewport({ scale: zoomedScale * dpr });
   const round = _isMobileDevice ? Math.round : Math.floor;
   const firstCssW = round(firstVp.width / dpr);
   const firstCssH = round(firstVp.height / dpr);
 
-  // Sample up to 5 pages spread across the document to detect mixed sizes.
-  // If all samples match page 1, assume uniform and skip the rest.
   let uniform = true;
   const numPages = pdfState.doc.numPages;
 
@@ -1549,38 +1710,41 @@ async function buildPageSlots() {
   reconcileContainers();
 }
 
-// ============================================================
-// Device Detection & Memory Profiles
-// ============================================================
+
+// --- DEVICE DETECTION AND MEMORY PROFILES ---
 
 const _isMobileDevice = window.matchMedia('(pointer: coarse)').matches;
+// navigator.platform is deprecated but there is no alternative for
+// detecting iPads. iPadOS reports "MacIntel" in the userAgent (Apple
+// disguises iPads as Macs to receive desktop sites). The only way to
+// tell it's an iPad and not a real Mac is maxTouchPoints > 1.
+// navigator.userAgentData (the modern replacement) is not supported
+// by Safari, so we're stuck with the deprecated API
 const _isIOS = _isMobileDevice && (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 const _deviceMemoryGB = navigator.deviceMemory || 0;
 const _isMemoryConstrained = _isIOS || (_isMobileDevice && (_deviceMemoryGB > 0 ? _deviceMemoryGB <= 4 : false));
 
 const LARGE_DOC_THRESHOLD = 150;
 
+// A DPR (Device Pixel Ratio) of 3 (iPhone 15 Pro) means each canvas 
+// uses 9x the memory of a standard screen. I cap at 2 on devices 
+// with 4GB or less RAM because the quality difference on a 6-inch 
+// screen is barely noticeable but the memory savings are significant
 function getDpr() {
   const raw = window.devicePixelRatio || 1;
-  // Cap DPR on memory-constrained devices (iOS, budget Android).
-  // With fit-to-width, canvases are larger — full 3x DPR exhausts
-  // Jetsam memory budget especially on scanned docs.
   if (pdfState.largeDocConstrained) return Math.min(raw, 2);
   if (_isMemoryConstrained) return Math.min(raw, 2);
   return raw;
 }
 
-// ============================================================
-// Scroll Velocity Detection
-//
-// Measures scroll speed to distinguish reading (slow) from
-// seeking (fast). During fast scroll, page rendering is deferred
-// to avoid allocating dozens of canvas backing stores that
-// overwhelm iOS WebKit's lazy GC — the #1 cause of Jetsam kills.
-//
-// Pattern: Instagram/Twitter infinite scroll, iOS UIScrollView
-// scrollViewDidEndDecelerating.
-// ============================================================
+/*
+ * Measures scroll speed to distinguish reading (slow) from
+ * seeking (fast). During fast scroll, page rendering is deferred
+ * until the user stops. Without this, scrolling quickly through
+ * a 200-page document would try to render every page the user
+ * passes, creating dozens of canvas backing stores that overwhelm
+ * the browser's GPU memory on mobile
+ */
 
 const scrollState = {
   isFast: false,
@@ -1592,18 +1756,29 @@ const scrollState = {
   wheelAccum: 0,
   wheelTimer: null,
 };
-const SCROLL_FAST_THRESHOLD = 3000; // px/sec — above this, defer rendering
+const SCROLL_FAST_THRESHOLD = 3000; // px/sec, above this, defer rendering
 
-// --- Unified scroll coordinator ---
-// Single scrollTop read per frame. Three separate listeners each called
-// viewport.scrollTop independently — on Android budget devices each read
-// can force a layout reflow (~2-5ms), totaling 6-15ms per frame wasted.
-// Order matters: velocity MUST update before reconcile reads scrollState.isFast.
+
+// --- UNIFIED SCROLL COORDINATOR ---
+
+/*
+ * Everything that needs to happen on scroll is handled here in one
+ * place: velocity detection, container recycling, and page position
+ * saving. I merged three separate scroll listeners into one because
+ * each listener was reading viewport.scrollTop independently, and
+ * on budget Android devices each read forces the browser to
+ * recalculate the layout before returning the value. Three reads
+ * per scroll frame added up to noticeable stuttering.
+ *
+ * Order matters: velocity must update before reconcile, because
+ * reconcileContainers checks scrollState.isFast to decide whether
+ * to defer rendering during fast scroll
+ */
 viewport.addEventListener('scroll', () => {
   const now = performance.now();
-  const scrollTop = viewport.scrollTop; // single reflow
+  const scrollTop = viewport.scrollTop;
 
-  // 1. Velocity detection (synchronous — reconcile reads isFast)
+  // 1. Velocity detection (synchronous, reconcile reads isFast)
   const dt = now - scrollState.lastTime;
   if (dt > 0 && scrollState.lastTime > 0) {
     const dy = Math.abs(scrollTop - scrollState.lastTop);
@@ -1635,23 +1810,21 @@ viewport.addEventListener('scroll', () => {
   }
 }, { passive: true });
 
-// ============================================================
-// Canvas Pool
-//
-// Reusable offscreen canvases for PDF.js rendering. Instead of
-// creating/destroying a canvas per page (which thrashes iOS
-// WebKit's lazy GC of GPU backing stores), we maintain a small
-// pool. A canvas is borrowed for rendering, then returned.
-//
-// Pool size matches the concurrency limit — we never need more
-// canvases than concurrent renders.
-// ============================================================
 
-// Mobile: 1 concurrent render to stay within iOS Safari's memory budget.
-// Playwright: 1 to avoid Tesseract contention in headless Chromium.
-// Desktop: 3 for fast parallel rendering.
-// Memory-constrained: 1 (iOS, budget Android). Other mobile: 2. Desktop: 3.
-// Playwright: 1 (avoid Tesseract contention in headless Chromium).
+// --- CANVAS POOL ---
+
+/*
+ * Reusable offscreen canvases for PDF.js rendering. Instead of
+ * creating and destroying a canvas per page (which thrashes the
+ * browser's GPU backing store allocator, especially on iOS where
+ * the GC is lazy), I maintain a small pool. A canvas is borrowed
+ * for rendering, then returned. Every exit path after borrowing
+ * must return the canvas, including error paths and generation
+ * mismatches, or the pool leaks permanently
+ */
+
+// Memory-constrained (iOS, budget Android): 1 concurrent render.
+// Other mobile: 2. Desktop: 3. Playwright: 1 (avoid contention)
 let MAX_CONCURRENT_RENDERS = navigator.webdriver ? 1 : _isMemoryConstrained ? 1 : _isMobileDevice ? 2 : 3;
 
 function createOffscreenCanvas(w, h) {
@@ -1676,62 +1849,40 @@ function returnCanvas(c) {
   if (canvasPool.length < MAX_CONCURRENT_RENDERS + 1) {
     canvasPool.push(c);
   } else {
-    // Pool full — release this one
+    // Pool full, release this one
     c.width = 0;
   }
 }
 
-// ============================================================
-// Render Queue with Concurrency Limit
-//
-// Pages don't render directly — they enter a queue sorted by
-// distance from the viewport center. At most MAX_CONCURRENT_RENDERS
-// can run simultaneously. If a queued page is evicted before
-// rendering starts, it's silently dropped.
-//
-// During fast scroll, the queue accepts entries but doesn't
-// process them until scroll settles (flushRenderQueue).
-// ============================================================
 
+// --- ENGINE RESET ---
 
-// ============================================================
-// iOS PDF Engine Reset (Compartment Seal)
-//
-// PDF.js runs a web worker that accumulates internal state:
-// parsed XRef tables, decoded font programs, stream decoder
-// caches, shared objects. page.cleanup() releases per-page
-// data; pdfState.doc.cleanup() releases some shared resources. But
-// the worker thread retains structures that neither cleanup
-// method fully releases. After ~400 getPage() calls, this
-// accumulated state alone can reach 200-300MB — triggering
-// iOS Safari's jetsam kill (tab crash).
-//
-// The solution: periodically destroy the entire PDF.js instance
-// (main thread + worker thread) and recreate it from the
-// original ArrayBuffer. This is a full reset — zero residual
-// state, zero accumulation. The cost is ~200-400ms to
-// reinitialize the document, scheduled during idle time so the
-// user never notices.
-//
-// Pages already painted on canvas are unaffected — the pixels
-// live in the DOM, not in PDF.js. Only the next page the user
-// scrolls to will use the fresh instance.
-//
-// Non-iOS devices skip this entirely — Android Chrome and
-// desktop browsers have real swap/compression and don't need it.
-// ============================================================
-
-// Large iOS documents reset more aggressively (15) to keep the
-// worker thread's accumulated state well under the jetsam limit.
-// Normal mobile documents get a relaxed threshold (40) for
-// smoother scrolling and less CPU heat.
+/*
+ * PDF.js runs a web worker that accumulates internal state (parsed
+ * XRef tables, decoded font programs, stream decoder caches) that
+ * neither page.cleanup() nor pdfDoc.cleanup() fully releases. After
+ * hundreds of getPage() calls, this accumulation can reach 200-300MB.
+ *
+ * The solution: periodically destroy the entire PDF.js instance and
+ * recreate it from the original ArrayBuffer. The visible canvases
+ * stay painted during the reset (the pixels live in the DOM, not in
+ * PDF.js) so the user never notices. The cost is ~200-400ms to
+ * reinitialize, scheduled during idle time.
+ *
+ * The threshold depends on the device: 15 renders on large documents
+ * on memory-constrained devices (iOS and Android with 4GB or less),
+ * 40 on desktop where the browser has gigabytes of headroom.
+ * Desktop browsers with real swap/compression rarely hit this limit
+ * but the reset protects against heap growth on every platform
+ * (the curb cut effect)
+ */
 function getEngineResetThreshold() {
   if (pdfState.largeDocConstrained) return 15;
   return 40;
 }
 
-// Safari's requestIdleCallback support is incomplete — use rAF + setTimeout
-// as a reliable fallback that still defers to an idle moment.
+// Safari's requestIdleCallback support is incomplete, use rAF + setTimeout
+// as a reliable fallback that still defers to an idle moment
 const scheduleIdle = typeof requestIdleCallback === 'function'
   ? requestIdleCallback
   : (fn) => requestAnimationFrame(() => setTimeout(fn, 0));
@@ -1742,18 +1893,18 @@ async function resetPdfEngine() {
   renderPipeline.resetting = true;
   const gen = ++pdfState.generation;
 
-  // Cancel in-flight work but preserve OCR cache — text data is tiny
-  // and re-running Tesseract after every engine reset wastes CPU/battery.
+  // Cancel in-flight work but preserve OCR cache, text data is tiny
+  // and re-running Tesseract after every engine reset wastes CPU/battery
   renderPipeline.queue.length = 0;
   resetOcrState(true);
 
   try {
     // Destroy the old instance (main thread + worker thread).
-    // This releases ALL accumulated state.
+    // This releases ALL accumulated state
     await pdfState.doc.destroy();
 
     // Recreate from the original buffer. PDF.js may transfer
-    // ArrayBuffers internally, so we always pass a fresh copy.
+    // ArrayBuffers internally, so we always pass a fresh copy
     pdfState.doc = await pdfjsLib.getDocument({
       data: pdfState.buffer.slice(0),
     }).promise;
@@ -1762,17 +1913,17 @@ async function resetPdfEngine() {
     renderPipeline.resetPending = false;
 
     // Stale check: if a new document was loaded during the await,
-    // pdfState.generation will have changed — abandon this reset.
+    // pdfState.generation will have changed, abandon this reset
     if (pdfState.generation !== gen) return;
 
-    // Re-trigger rendering for pages currently near the viewport.
-    // Their canvases still have pixels — this is a no-op for
-    // slot.rendered === true pages. Only evicted-then-revisited
-    // pages will actually re-render.
+    // Resume normal operations. Pages the user is currently looking
+    // at still have their pixels on screen (the reset only affects
+    // PDF.js internals, not the painted canvases). New pages the
+    // user scrolls to will use the fresh PDF.js instance
     flushRenderQueue();
   } catch (err) {
     // If destroy/recreate fails (e.g., corrupt buffer), log but
-    // don't crash — the old pdfState.doc is already destroyed, so we
+    // don't crash, the old pdfState.doc is already destroyed, so we
     // can't recover. The user will need to re-open the file.
     console.warn('PDF engine reset failed:', err);
   } finally {
@@ -1785,12 +1936,24 @@ function maybeScheduleEngineReset() {
   if (renderPipeline.active > 0 || renderPipeline.resetting) return;
 
   scheduleIdle(() => {
-    // Re-check after yielding to the event loop — a render
+    // Re-check after yielding to the event loop, a render
     // may have started, or a new document may have been loaded.
     if (!pdfState.doc || renderPipeline.active > 0 || renderPipeline.resetting || !renderPipeline.resetPending) return;
     resetPdfEngine();
   });
 }
+
+
+// --- RENDER QUEUE ---
+
+/*
+ * Pages don't render directly. They enter a queue sorted by
+ * distance from the viewport center (closest first). At most
+ * MAX_CONCURRENT_RENDERS can run simultaneously. If a queued
+ * page is evicted before rendering starts, it's silently dropped.
+ * During fast scroll, the queue accepts entries but doesn't
+ * process them until scroll settles (flushRenderQueue)
+ */
 
 function enqueueRender(pageNum) {
   if (!pdfState.doc || pageNum < 1 || pageNum > pdfState.doc.numPages) return;
@@ -1809,7 +1972,7 @@ function processRenderQueue() {
   if (scrollState.isFast || renderPipeline.resetting) return; // wait for scroll to settle / engine reset
 
   while (renderPipeline.active < MAX_CONCURRENT_RENDERS && renderPipeline.queue.length > 0) {
-    // Sort by distance from current visible page (closest first)
+    // Closest page to what the user is looking at renders first
     const visPage = pdfState.currentPage || 1;
     renderPipeline.queue.sort((a, b) => Math.abs(a - visPage) - Math.abs(b - visPage));
 
@@ -1825,17 +1988,19 @@ function processRenderQueue() {
     renderPageIfNeeded(pageNum).finally(() => {
       renderPipeline.active--;
 
-      // Track memory pressure from accumulated renders.
-      // On iOS, trigger a full engine reset every N pages to
-      // prevent the PDF.js worker from accumulating fatal levels
-      // of cached state (fonts, XRef, stream decoders).
+      /*
+       * Track memory pressure from accumulated renders.
+       * On iOS, trigger a full engine reset every N pages to
+       * prevent the PDF.js worker from accumulating fatal levels
+       * of cached state (fonts, XRef, stream decoders).
+       */
       renderPipeline.sinceReset++;
       if (renderPipeline.sinceReset >= getEngineResetThreshold()) {
         renderPipeline.resetPending = true;
       }
 
       // If queue is empty and a reset is pending, this is the
-      // quiet moment — schedule it before picking up more work.
+      // quiet moment, schedule it before picking up more work.
       if (renderPipeline.active === 0 && renderPipeline.resetPending) {
         maybeScheduleEngineReset();
       }
@@ -1855,9 +2020,8 @@ function cancelQueuedRender(pageNum) {
   if (idx !== -1) renderPipeline.queue.splice(idx, 1);
 }
 
-// ============================================================
-// Page Rendering
-// ============================================================
+
+// --- PAGE RENDERING ---
 
 async function renderPageIfNeeded(pageNum) {
   if (!pdfState.doc || pageNum < 1 || pageNum > pdfState.doc.numPages) return;
@@ -1882,15 +2046,17 @@ async function renderPageIfNeeded(pageNum) {
     const w = Math.floor(scaledViewport.width);
     const h = Math.floor(scaledViewport.height);
 
-    // Borrow a canvas from the pool instead of creating a new one.
-    // This avoids thrashing iOS WebKit's lazy GC of GPU backing stores.
-    // IMPORTANT: every exit path after this MUST return the canvas
-    // via returnCanvas(). Without this, the pool shrinks on errors
-    // or generation changes — exactly when memory is most critical.
+    /*
+     * Borrow a canvas from the pool instead of creating a new one.
+     * This avoids thrashing iOS WebKit's lazy GC of GPU backing stores.
+     * IMPORTANT: every exit path after this MUST return the canvas
+     * via returnCanvas(). Without this, the pool shrinks on errors
+     * or generation changes, exactly when memory is most critical.
+     */
     renderCanvas = borrowCanvas(w, h);
 
     // Render + get operator list (+ text content for native PDFs).
-    // Store the RenderTask so we can cancel it if the page is evicted.
+    // Keep a reference so eviction can cancel a render mid-flight
     const renderTask = page.render({
       canvasContext: renderCanvas.getContext('2d'),
       viewport: scaledViewport,
@@ -1901,7 +2067,7 @@ async function renderPageIfNeeded(pageNum) {
       renderTask.promise,
       page.getOperatorList(),
     ];
-    // Skip getTextContent for scanned docs — it returns nothing useful
+    // Skip getTextContent for scanned docs, it returns nothing useful
     if (!pdfState.isScanned) {
       parallelTasks.push(page.getTextContent());
     }
@@ -1913,21 +2079,21 @@ async function renderPageIfNeeded(pageNum) {
     if (pdfState.generation !== myGen) { returnCanvas(renderCanvas); return; }
     if (slot.assignedPage !== pageNum) { returnCanvas(renderCanvas); return; }
 
-    // --- Already-dark detection ---
     const isDark = detectAlreadyDark(renderCanvas);
     pdfState.alreadyDark.set(pageNum, isDark);
 
-    // --- Extract image regions (skip if scanned document) ---
     const regions = pdfState.isScanned
       ? []
       : extractImageRegions(opList, scaledViewport.transform);
 
     // --- Compose page behind placeholder, then reveal ---
-    // Hide the canvas during composition so the user sees the
-    // dark placeholder (#1e1e1e) until everything is ready:
-    // content painted + dark mode filter + overlay. This eliminates
-    // the light→dark flash on page transitions. The visibility
-    // toggle is a compositing-only operation (GPU flag, no reflow).
+    /*
+     * Hide the canvas during composition so the user sees the
+     * dark placeholder (#1e1e1e) until everything is ready:
+     * content painted + dark mode filter + overlay. This eliminates
+     * the light -> dark flash on page transitions. The visibility
+     * toggle is a compositing-only operation (GPU flag, no reflow).
+     */
     slot.mainCanvas.style.visibility = 'hidden';
     slot.overlayCanvas.style.visibility = 'hidden';
 
@@ -1944,19 +2110,17 @@ async function renderPageIfNeeded(pageNum) {
       compositeImageRegions(slot.overlayCanvas.getContext('2d'), renderCanvas, regions, w, h);
     }
 
-    // --- Text layer ---
-    // scheduleTextLayer takes ownership of renderCanvas: the native path
-    // returns it to the pool synchronously, the scanned path captures it
-    // in the OCR job closure. Either way, we must NOT touch it after this.
+    // scheduleTextLayer takes ownership of renderCanvas. After this
+    // call we must NOT touch it (it's either returned to the pool
+    // or captured by the OCR job closure)
     scheduleTextLayer(slot, state, pageNum, page, renderCanvas, textContent, scaledViewport, regions, w, h, dpr, myGen);
-    renderCanvas = null; // ownership transferred — prevent double-return in catch
+    renderCanvas = null;
 
-    // --- Link annotations ---
     try {
       const annotations = await page.getAnnotations();
       if (pdfState.generation !== myGen || slot.assignedPage !== pageNum) return;
       buildLinkLayer(slot.element, annotations, scaledViewport, dpr, pageNum);
-    } catch (_) { 
+    } catch (_) {
       if (pdfState.generation !== myGen || slot.assignedPage !== pageNum) return;
     }
 
@@ -1964,16 +2128,13 @@ async function renderPageIfNeeded(pageNum) {
     state._renderTask = null;
     applyDarkModeToPage(pageNum);
 
-    // Everything is ready — reveal both canvases in one compositing frame.
     slot.mainCanvas.style.visibility = '';
     slot.overlayCanvas.style.visibility = '';
 
-    // On memory-constrained devices, release PDF.js internal caches.
     if (_isMemoryConstrained) page.cleanup();
   } catch (err) {
-    // Return the canvas to the pool if it was borrowed before the error.
-    // Without this, every failed render permanently shrinks the pool —
-    // exactly when memory-constrained devices need it most.
+    // Return canvas to pool on error, otherwise the pool permanently
+    // shrinks, exactly when memory-constrained devices need it most
     if (renderCanvas) { returnCanvas(renderCanvas); renderCanvas = null; }
     if (pdfState.generation !== myGen) return;
     if (err?.name !== 'RenderingCancelledException' && err?.message !== 'Rendering cancelled') {
@@ -1985,13 +2146,15 @@ async function renderPageIfNeeded(pageNum) {
   }
 }
 
-// ============================================================
-// Already-Dark Detection
-//
-// Samples corners and edges of the rendered page to estimate
-// background luminance. If the background is already dark,
-// inverting would make it light — which is not what we want.
-// ============================================================
+
+// --- ALREADY-DARK DETECTION ---
+
+/*
+ * Wrapper around the pure function in core.js. Reads pixel data
+ * from the canvas and delegates to detectAlreadyDark(). Pages
+ * with dark backgrounds (slides, dark-themed PDFs) skip inversion
+ * automatically because inverting an already-dark page makes it light
+ */
 
 function detectAlreadyDark(canvas) {
   const w = canvas.width;
@@ -2001,28 +2164,31 @@ function detectAlreadyDark(canvas) {
   return _detectAlreadyDark(imageData.data, w, h);
 }
 
-// ============================================================
-// Text Layer
-//
-// Builds a continuous-flow text overlay for smooth selection.
-//
-// Problem: absolutely-positioned spans leave gaps in the DOM.
-// When the user drags a selection through a gap, the browser
-// loses track and jumps to random fragments.
-//
-// Solution: group text items into lines (by Y coordinate),
-// sort left-to-right within each line, and render as a
-// continuous DOM flow with:
-//   - Each line is a block-level <div> positioned at its Y
-//   - Within a line, spans flow left-to-right with precise
-//     left-margin gaps between them
-//   - Between lines, the block flow gives the browser a
-//     natural top-to-bottom selection path
-//
-// The result is a gapless selectable surface: dragging from
-// any point to any other point produces a clean, continuous
-// selection — like on iOS.
-// ============================================================
+
+// --- TEXT LAYER ---
+
+/*
+ * Builds a continuous-flow text overlay for smooth selection.
+ * Each word from PDF.js textContent becomes a transparent span
+ * positioned over the rendered text in the canvas.
+ *
+ * I evaluated multiple approaches before settling on flow layout.
+ * Absolutely-positioned spans (like Mozilla's PDF.js viewer) leave
+ * gaps in the DOM: when the user drags a selection through a gap,
+ * the browser loses track and jumps to random fragments. Flow
+ * layout with line divs gives the browser a natural top-to-bottom
+ * selection path.
+ *
+ * Each line is a block-level div positioned at its Y coordinate.
+ * Within a line, spans flow left-to-right with precise marginLeft
+ * gaps. TextNode spaces between spans preserve word boundaries in
+ * the clipboard (see shouldInsertSpace in core.js for the three
+ * scenarios where spaces are needed).
+ *
+ * Each span uses display:inline-block + width + scaleX to match
+ * the exact width of the original text, regardless of font
+ * differences between the PDF's font and our sans-serif
+ */
 
 function buildTextLayer(container, textContent, viewport, dpr) {
   container.innerHTML = '';
@@ -2066,7 +2232,10 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   // --- Step 3: Build DOM with continuous flow ---
   const fragment = document.createDocumentFragment();
 
-  // Measure inherited space width for TextNode compensation
+  // When I insert a TextNode(' ') between spans for copy/paste,
+  // that space takes up width in the layout. I need to know exactly
+  // how wide it is so I can subtract it from the next span's margin,
+  // keeping the horizontal positions aligned with the PDF
   const inheritedFontSize = parseFloat(getComputedStyle(container).fontSize) || 16;
   measureCtx.font = `${inheritedFontSize}px sans-serif`;
   const spaceAdvance = measureCtx.measureText(' ').width;
@@ -2099,7 +2268,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       const gap = item.left - cursor;
       let adjustedGap = gap;
 
-      // Determine word boundary (uses core.shouldInsertSpace)
+      // Should there be a space between this span and the previous one?
       if (cursor > 0) {
         const result = shouldInsertSpace(
           prevStr, item.str, gap, item.fontSize, spaceAdvance
@@ -2146,8 +2315,8 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       prevStr = item.str;
     }
 
-    // Constrain line width to actual text content so WebKit/Safari
-    // doesn't extend the selection highlight to the full page width
+    // Without this, Safari highlights the entire page width when
+    // selecting text (see the flex selection fix in style.css)
     if (cursor > 0) {
       lineDiv.style.width = cursor + 'px';
     }
@@ -2158,33 +2327,30 @@ function buildTextLayer(container, textContent, viewport, dpr) {
   container.appendChild(fragment);
 }
 
-// ============================================================
-// Link Annotation Layer
-//
-// Extracts link annotations from the PDF and overlays clickable
-// <a> elements on top of the page. External links open in a new
-// tab; internal links scroll to the target page in the viewport.
-//
-// These are position:absolute elements in the page-container,
-// sitting above the text layer but with pointer-events only on
-// themselves. user-select:none ensures they don't interfere
-// with text selection or copy/paste.
-// ============================================================
+
+// --- LINK ANNOTATION LAYER ---
+
+/*
+ * Overlays clickable <a> elements for each link annotation in the
+ * PDF. External links open in a new tab, internal links scroll to
+ * the target page. The elements sit above the text layer with
+ * user-select:none so they don't interfere with text selection.
+ * URL protocols are whitelisted (http, https, mailto only) to
+ * block javascript: URIs from malicious PDFs
+ */
 
 function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
-  // Remove any previous link layer
   container.querySelectorAll('.link-annot').forEach(el => el.remove());
 
   for (const annot of annotations) {
     if (annot.subtype !== 'Link') continue;
     if (!annot.rect || annot.rect.length < 4) continue;
 
-    // Determine destination
     const url = annot.url || null;
     const dest = annot.dest || null;
     if (!url && !dest) continue;
 
-    // Transform PDF rect [x1, y1, x2, y2] to CSS coordinates.
+    // PDF coordinates have origin at bottom-left, CSS at top-left.
     // viewport.transform is a 6-element affine matrix [a,b,c,d,e,f].
     const [x1, y1, x2, y2] = annot.rect;
     const vt = viewport.transform;
@@ -2202,7 +2368,7 @@ function buildLinkLayer(container, annotations, viewport, dpr, pageNum) {
     a.className = 'link-annot';
 
     if (url) {
-      // Sanitize URL protocol — malicious PDFs can embed javascript: links
+      // Sanitize URL protocol, malicious PDFs can embed javascript: links
       try {
         const parsed = new URL(url);
         if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) continue;
@@ -2245,12 +2411,12 @@ async function resolveInternalLink(dest) {
     let pageIndex;
 
     if (typeof dest === 'string') {
-      // Named destination — resolve via PDF.js
+      // Named destination, resolve via PDF.js
       const resolved = await pdfState.doc.getDestination(dest);
       if (!resolved) return;
       pageIndex = await pdfState.doc.getPageIndex(resolved[0]);
     } else if (Array.isArray(dest) && dest.length > 0) {
-      // Explicit destination — first element is page ref
+      // Explicit destination, first element is page ref
       pageIndex = await pdfState.doc.getPageIndex(dest[0]);
     } else {
       return;
@@ -2263,21 +2429,24 @@ async function resolveInternalLink(dest) {
   }
 }
 
-// extractImageRegions: thin wrapper that passes OPS_MAP to core
 function extractImageRegions(opList, viewportTransform) {
   return _extractImageRegions(opList, viewportTransform, OPS_MAP);
 }
 
-// compositeImageRegions: imported from core.js
 
-// ============================================================
-// Dark Mode Logic
-//
-// Each page resolves its dark mode state through:
-// 1. User override (if set) — 'dark' or 'light'
-// 2. Already-dark detection — if page is dark, skip inversion
-// 3. Default — apply dark mode
-// ============================================================
+// --- DARK MODE LOGIC ---
+
+/*
+ * Each page resolves its dark mode state through three levels:
+ * 1. User override (if set): force dark or force light
+ * 2. Already-dark detection: if the page background is dark, skip
+ *    inversion (inverting a dark page makes it light)
+ * 3. Default: apply dark mode (invert + protect images)
+ *
+ * The override persists in localStorage so if the user forces a
+ * page to light, it stays light across sessions and is also
+ * respected in the exported PDF
+ */
 
 function shouldApplyDark(pageNum) {
   return _shouldApplyDark(pageNum, pdfState.darkOverride, pdfState.alreadyDark);
@@ -2300,16 +2469,15 @@ function applyDarkModeToAllPages() {
   }
 }
 
-// ============================================================
-// Current Page Tracking (from scroll position)
-// ============================================================
+
+// --- CURRENT PAGE TRACKING (FROM SCROLL POSITION) ---
 
 
 function updateCurrentPageFromScroll() {
   if (!pdfState.doc || pdfState.geometry.length <= 1) return;
 
   // Find the page whose center is closest to the viewport center.
-  // Uses the precomputed geometry table — pure math, no DOM queries.
+  // Uses the precomputed geometry table, pure math, no DOM queries.
   const viewCenter = viewport.scrollTop + viewport.clientHeight / 2;
   let closestPage = 1;
   let closestDist = Infinity;
@@ -2333,9 +2501,8 @@ function updateCurrentPageFromScroll() {
   updateToggleButton();
 }
 
-// ============================================================
-// Toggle Button State
-// ============================================================
+
+// --- TOGGLE BUTTON STATE ---
 
 function updateToggleButton() {
   const dark = shouldApplyDark(pdfState.currentPage);
@@ -2362,9 +2529,8 @@ function toggleDarkMode() {
   savePagePosition();
 }
 
-// ============================================================
-// Navigation
-// ============================================================
+
+// --- NAVIGATION ---
 
 function updateNavigationUI() {
   if (!pdfState.doc) return;
@@ -2373,19 +2539,23 @@ function updateNavigationUI() {
   btnNext.disabled = pdfState.currentPage >= pdfState.doc.numPages;
 }
 
-// Click-to-edit page number: transforms the label into an input.
-//
-// On mobile, the virtual keyboard's "Go"/"Done" button fires blur
-// BEFORE keydown Enter. If blur calls restore() (removing the input),
-// the keydown never arrives and the navigation doesn't happen.
-// Fix: commit on blur if the value changed, not just on Enter.
+/*
+ * Click on "3 / 18" turns it into an editable input. The user types
+ * a page number and presses Enter (desktop) or "Go" (mobile keyboard).
+ *
+ * Mobile quirk: when the user taps "Go", the phone closes the keyboard
+ * first (firing blur) and sends the Enter key second. If I removed the
+ * input on blur, the Enter would arrive to nothing and the navigation
+ * wouldn't happen. So I commit on blur if the value changed, not just
+ * on Enter
+ */
 pageInfo.addEventListener('click', () => {
   if (!pdfState.doc) return;
 
   const current = pdfState.currentPage;
   const total = pdfState.doc.numPages;
 
-  // Create inline input
+  // Replace the page counter with an editable input
   const input = document.createElement('input');
   input.id = 'page-input';
   input.type = 'text';
@@ -2394,7 +2564,7 @@ pageInfo.addEventListener('click', () => {
   input.value = current;
   input.setAttribute('aria-label', `Go to page (1-${total})`);
 
-  // Pause focus mode while editing — toolbar stays visible
+  // Pause focus mode while editing, toolbar stays visible
   uiState.focusPaused = true;
   clearTimeout(uiState.focusTimer);
   uiState.focusTimer = null;
@@ -2426,13 +2596,15 @@ pageInfo.addEventListener('click', () => {
   }
 
   input.addEventListener('keydown', (e) => {
-    // Android virtual keyboards may send keyCode 13 without key='Enter',
-    // or fire 'Go'/'Done' as an unidentified key. Check both.
+    // keyCode is deprecated but some Android keyboards don't send
+    // key='Enter', only keyCode 13. Without this fallback those
+    // devices can't navigate to a page number
     if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); commit(); }
     if (e.key === 'Escape') { e.preventDefault(); restore(); }
   });
 
-  // Some Android IMEs fire 'change' instead of keydown on submit.
+  // Some Android keyboards submit without firing keydown at all,
+  // they only fire a 'change' event on the input
   input.addEventListener('change', () => { commit(); });
 
   // On mobile, blur fires when the keyboard dismisses.
@@ -2460,18 +2632,19 @@ function scrollToPage(pageNum, instant = false) {
   });
 }
 
-// ============================================================
-// Event Listeners
-// ============================================================
+
+// --- EVENT LISTENERS ---
 
 // --- Option/Alt: vertical text OCR + selection in images ---
-//
-// Pressing Option starts vertical OCR on the current page's images
-// immediately — before the user even drags. By the time they position
-// the cursor and start selecting, the text is already there.
-//
-// On mousedown with Alt held, we activate the vertical OCR layer and
-// mute the horizontal one. On mouseup, layers are restored.
+/*
+ *
+ * Pressing Option starts vertical OCR on the current page's images
+ * immediately, before the user even drags. By the time they position
+ * the cursor and start selecting, the text is already there.
+ *
+ * On mousedown with Alt held, we activate the vertical OCR layer and
+ * mute the horizontal one. On mouseup, layers are restored.
+ */
 
 // Pre-load vertical OCR as soon as Option is pressed
 document.addEventListener('keydown', (e) => {
@@ -2524,15 +2697,23 @@ document.addEventListener('mouseup', () => {
 });
 
 // --- Drop Zone ---
-// Desktop: click anywhere on the drop zone to browse.
-// Mobile: only the <label for="file-input"> button triggers the picker
-// (native browser behavior, no JS needed — bypasses iOS restrictions).
+
+/*
+ * On desktop the entire drop zone is clickable to open the file
+ * picker. On mobile I skip this because the <label for="file-input">
+ * button already opens the native picker without JavaScript, and
+ * iOS Safari requires native label-to-input association (programmatic
+ * click() on hidden inputs is blocked).
+ *
+ * When the File System Access API is available (Chrome/Edge), I use
+ * showOpenFilePicker instead of the hidden input. This returns a file
+ * handle that I can save in IndexedDB (~30 bytes) for session resume
+ * without copying the entire file into storage
+ */
 dropZone.addEventListener('click', async (e) => {
   if (window.matchMedia('(pointer: coarse)').matches) return;
   if (e.target.closest('a') || e.target.closest('label')) return;
 
-  // Desktop with File System Access API: use showOpenFilePicker
-  // to get a file handle for session resume (zero-copy persistence).
   if (hasFileSystemAccess) {
     try {
       const [handle] = await window.showOpenFilePicker({
@@ -2570,10 +2751,12 @@ dropZone.addEventListener('drop', async (e) => {
   e.preventDefault();
   dropZone.classList.remove('drag-over');
 
-  // Try to get a file handle from the drop (File System Access API).
-  // This enables session resume from the original file path on desktop,
-  // same as showOpenFilePicker(). Without this, dropped files fall back
-  // to ArrayBuffer persistence (120MB limit).
+  /*
+   * Try to get a file handle from the drop (File System Access API).
+   * This enables session resume from the original file path on desktop,
+   * same as showOpenFilePicker(). Without this, dropped files fall back
+   * to ArrayBuffer persistence (120MB limit).
+   */
   const item = e.dataTransfer.items && e.dataTransfer.items[0];
   if (item && item.getAsFileSystemHandle) {
     try {
@@ -2597,7 +2780,7 @@ fileInput.addEventListener('change', () => {
 
 // --- Toolbar ---
 // "veil" logo: return to drop zone without reloading the page.
-// Session is preserved — the resume button appears so the user
+// Session is preserved, the resume button appears so the user
 // can continue reading or open a new file.
 btnHome.addEventListener('click', async (e) => {
   e.preventDefault();
@@ -2623,7 +2806,7 @@ btnHome.addEventListener('click', async (e) => {
   document.title = 'veil';
 
   // Show resume button if there's a saved session.
-  // Force button mode (no auto-load) — the user explicitly chose
+  // Force button mode (no auto-load), the user explicitly chose
   // to leave the reader, so they should choose to resume.
   const savedFilename = localStorage.getItem('veil-filename');
   if (savedFilename) {
@@ -2645,18 +2828,27 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'd') toggleDarkMode();
 });
 
-// --- Presentation mode: page-by-page navigation ---
-// When pages fill ≥85% of the viewport height (slides, presentations),
-// continuous scroll produces jank on Chrome/Edge (GPU IPC churn on
-// large canvas eviction). Instead, intercept wheel/trackpad and
-// jump page-by-page — same pattern as Google Slides, PowerPoint Online.
-// Normal documents (papers, books) keep continuous scroll.
+// --- PRESENTATION MODE ---
 
-const WHEEL_PAGE_THRESHOLD = 60; // accumulated delta before jumping
+/*
+ * When pages fill most of the viewport (landscape slides), continuous
+ * trackpad scroll made the fans spin on Mac Intel because every scroll 
+ * frame triggered a full page render via reconcileContainers. Arrow key
+ * navigation with instant scroll worked perfectly, it was only the
+ * trackpad's continuous small increments that caused the problem.
+ *
+ * For presentation-style PDFs (wider than tall), I intercept the
+ * trackpad and accumulate the scroll distance. Only when it reaches
+ * 60px do I jump to the next page. This absorbs the trackpad's
+ * inertia (Apple trackpads fire hundreds of small events per gesture)
+ * without accidentally skipping two pages. Normal documents (papers,
+ * books) keep continuous scroll
+ */
 
-// ============================================================
-// Zoom
-// ============================================================
+const WHEEL_PAGE_THRESHOLD = 60;
+
+
+// --- ZOOM ---
 
 const btnZoomIn = document.getElementById('btn-zoom-in');
 const btnZoomOut = document.getElementById('btn-zoom-out');
@@ -2720,9 +2912,7 @@ function checkPresentationMode() {
     scrollState.presentationMode = false;
     return;
   }
-  // Presentations have landscape pages (wider than tall).
-  // Papers/books have portrait pages — keep normal scroll for those.
-  // Disable presentation mode when zoomed — zoomed pages need free scroll
+  // Disabled when zoomed because zoomed pages need free scroll
   if (pdfState.zoomMultiplier > 1) {
     scrollState.presentationMode = false;
     return;
@@ -2754,17 +2944,19 @@ viewport.addEventListener('wheel', (e) => {
 let _lastResizeWidth = window.innerWidth;
 
 // --- iOS Zoom Rotation Fix ---
-// When the user zooms in portrait and rotates to landscape (or vice
-// versa), Safari keeps its internal zoom level from the previous
-// orientation. The layout recalculates for the new width, but Safari
-// magnifies it with the stale zoom factor — breaking the layout
-// completely (pages off-screen, navbar inaccessible).
-//
-// Fix: on orientation change, temporarily inject maximum-scale=1 into
-// the viewport meta tag, forcing Safari to reset its zoom to 1x.
-// After 300ms (during the native rotation animation), restore the
-// original value to allow zooming again. On Android this is a no-op
-// since Chrome resets zoom correctly on rotation.
+/*
+ * When the user zooms in portrait and rotates to landscape (or vice
+ * versa), Safari keeps its internal zoom level from the previous
+ * orientation. The layout recalculates for the new width, but Safari
+ * magnifies it with the stale zoom factor, breaking the layout
+ * completely (pages off-screen, navbar inaccessible).
+ *
+ * Fix: on orientation change, temporarily inject maximum-scale=1 into
+ * the viewport meta tag, forcing Safari to reset its zoom to 1x.
+ * After 300ms (during the native rotation animation), restore the
+ * original value to allow zooming again. On Android this is a no-op
+ * since Chrome resets zoom correctly on rotation.
+ */
 if (/iPad|iPhone/.test(navigator.userAgent)) {
   const vpMeta = document.querySelector('meta[name="viewport"]');
   if (vpMeta) {
@@ -2780,36 +2972,45 @@ if (/iPad|iPhone/.test(navigator.userAgent)) {
   }
 }
 
-// --- Resize: rebuild all pages at new scale ---
-// Only rebuild when the WIDTH changes. Height-only changes happen
-// constantly on mobile (Android chrome UI hide/show, iOS address
-// bar, virtual keyboard open/close) and don't affect the page
-// scale (which is determined by width). Rebuilding on height-only
-// changes causes scroll snap, DOM churn, and kills the page input.
+
+// --- RESIZE ---
+
+/*
+ * I only rebuild when the viewport width changes, not height. On
+ * mobile, the height changes constantly: Android Chrome hides and
+ * shows its address bar on scroll, iOS does the same, and opening
+ * the virtual keyboard shrinks the viewport height. None of these
+ * affect the page scale (which is calculated from width). Rebuilding
+ * on every height change would cause the page to jump (losing the
+ * user's scroll position) and destroy the page number input if the
+ * keyboard was open.
+ *
+ * A real width change (window resize on desktop, device rotation on
+ * mobile) triggers a full rebuild: recalculate geometry, recreate
+ * containers, and restore the scroll position to the same page the
+ * user was reading. The 200ms debounce absorbs rapid resize events
+ * during window dragging on desktop
+ */
 window.addEventListener('resize', () => {
   clearTimeout(uiState.resizeTimer);
   uiState.resizeTimer = setTimeout(async () => {
     if (!pdfState.doc) return;
-    if (window.innerWidth === _lastResizeWidth) return; // height-only change
+    if (window.innerWidth === _lastResizeWidth) return;
     _lastResizeWidth = window.innerWidth;
     const pageToRestore = pdfState.currentPage;
     pdfState.generation++;
-    // Cancel pending render and OCR — scale changed, coordinates are stale
     renderPipeline.queue.length = 0;
     resetOcrState();
     scrollState.isFast = false;
     renderPipeline.sinceReset = 0;
     renderPipeline.resetPending = false;
     await buildPageSlots();
-    // Restore scroll position to the same page
     scrollToPage(pageToRestore, true);
     reconcileContainers();
     updateCurrentPageFromScroll();
     checkPresentationMode();
     updateZoomUI();
 
-    // Mobile landscape: toolbar is completely hidden — pure reading.
-    // Rotating back to portrait restores normal focus mode behavior.
     if (isPhoneLandscape()) {
       clearTimeout(uiState.focusTimer);
       enterFocusMode();
@@ -2837,6 +3038,9 @@ readerEl.addEventListener('drop', async (e) => {
   }
   handleFile(e.dataTransfer.files[0]);
 });
+
+
+// --- APP SHELL LOADER AND BOOTSTRAP ---
 
 // Initialize export module with app context
 initExport({
@@ -2873,24 +3077,27 @@ initOcr({
   ocrFinished,
 });
 
-// Attempt to restore the last reading session (PWA resume).
-// If a saved PDF exists in IndexedDB or via File System handle,
-// load it and scroll to the saved page. Otherwise, show the drop zone.
+/*
+ * Bootstrap: try to resume the last session. If a saved PDF exists
+ * (file handle on desktop, ArrayBuffer on mobile), load it and scroll
+ * to the saved page. If not, the user sees the drop zone.
+ *
+ * The appReady signal at the end tells Playwright e2e tests that all
+ * event listeners are registered and the app is ready to accept files.
+ * Without it, tests would try to set the file input before the change
+ * listener exists
+ */
 restoreSession().then((restored) => {
   if (!restored) {
-    // No saved session — hide the loader (if visible), show drop zone
     const loader = document.getElementById('app-loader');
     if (loader) loader.hidden = true;
   }
-  // Fade out the amber transition overlay (if present from landing page navigation)
   const transitionOverlay = document.getElementById('page-transition');
   if (transitionOverlay) {
     requestAnimationFrame(() => {
       transitionOverlay.classList.remove('active');
-      // Remove from DOM after fade completes
       setTimeout(() => transitionOverlay.remove(), 600);
     });
   }
-  // Signal that the app module has fully initialized (used by e2e tests)
   document.documentElement.dataset.appReady = 'true';
 });
