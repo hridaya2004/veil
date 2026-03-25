@@ -20,7 +20,11 @@ test.describe('OCR text layer (synthetic scanned PDF)', () => {
 
     // The scanned PDF is tiny (1x1 image) so OCR may find nothing.
     // We primarily test that the pipeline doesn't crash.
-    await page.waitForTimeout(5000);
+    // Wait for the page canvas to be rendered (deterministic gate).
+    await page.waitForFunction(() => {
+      const canvas = document.querySelector('.page-container[data-page-num="1"] .page-canvas');
+      return canvas && canvas.width > 0;
+    }, { timeout: 15000 });
 
     const pageRendered = await page.evaluate(() => {
       const canvas = document.querySelector('.page-container[data-page-num="1"] .page-canvas');
@@ -52,7 +56,11 @@ test.describe('OCR text layer with real content', () => {
   test('native PDF with text does NOT trigger OCR path', async ({ page }) => {
     await page.goto(READER_URL);
     await loadPDF(page, 'test-native-simple.pdf');
-    await page.waitForTimeout(2000);
+    // Wait for text layer to populate (deterministic gate)
+    await page.waitForFunction(() => {
+      const lines = document.querySelectorAll('.page-container[data-page-num="1"] .text-layer .text-line');
+      return lines.length > 0;
+    }, { timeout: 15000 });
 
     const hasTextLine = await page.evaluate(() => {
       const lines = document.querySelectorAll('.page-container[data-page-num="1"] .text-layer .text-line');

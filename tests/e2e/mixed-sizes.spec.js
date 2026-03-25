@@ -28,7 +28,10 @@ test.describe('Mixed-size PDF', () => {
       const vp = document.getElementById('viewport');
       if (vp) vp.scrollTop = vp.scrollHeight / 3;
     });
-    await page.waitForTimeout(500);
+    await page.waitForFunction(() => {
+      const c = document.querySelector('.page-container[data-page-num="2"] .page-canvas');
+      return c && c.width > 0;
+    }, { timeout: 10000 });
 
     const widths = await page.evaluate(() => {
       const containers = document.querySelectorAll('.page-container');
@@ -54,7 +57,10 @@ test.describe('Mixed-size PDF', () => {
       const vp = document.getElementById('viewport');
       if (vp) vp.scrollTop = vp.scrollHeight;
     });
-    await page.waitForTimeout(500);
+    await page.waitForFunction(() => {
+      const c = document.querySelector('.page-container[data-page-num="3"] .page-canvas');
+      return c && c.width > 0;
+    }, { timeout: 10000 });
 
     // Also need page 1 to have been measured — read from geometry
     const widths = await page.evaluate(() => {
@@ -91,7 +97,11 @@ test.describe('Mixed-size PDF', () => {
       const vp = document.getElementById('viewport');
       if (vp) vp.scrollTop = vp.scrollHeight;
     });
-    await page.waitForTimeout(500);
+    // Wait for page indicator to update to page 3
+    await page.waitForFunction(() => {
+      const el = document.getElementById('page-info');
+      return el && el.textContent.includes('3');
+    }, { timeout: 10000 });
 
     const pageInfo = await page.locator('#page-info').textContent();
     expect(pageInfo).toContain('3');

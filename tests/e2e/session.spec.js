@@ -33,8 +33,11 @@ test.describe('Session persistence', () => {
       if (vp) vp.scrollTop = vp.scrollHeight;
     });
 
-    // Wait for scroll debounce (1s) + margin
-    await page.waitForTimeout(2000);
+    // Wait for the scroll debounce (1s) to fire and persist the page
+    await page.waitForFunction(() => {
+      const stored = localStorage.getItem('veil-page');
+      return stored && Number(stored) > 1;
+    }, { timeout: 10000 });
 
     const storedPage = await page.evaluate(() =>
       localStorage.getItem('veil-page')

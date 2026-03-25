@@ -38,16 +38,15 @@ export async function loadPDF(page, filename) {
     return dz && dz.hidden;
   }, { timeout: 30000 });
 
-  // Brief settle after veil animation for layout/compositing to complete.
-  // The render queue processes pages asynchronously — wait for the first
-  // page to actually render before proceeding.
-  await page.waitForTimeout(300);
-
   // Ensure toolbar is visible (not hidden by focus mode timer).
   // Move mouse to the top to trigger toolbar reveal, then wait
-  // for the dwell timer (TOOLBAR_HOVER_DELAY = 300ms).
+  // for the toolbar to actually become visible (not a fixed timeout).
   await page.mouse.move(640, 20);
-  await page.waitForTimeout(400);
+  await page.waitForFunction(() => {
+    const toolbar = document.getElementById('toolbar');
+    if (!toolbar) return false;
+    return !toolbar.classList.contains('toolbar-hidden');
+  }, { timeout: 5000 });
   // Keep mouse over toolbar so it stays visible
   await page.mouse.move(640, 30);
 
