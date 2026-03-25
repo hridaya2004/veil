@@ -3,4 +3,3 @@ import * as pdfLib from 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-li
 
 console.log('PDFNull type:', typeof pdfLib.PDFNull);
 console.log('PDFName type:', typeof pdfLib.PDFName);
-

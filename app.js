@@ -102,21 +102,21 @@
    * 14. DEVICE DETECTION AND MEMORY PROFILES (lines 1714-1759)
    * 15. UNIFIED SCROLL COORDINATOR (lines 1762-1811)
    * 16. CANVAS POOL (lines 1814-1855)
-   * 17. ENGINE RESET (lines 1858-1944)
-   * 18. RENDER QUEUE (lines 1947-2021)
-   * 19. PAGE RENDERING (lines 2024-2147)
-   * 20. ALREADY-DARK DETECTION (lines 2150-2165)
-   * 21. TEXT LAYER (lines 2168-2328)
-   * 22. LINK ANNOTATION LAYER (lines 2331-2434)
-   * 23. DARK MODE LOGIC (lines 2437-2470)
-   * 24. CURRENT PAGE TRACKING (lines 2473-2502)
-   * 25. TOGGLE BUTTON STATE (lines 2505-2530)
-   * 26. NAVIGATION (lines 2533-2633)
-   * 27. EVENT LISTENERS (lines 2636-2848)
+   * 17. ENGINE RESET (lines 1858-1947)
+   * 18. RENDER QUEUE (lines 1950-2024)
+   * 19. PAGE RENDERING (lines 2027-2150)
+   * 20. ALREADY-DARK DETECTION (lines 2153-2168)
+   * 21. TEXT LAYER (lines 2171-2331)
+   * 22. LINK ANNOTATION LAYER (lines 2334-2437)
+   * 23. DARK MODE LOGIC (lines 2440-2473)
+   * 24. CURRENT PAGE TRACKING (lines 2476-2505)
+   * 25. TOGGLE BUTTON STATE (lines 2508-2533)
+   * 26. NAVIGATION (lines 2536-2636)
+   * 27. EVENT LISTENERS (lines 2639-2851)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 28. ZOOM (lines 2851-2973)
-   * 29. RESIZE (lines 2976-3040)
-   * 30. APP SHELL LOADER AND BOOTSTRAP (lines 3043-3103)
+   * 28. ZOOM (lines 2854-2976)
+   * 29. RESIZE (lines 2979-3043)
+   * 30. APP SHELL LOADER AND BOOTSTRAP (lines 3046-3106)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -1922,10 +1922,13 @@ async function resetPdfEngine() {
     // user scrolls to will use the fresh PDF.js instance
     flushRenderQueue();
   } catch (err) {
-    // If destroy/recreate fails (e.g., corrupt buffer), log but
-    // don't crash, the old pdfState.doc is already destroyed, so we
-    // can't recover. The user will need to re-open the file.
+    // The old instance is already destroyed. If recreating fails,
+    // pdfState.doc points to a dead object. Null it so the rest
+    // of the code knows there's no active document, and tell the
+    // user what happened
     console.warn('PDF engine reset failed:', err);
+    pdfState.doc = null;
+    showError('Could not refresh the document. Please reopen the file.');
   } finally {
     renderPipeline.resetting = false;
   }
