@@ -8,8 +8,10 @@
 
 <h3 align="center">Open source PDF reader with smart dark mode.<br>Text inverted, images preserved, scanned documents made selectable.</h3>
 
+<br />
+
 <p align="center">
-  <img src="icon/demo.gif" alt="Demo: a medical research PDF toggled from light to dark mode. Text becomes light on dark background while biomedical images retain their original colors." width="840"><br>
+  <img src="icon/demo.gif" alt="Demo: a medical research PDF toggled from light to dark mode. Text becomes light on dark background while biomedical images retain their original colors." width="840"><br /><br />
   <a href="https://veil.simoneamico.com"><strong>Start reading</strong></a>
 </p>
 
