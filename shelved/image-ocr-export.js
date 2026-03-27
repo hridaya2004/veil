@@ -1,39 +1,38 @@
-// ============================================================
-// Image OCR in Export — SHELVED (2026-03-17)
-//
-// This code made text inside images (charts, figures, screenshots)
-// selectable in the exported dark PDF. It worked correctly and was
-// fully tested, but was removed from the export path because:
-//
-//   1. It added 5-7 minutes to the export of a 218-page PDF
-//      (from <1 min to 6:39), making the export feel "slow and
-//      unoptimized" — a death sentence on Hacker News.
-//
-//   2. The same feature works beautifully in the web view where
-//      it runs lazily page-by-page as the user scrolls. In the
-//      export it becomes a blocking 6-minute wait.
-//
-//   3. The export without image OCR is already exceptional: dark
-//      mode baked in, native text selectable, scanned doc OCR,
-//      links preserved. No competitor offers all of this.
-//
-// To restore: paste this block back into exportDarkPdf() after
-// the native text layer loop (after the "Skip characters not
-// encodable" try/catch block), and restore the exportWorker
-// creation with `const needsOcr = isScannedDocument || true;`.
-//
-// The web view image OCR (ocrImageRegions, ocrImageVertical)
-// remains fully active and is the recommended way to access
-// text inside images.
-// ============================================================
+/* Image OCR in Export - SHELVED (2026-03-17)
+   * This code made text inside images (charts, figures, screenshots)
+   * selectable in the exported dark PDF. It worked correctly and was
+   * fully tested, but was removed from the export path because:
+   *
+   *   1. It added 5-7 minutes to the export of a 218-page PDF
+   *      (from <1 min to 6:39). A 6-minute blocking wait with no
+   *      interactivity makes the export feel broken.
+   *
+   *   2. The same feature works beautifully in the web view where
+   *      it runs lazily page-by-page as the user scrolls. In the
+   *      export it becomes a blocking 6-minute wait.
+   *
+   *   3. The export without image OCR already covers dark mode
+   *      baked in, native text selectable, scanned document OCR,
+   *      and links preserved. Image OCR in the web view fills
+   *      the gap without the export cost.
+   *
+   * To restore: paste this block back into exportDarkPdf() after
+   * the native text layer loop (after the "Skip characters not
+   * encodable" try/catch block), and restore the exportWorker
+   * creation with `const needsOcr = isScannedDocument || true;`.
+   *
+   * The web view image OCR (ocrImageRegions, ocrImageVertical)
+   * remains fully active and is the recommended way to access
+   * text inside images.
+*/
 
 // --- Worker creation (was inside exportDarkPdf, before the page loop) ---
 //
 // Create a shared eng-only OCR worker for image OCR in export.
-// Created once, terminated after the loop — no per-page overhead.
+// Created once, terminated after the loop - no per-page overhead.
 //
 // let exportWorker = null;
-// const needsOcr = isScannedDocument || true; // always create — native PDFs may have images
+// const needsOcr = isScannedDocument || true; // always create - native PDFs may have images
 // if (needsOcr) {
 //   try {
 //     const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js');

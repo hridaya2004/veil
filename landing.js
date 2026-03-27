@@ -24,9 +24,9 @@
    * - The exploded layers animation is scroll-driven, not time-based.
    *   As the user scrolls, the three PDF layers separate to reveal
    *   the architecture. I use an easeInOut curve so the animation
-   *   An "easing" curve makes the movement start slow, accelerate in
-   *   the middle, and slow down at the end, like a physical object
-   *   with inertia instead of a robotic linear motion.
+   *   feels physical: the movement starts slow, accelerates in the
+   *   middle, and slows down at the end, like an object with inertia
+   *   instead of robotic linear motion.
    *
    * - The page transition to the reader uses a CSS overlay that fades
    *   to the reader's background color. This masks the loading time

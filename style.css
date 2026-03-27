@@ -44,22 +44,22 @@
    * 6. TOOLBAR (lines 569-788)
    *    Floating pill, navigation, zoom, dark mode toggle, filename
    * 7. READER LAYOUT (lines 791-798)
-   * 8. VIEWPORT (lines 801-833)
-   * 9. PAGE CONTAINER (lines 836-871)
-   * 10. DARK MODE FILTER (lines 874-889)
-   * 11. TEXT LAYER (lines 892-998)
+   * 8. VIEWPORT (lines 801-836)
+   * 9. PAGE CONTAINER (lines 839-874)
+   * 10. DARK MODE FILTER (lines 877-892)
+   * 11. TEXT LAYER (lines 895-1001)
    *     Selection, multi-column flex wrapper, OCR image regions,
    *     vertical OCR layer
-   * 12. LINK ANNOTATIONS (lines 1001-1020)
-   * 13. PAGE NUMBER LABEL (lines 1023-1027)
-   * 14. ERROR BANNER (lines 1030-1089)
-   * 15. EXPORT PROGRESS (lines 1092-1149)
-   * 16. OCR LOADING INDICATOR (lines 1152-1248)
-   * 17. ACCESSIBILITY (lines 1251-1284)
+   * 12. LINK ANNOTATIONS (lines 1003-1023)
+   * 13. PAGE NUMBER LABEL (lines 1026-1030)
+   * 14. ERROR BANNER (lines 1033-1092)
+   * 15. EXPORT PROGRESS (lines 1095-1152)
+   * 16. OCR LOADING INDICATOR (lines 1155-1251)
+   * 17. ACCESSIBILITY (lines 1254-1287)
    *     prefers-reduced-motion, prefers-contrast, focus-visible
-   * 18. UTILITIES (lines 1287-1305)
-   * 19. MOBILE LANDSCAPE (lines 1308-1336)
-   * 20. APP SHELL LOADER (lines 1339-1373)
+   * 18. UTILITIES (lines 1290-1308)
+   * 19. MOBILE LANDSCAPE (lines 1311-1339)
+   * 20. APP SHELL LOADER (lines 1342-1376)
 */
 
 
@@ -815,6 +815,9 @@ body {
   scrollbar-color: rgba(212, 163, 115, 0.25) transparent;
 }
 
+/* WebKit/Blink scrollbar: matches the warm palette.
+   These override the standard scrollbar-* properties above
+   for Chrome, Safari, and Edge. */
 #viewport::-webkit-scrollbar {
   width: 6px;
 }
