@@ -16,16 +16,16 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 94-123)
+   * 1. CONSTANTS (line 101)
    *    Thresholds and identity values used across the codebase.
    *    Each threshold was calibrated on real documents and the comments
    *    explain why each number was chosen.
    *
-   * 2. OCR ARTIFACT DETECTION (lines 126-185)
+   * 2. OCR ARTIFACT DETECTION (line 133)
    *    Filters garbage text from Tesseract's interpretation of borders,
    *    stamps, and logos in scanned documents.
    *
-   * 3. MATRIX UTILITIES (lines 188-237)
+   * 3. MATRIX UTILITIES (line 195)
    *    PDF coordinate math. A PDF stores positions using a 6-number
    *    array called the CTM (Current Transformation Matrix) that encodes
    *    translation, scale, rotation and skew in a single compact form.
@@ -34,60 +34,67 @@
    *    pointing up, but canvas/CSS start at the top-left with Y pointing
    *    down. These functions handle the conversion.
    *
-   * 4. IMAGE REGION EXTRACTION (lines 240-306)
+   * 4. IMAGE REGION EXTRACTION (line 247)
    *    A PDF page is a sequence of drawing instructions ("operators"):
    *    "draw text here", "place image there", "change the transform".
    *    I walk this sequence tracking position state to find every
    *    raster image. This is how veil knows which areas to protect
    *    from dark mode inversion.
    *
-   * 5. OVERLAY COMPOSITION (lines 309-329)
+   * 5. OVERLAY COMPOSITION (line 316)
    *    The dark mode trick: CSS `filter: invert()` on the main canvas
    *    inverts everything (text becomes light, but images become
    *    wrong too). The overlay canvas sits on top with NO filter, and
    *    I copy the original image pixels there. Result: dark text with
    *    original-color images.
    *
-   * 6. ALREADY-DARK DETECTION (lines 332-379)
+   * 6. ALREADY-DARK DETECTION (line 339)
    *    Samples luminance at page edges and corners to detect pages
    *    that are already dark (slides, dark-themed PDFs). These pages
    *    skip inversion because inverting an already-dark page makes it light.
    *
-   * 7. DARK MODE STATE RESOLUTION (lines 382-396)
+   * 7. DARK MODE STATE RESOLUTION (line 389)
    *    Decides whether to apply dark mode on a given page. Three states:
    *    auto (respects detection), force dark, force light. The user can
    *    override any page with the toggle button, and the override is
    *    preserved in the exported PDF.
    *
-   * 8. TEXT NORMALIZATION (lines 399-416)
+   * 8. TEXT NORMALIZATION (line 406)
    *    Decomposes typographic ligatures (ﬁ->fi, ﬂ->fl) so copy/paste
    *    produces normal characters instead of special Unicode glyphs.
    *
-   * 9. PUNCTUATION MERGING (lines 419-476)
+   * 9. PUNCTUATION MERGING (line 426)
    *    Fuses tiny standalone punctuation items (3-4px wide periods,
    *    commas) into the preceding word so they're selectable.
    *
-   * 10. TEXT LAYER UTILITIES (lines 479-563)
+   * 10. TEXT LAYER UTILITIES (line 486)
    *     Line grouping (which words belong on the same line?) and word
    *     boundary detection (should there be a space between two spans?).
    *     Used by both the native text layer and the OCR text layer.
    *
-   * 11. SCALE CALCULATION (lines 566-583)
+   * 11. SCALE CALCULATION (line 573)
    *     Determines how large to render each page. Fit-to-page on desktop,
    *     fit-to-width on mobile landscape.
    *
-   * 12. NAVIGATOR LANGUAGE MAPPING (lines 586-632)
+   * 12. NAVIGATOR LANGUAGE MAPPING (line 593)
    *     Maps the user's OS language to a Tesseract language code so the
    *     OCR worker starts with the right model from the beginning.
    *
-   * 13. SCANNED DOCUMENT DETECTION (lines 635-661)
+   * 13. SCANNED DOCUMENT DETECTION (line 642)
    *     Samples multiple pages to determine if the PDF is a scan (one
    *     full-page image per page, almost no native text).
    *
-   * 14. OCR LANGUAGE DETECTION (lines 664-810)
+   * 14. OCR LANGUAGE DETECTION (line 671)
    *     Detects the document language from character frequency and
    *     function words. Used as a fallback when navigator.languages
    *     doesn't provide a non-English language.
+   *
+   * 15. SCRIPT DETECTION (line 820)
+   *     Identifies the writing system of a text string by scanning for
+   *     Unicode range patterns. Used by the export pipeline to select
+   *     the correct Noto Sans font variant for each text item, enabling
+   *     proper rendering of Arabic, Hebrew, CJK, Indic and every other
+   *     major writing system in exported PDFs.
 */
 
 
@@ -807,4 +814,59 @@ export function detectLanguageFromText(text) {
   }
 
   return bestScore >= LANG_DETECT_THRESHOLD ? bestCode : 'eng';
+}
+
+
+// --- SCRIPT DETECTION ---
+
+/*
+ * Identifies the writing system of a text string. The export pipeline
+ * uses this to select the correct Noto Sans font variant (Arabic text
+ * needs Noto Sans Arabic, Chinese needs Noto Sans SC, and so on).
+ *
+ * PDF.js getTextContent() returns text in base Unicode codepoints
+ * (e.g. U+0628 for Arabic ba, not the presentation form U+FE91).
+ * Fontkit applies the font's GSUB shaping tables during embedding,
+ * so the base codepoints are all we need to detect the script.
+ *
+ * The ranges below cover every major living writing system. Each font
+ * is lazy-loaded from CDN only when a document actually contains that
+ * script, so Latin-only users pay zero cost.
+ *
+ * CJK detection: Japanese uses Hiragana/Katakana (unique to Japanese),
+ * Korean uses Hangul (unique to Korean). CJK ideographs shared between
+ * Chinese/Japanese/Korean default to Simplified Chinese (Noto Sans SC)
+ * which renders all three correctly for the invisible text layer.
+ */
+export const SCRIPT_RANGES = [
+  { name: 'arabic',     test: /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/ },
+  { name: 'hebrew',     test: /[\u0590-\u05FF\uFB1D-\uFB4F]/ },
+  { name: 'devanagari', test: /[\u0900-\u097F\uA8E0-\uA8FF]/ },
+  { name: 'bengali',    test: /[\u0980-\u09FF]/ },
+  { name: 'gurmukhi',   test: /[\u0A00-\u0A7F]/ },
+  { name: 'gujarati',   test: /[\u0A80-\u0AFF]/ },
+  { name: 'tamil',      test: /[\u0B80-\u0BFF]/ },
+  { name: 'telugu',     test: /[\u0C00-\u0C7F]/ },
+  { name: 'kannada',    test: /[\u0C80-\u0CFF]/ },
+  { name: 'malayalam',  test: /[\u0D00-\u0D7F]/ },
+  { name: 'sinhala',    test: /[\u0D80-\u0DFF]/ },
+  { name: 'thai',       test: /[\u0E00-\u0E7F]/ },
+  { name: 'lao',        test: /[\u0E80-\u0EFF]/ },
+  { name: 'tibetan',    test: /[\u0F00-\u0FFF]/ },
+  { name: 'myanmar',    test: /[\u1000-\u109F]/ },
+  { name: 'georgian',   test: /[\u10A0-\u10FF\u2D00-\u2D2F]/ },
+  { name: 'armenian',   test: /[\u0530-\u058F]/ },
+  { name: 'ethiopic',   test: /[\u1200-\u137F\u1380-\u139F]/ },
+  { name: 'khmer',      test: /[\u1780-\u17FF]/ },
+  { name: 'japanese',   test: /[\u3040-\u309F\u30A0-\u30FF\u31F0-\u31FF]/ },
+  { name: 'korean',     test: /[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/ },
+  { name: 'cjk',        test: /[\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF]/ },
+];
+
+export function detectScript(str) {
+  if (!str) return 'latin';
+  for (const range of SCRIPT_RANGES) {
+    if (range.test.test(str)) return range.name;
+  }
+  return 'latin';
 }
