@@ -95,33 +95,33 @@
    * 8. PDF LOADING (line 936)
    * 9. SCANNED DOCUMENT DETECTION (line 1017)
    * 10. OCR LOADING INDICATOR (line 1080)
-   * 11. CLEANUP (line 1315)
-   * 12. SCALE CALCULATION (line 1327)
-   * 13. VIRTUAL SCROLLING (line 1356)
+   * 11. CLEANUP (line 1371)
+   * 12. SCALE CALCULATION (line 1383)
+   * 13. VIRTUAL SCROLLING (line 1412)
    *     Page geometry, container pool, reconciliation, eviction
-   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1756)
-   * 15. UNIFIED SCROLL COORDINATOR (line 1804)
-   * 16. CANVAS POOL (line 1856)
-   * 17. ENGINE RESET (line 1900)
-   * 18. RENDER QUEUE (line 1992)
-   * 19. PAGE RENDERING (line 2069)
-   * 20. ALREADY-DARK DETECTION (line 2195)
-   * 21. TEXT LAYER (line 2213)
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1812)
+   * 15. UNIFIED SCROLL COORDINATOR (line 1860)
+   * 16. CANVAS POOL (line 1912)
+   * 17. ENGINE RESET (line 1956)
+   * 18. RENDER QUEUE (line 2048)
+   * 19. PAGE RENDERING (line 2125)
+   * 20. ALREADY-DARK DETECTION (line 2251)
+   * 21. TEXT LAYER (line 2269)
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (line 2369)
+   * 22. MULTI-COLUMN HELPERS (line 2425)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (line 2595)
-   * 24. DARK MODE LOGIC (line 2701)
-   * 25. CURRENT PAGE TRACKING (line 2737)
-   * 26. TOGGLE BUTTON STATE (line 2769)
-   * 27. NAVIGATION (line 2797)
-   * 28. EVENT LISTENERS (line 2900)
+   * 23. LINK ANNOTATION LAYER (line 2651)
+   * 24. DARK MODE LOGIC (line 2757)
+   * 25. CURRENT PAGE TRACKING (line 2793)
+   * 26. TOGGLE BUTTON STATE (line 2825)
+   * 27. NAVIGATION (line 2853)
+   * 28. EVENT LISTENERS (line 2956)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (line 3115)
-   * 30. RESIZE (line 3240)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3307)
+   * 29. ZOOM (line 3171)
+   * 30. RESIZE (line 3296)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3363)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -1215,20 +1215,76 @@ document.addEventListener('selectionchange', () => {
  * and set both text/plain (for code editors, terminals, LaTeX
  * tools) and text/html (for rich text apps like Word and Google
  * Docs). The pasted text arrives in the target app's default font
- * with no veil artifacts, regardless of where the user pastes it
+ * with no veil artifacts, regardless of where the user pastes it.
+ *
+ * For RTL lines (Arabic, Hebrew), I rebuild the text from the spans
+ * sorted by coordinate instead of using the DOM order. The DOM sorts
+ * spans left-to-right (for visual layout via marginLeft) but the
+ * reading order is right-to-left. I detect RTL lines by checking
+ * dir="rtl" on the parent text-line div, then collect the spans and
+ * sort them by their left offset descending. This produces correct
+ * reading order without changing the DOM structure
  */
 document.addEventListener('copy', (e) => {
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed) return;
-  const text = sel.toString();
+
+  // I find the text layer by walking up from the selection anchor.
+  // The commonAncestorContainer can be a text node (no .closest),
+  // so I start from the parent element instead
+  const range = sel.getRangeAt(0);
+  const ancestor = range.commonAncestorContainer;
+  const el = ancestor.nodeType === Node.ELEMENT_NODE ? ancestor : ancestor.parentElement;
+  const textLayer = el ? (el.closest('.text-layer') || el.querySelector('.text-layer')) : null;
+
+  const hasRtl = textLayer && textLayer.querySelector('.text-line[dir="rtl"]');
+
+  if (!hasRtl) {
+    // Fast path for LTR-only documents (no RTL text-lines found).
+    // I still strip styles to avoid carrying invisible text artifacts
+    const text = sel.toString();
+    if (!text) return;
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    e.clipboardData.setData('text/plain', text);
+    e.clipboardData.setData('text/html', escaped.split('\n').join('<br>'));
+    e.preventDefault();
+    return;
+  }
+
+  // RTL path: I rebuild the text from spans sorted by coordinate.
+  // For RTL lines, spans are sorted by left offset descending
+  // (right-to-left reading order). The HTML output wraps RTL lines
+  // in <div dir="rtl"> so the receiving app (Pages, Word) right-aligns
+  // the paragraph
+  const plainLines = [];
+  const htmlLines = [];
+  const lineDivs = textLayer.querySelectorAll('.text-line');
+
+  for (const lineDiv of lineDivs) {
+    if (!sel.containsNode(lineDiv, true)) continue;
+
+    const spans = [...lineDiv.querySelectorAll('span')]
+      .filter(s => sel.containsNode(s, true));
+    if (spans.length === 0) continue;
+
+    const isRtlLine = lineDiv.dir === 'rtl';
+
+    if (isRtlLine) {
+      spans.sort((a, b) => b.offsetLeft - a.offsetLeft);
+    }
+
+    const lineText = spans.map(s => s.textContent.trim()).filter(Boolean).join(' ');
+    if (!lineText) continue;
+
+    plainLines.push(lineText);
+    const escaped = lineText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    htmlLines.push(isRtlLine ? `<div dir="rtl">${escaped}</div>` : escaped);
+  }
+
+  const text = plainLines.length > 0 ? plainLines.join('\n') : sel.toString();
+  const html = htmlLines.length > 0 ? htmlLines.join('\n') : text;
+
   if (!text) return;
-
-  const escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  const html = escaped.split('\n').join('<br>');
-
   e.clipboardData.setData('text/plain', text);
   e.clipboardData.setData('text/html', html);
   e.preventDefault();
