@@ -30,11 +30,11 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 41-47)
-   * 2. OPEN SESSION DB (lines 50-64)
-   * 3. SAVE SESSION (lines 67-83)
-   * 4. LOAD SESSION (lines 86-104)
-   * 5. CLEAR SESSION (lines 107-123)
+   * 1. CONSTANTS (line 41)
+   * 2. OPEN SESSION DB (line 50)
+   * 3. SAVE SESSION (line 67)
+   * 4. LOAD SESSION (line 86)
+   * 5. CLEAR SESSION (line 107)
 */
 
 

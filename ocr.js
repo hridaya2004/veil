@@ -49,16 +49,16 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 73-90)
-   * 2. MODULE STATE (lines 93-104)
-   * 3. INITIALIZATION AND PUBLIC API (lines 107-138)
-   * 4. PREPROCESSING (lines 141-173)
-   * 5. FINGERPRINTING AND TEXT DETECTION (lines 176-253)
-   * 6. QUEUE PROCESSOR (lines 256-302)
-   * 7. TESSERACT WORKER (lines 305-347)
-   * 8. IMAGE REGION OCR (lines 350-554)
-   * 9. OCR TEXT LAYER BUILDER (lines 557-723)
-   * 10. TEXT LAYER SCHEDULING (lines 726-863)
+   * 1. CONSTANTS (line 73)
+   * 2. MODULE STATE (line 93)
+   * 3. INITIALIZATION AND PUBLIC API (line 107)
+   * 4. PREPROCESSING (line 141)
+   * 5. FINGERPRINTING AND TEXT DETECTION (line 176)
+   * 6. QUEUE PROCESSOR (line 256)
+   * 7. TESSERACT WORKER (line 305)
+   * 8. IMAGE REGION OCR (line 350)
+   * 9. OCR TEXT LAYER BUILDER (line 557)
+   * 10. TEXT LAYER SCHEDULING (line 726)
 */
 
 import {

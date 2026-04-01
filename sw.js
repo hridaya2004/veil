@@ -49,11 +49,11 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 60-101)
-   * 2. INSTALL (lines 104-110)
-   * 3. ACTIVATE (lines 113-128)
-   * 4. FETCH (lines 131-169)
-   * 5. CACHING STRATEGIES (lines 172-219)
+   * 1. CONSTANTS (line 60)
+   * 2. INSTALL (line 105)
+   * 3. ACTIVATE (line 114)
+   * 4. FETCH (line 132)
+   * 5. CACHING STRATEGIES (line 173)
 */
 
 

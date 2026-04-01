@@ -34,32 +34,32 @@
    *
    * The stylesheet follows this flow:
    *
-   * 1. RESET (lines 66-74)
-   * 2. DESIGN TOKENS (lines 77-171)
-   * 3. BASE (lines 174-194)
-   * 4. PAGE TRANSITION (lines 197-217)
-   * 5. DROP ZONE (lines 220-566)
+   * 1. RESET (line 66)
+   * 2. DESIGN TOKENS (line 77)
+   * 3. BASE (line 174)
+   * 4. PAGE TRANSITION (line 197)
+   * 5. DROP ZONE (line 220)
    *    Includes: veil transition layers, wordmark, tagline,
    *    browse button, focus styles, high contrast
-   * 6. TOOLBAR (lines 569-788)
+   * 6. TOOLBAR (line 569)
    *    Floating pill, navigation, zoom, dark mode toggle, filename
-   * 7. READER LAYOUT (lines 791-798)
-   * 8. VIEWPORT (lines 801-836)
-   * 9. PAGE CONTAINER (lines 839-874)
-   * 10. DARK MODE FILTER (lines 877-892)
-   * 11. TEXT LAYER (lines 895-1001)
+   * 7. READER LAYOUT (line 791)
+   * 8. VIEWPORT (line 801)
+   * 9. PAGE CONTAINER (line 839)
+   * 10. DARK MODE FILTER (line 877)
+   * 11. TEXT LAYER (line 895)
    *     Selection, multi-column flex wrapper, OCR image regions,
    *     vertical OCR layer
-   * 12. LINK ANNOTATIONS (lines 1003-1023)
-   * 13. PAGE NUMBER LABEL (lines 1026-1030)
-   * 14. ERROR BANNER (lines 1033-1092)
-   * 15. EXPORT PROGRESS (lines 1095-1152)
-   * 16. OCR LOADING INDICATOR (lines 1155-1251)
-   * 17. ACCESSIBILITY (lines 1254-1287)
+   * 12. LINK ANNOTATIONS (line 1004)
+   * 13. PAGE NUMBER LABEL (line 1026)
+   * 14. ERROR BANNER (line 1033)
+   * 15. EXPORT PROGRESS (line 1095)
+   * 16. OCR LOADING INDICATOR (line 1155)
+   * 17. ACCESSIBILITY (line 1254)
    *     prefers-reduced-motion, prefers-contrast, focus-visible
-   * 18. UTILITIES (lines 1290-1308)
-   * 19. MOBILE LANDSCAPE (lines 1311-1339)
-   * 20. APP SHELL LOADER (lines 1342-1376)
+   * 18. UTILITIES (line 1290)
+   * 19. MOBILE LANDSCAPE (line 1311)
+   * 20. APP SHELL LOADER (line 1342)
 */
 
 

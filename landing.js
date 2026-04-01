@@ -39,11 +39,11 @@
    *
    * The file follows this flow:
    *
-   * 1. NAVBAR SCROLL (lines 55-61)
-   * 2. ROTATING TEXT (lines 64-83)
-   * 3. BEFORE/AFTER SLIDER (lines 86-163)
-   * 4. EXPLODED LAYERS (lines 166-399)
-   * 5. PAGE TRANSITION (lines 402-425)
+   * 1. NAVBAR SCROLL (line 55)
+   * 2. ROTATING TEXT (line 64)
+   * 3. BEFORE/AFTER SLIDER (line 86)
+   * 4. EXPLODED LAYERS (line 166)
+   * 5. PAGE TRANSITION (line 402)
 */
 
 (function () {
