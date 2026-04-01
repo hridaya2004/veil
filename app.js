@@ -151,15 +151,15 @@ const DEPS = {
   NOTO_SANS_SINHALA:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansSinhala/hinted/ttf/NotoSansSinhala-Regular.ttf',
   NOTO_SANS_THAI:       'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf',
   NOTO_SANS_LAO:        'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansLao/hinted/ttf/NotoSansLao-Regular.ttf',
-  NOTO_SANS_TIBETAN:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansTibetan/hinted/ttf/NotoSansTibetan-Regular.ttf',
+  NOTO_SANS_TIBETAN:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSerifTibetan/hinted/ttf/NotoSerifTibetan-Regular.ttf',
   NOTO_SANS_MYANMAR:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansMyanmar/hinted/ttf/NotoSansMyanmar-Regular.ttf',
   NOTO_SANS_GEORGIAN:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansGeorgian/hinted/ttf/NotoSansGeorgian-Regular.ttf',
   NOTO_SANS_ARMENIAN:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansArmenian/hinted/ttf/NotoSansArmenian-Regular.ttf',
   NOTO_SANS_ETHIOPIC:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansEthiopic/hinted/ttf/NotoSansEthiopic-Regular.ttf',
   NOTO_SANS_KHMER:      'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansKhmer/hinted/ttf/NotoSansKhmer-Regular.ttf',
-  NOTO_SANS_JP:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansJP/hinted/ttf/NotoSansJP-Regular.ttf',
-  NOTO_SANS_KR:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansKR/hinted/ttf/NotoSansKR-Regular.ttf',
-  NOTO_SANS_SC:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansSC/hinted/ttf/NotoSansSC-Regular.ttf',
+  NOTO_SANS_JP:         'https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf',
+  NOTO_SANS_KR:         'https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/Korean/NotoSansCJKkr-Regular.otf',
+  NOTO_SANS_SC:         'https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf',
 };
 
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';
