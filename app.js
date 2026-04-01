@@ -85,43 +85,43 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (lines 196-283)
-   * 2. STATE (lines 286-316)
-   * 3. DOM REFERENCES (lines 319-368)
-   * 4. FOCUS MODE (lines 371-532)
-   * 5. ERROR DISPLAY (lines 535-592)
-   * 6. SESSION PERSISTENCE (lines 595-860)
-   * 7. FILE HANDLING (lines 863-906)
-   * 8. PDF LOADING (lines 909-987)
-   * 9. SCANNED DOCUMENT DETECTION (lines 990-1050)
-   * 10. OCR LOADING INDICATOR (lines 1053-1285)
-   * 11. CLEANUP (lines 1288-1297)
-   * 12. SCALE CALCULATION (lines 1300-1326)
-   * 13. VIRTUAL SCROLLING (lines 1329-1726)
+   * 1. CONSTANTS (line 223)
+   * 2. STATE (line 313)
+   * 3. DOM REFERENCES (line 346)
+   * 4. FOCUS MODE (line 398)
+   * 5. ERROR DISPLAY (line 562)
+   * 6. SESSION PERSISTENCE (line 622)
+   * 7. FILE HANDLING (line 890)
+   * 8. PDF LOADING (line 936)
+   * 9. SCANNED DOCUMENT DETECTION (line 1017)
+   * 10. OCR LOADING INDICATOR (line 1080)
+   * 11. CLEANUP (line 1315)
+   * 12. SCALE CALCULATION (line 1327)
+   * 13. VIRTUAL SCROLLING (line 1356)
    *     Page geometry, container pool, reconciliation, eviction
-   * 14. DEVICE DETECTION AND MEMORY PROFILES (lines 1729-1774)
-   * 15. UNIFIED SCROLL COORDINATOR (lines 1777-1826)
-   * 16. CANVAS POOL (lines 1829-1870)
-   * 17. ENGINE RESET (lines 1873-1962)
-   * 18. RENDER QUEUE (lines 1965-2039)
-   * 19. PAGE RENDERING (lines 2042-2165)
-   * 20. ALREADY-DARK DETECTION (lines 2168-2183)
-   * 21. TEXT LAYER (lines 2186-2337)
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1756)
+   * 15. UNIFIED SCROLL COORDINATOR (line 1804)
+   * 16. CANVAS POOL (line 1856)
+   * 17. ENGINE RESET (line 1900)
+   * 18. RENDER QUEUE (line 1992)
+   * 19. PAGE RENDERING (line 2069)
+   * 20. ALREADY-DARK DETECTION (line 2195)
+   * 21. TEXT LAYER (line 2213)
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (lines 2341-2534)
+   * 22. MULTI-COLUMN HELPERS (line 2368)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (lines 2557-2660)
-   * 24. DARK MODE LOGIC (lines 2663-2696)
-   * 25. CURRENT PAGE TRACKING (lines 2699-2728)
-   * 26. TOGGLE BUTTON STATE (lines 2731-2756)
-   * 27. NAVIGATION (lines 2759-2859)
-   * 28. EVENT LISTENERS (lines 2862-3074)
+   * 23. LINK ANNOTATION LAYER (line 2584)
+   * 24. DARK MODE LOGIC (line 2690)
+   * 25. CURRENT PAGE TRACKING (line 2726)
+   * 26. TOGGLE BUTTON STATE (line 2758)
+   * 27. NAVIGATION (line 2786)
+   * 28. EVENT LISTENERS (line 2889)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (lines 3077-3199)
-   * 30. RESIZE (lines 3202-3266)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (lines 3269-3329)
+   * 29. ZOOM (line 3104)
+   * 30. RESIZE (line 3229)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3296)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -133,6 +133,33 @@ const DEPS = {
   PDF_LIB:      'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.esm.min.js',
   FONTKIT:       'https://esm.sh/@pdf-lib/fontkit@1.1.1',
   NOTO_SANS:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf',
+
+  // Script-specific Noto Sans variants for export text layer.
+  // Each is lazy-loaded only when a document contains that script.
+  // The service worker caches them automatically (jsdelivr is in
+  // CDN_CACHE_PATTERNS). Keys match SCRIPT_FONT_MAP in export.js
+  NOTO_SANS_ARABIC:     'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf',
+  NOTO_SANS_HEBREW:     'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf',
+  NOTO_SANS_DEVANAGARI: 'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Regular.ttf',
+  NOTO_SANS_BENGALI:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansBengali/hinted/ttf/NotoSansBengali-Regular.ttf',
+  NOTO_SANS_GURMUKHI:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansGurmukhi/hinted/ttf/NotoSansGurmukhi-Regular.ttf',
+  NOTO_SANS_GUJARATI:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansGujarati/hinted/ttf/NotoSansGujarati-Regular.ttf',
+  NOTO_SANS_TAMIL:      'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansTamil/hinted/ttf/NotoSansTamil-Regular.ttf',
+  NOTO_SANS_TELUGU:     'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansTelugu/hinted/ttf/NotoSansTelugu-Regular.ttf',
+  NOTO_SANS_KANNADA:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansKannada/hinted/ttf/NotoSansKannada-Regular.ttf',
+  NOTO_SANS_MALAYALAM:  'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansMalayalam/hinted/ttf/NotoSansMalayalam-Regular.ttf',
+  NOTO_SANS_SINHALA:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansSinhala/hinted/ttf/NotoSansSinhala-Regular.ttf',
+  NOTO_SANS_THAI:       'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf',
+  NOTO_SANS_LAO:        'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansLao/hinted/ttf/NotoSansLao-Regular.ttf',
+  NOTO_SANS_TIBETAN:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansTibetan/hinted/ttf/NotoSansTibetan-Regular.ttf',
+  NOTO_SANS_MYANMAR:    'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansMyanmar/hinted/ttf/NotoSansMyanmar-Regular.ttf',
+  NOTO_SANS_GEORGIAN:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansGeorgian/hinted/ttf/NotoSansGeorgian-Regular.ttf',
+  NOTO_SANS_ARMENIAN:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansArmenian/hinted/ttf/NotoSansArmenian-Regular.ttf',
+  NOTO_SANS_ETHIOPIC:   'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansEthiopic/hinted/ttf/NotoSansEthiopic-Regular.ttf',
+  NOTO_SANS_KHMER:      'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansKhmer/hinted/ttf/NotoSansKhmer-Regular.ttf',
+  NOTO_SANS_JP:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansJP/hinted/ttf/NotoSansJP-Regular.ttf',
+  NOTO_SANS_KR:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansKR/hinted/ttf/NotoSansKR-Regular.ttf',
+  NOTO_SANS_SC:         'https://cdn.jsdelivr.net/gh/notofonts/notofonts.github.io/fonts/NotoSansSC/hinted/ttf/NotoSansSC-Regular.ttf',
 };
 
 import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.149/pdf.min.mjs';

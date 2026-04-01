@@ -16,12 +16,15 @@
    *   invisible to the naked eye during normal reading. The trade-off
    *   is that vector text becomes raster, so extreme zoom shows pixels.
    *
-   * - Unicode font (Noto Sans): the invisible text layer needs a font
-   *   that covers Greek letters, math symbols, and accented characters
-   *   common in academic papers. Helvetica (standard PDF font) only
-   *   supports 256 characters (WinAnsi encoding). I lazy-load Noto Sans
-   *   from CDN with fontkit for subsetting. If the download fails, I
-   *   fall back silently to Helvetica.
+   * - Multi-script fonts: the invisible text layer needs fonts that
+   *   cover the document's writing system. Noto Sans Regular handles
+   *   Latin, Greek, Cyrillic and math symbols. For Arabic, Hebrew, CJK,
+   *   Indic and 18 other scripts, I lazy-load the matching Noto Sans
+   *   variant from CDN with fontkit for subsetting. detectScript() in
+   *   core.js identifies the script per text item. Each font is
+   *   downloaded once and cached across exports. Latin-only documents
+   *   never trigger any extra download. If a font download fails, the
+   *   item falls back silently to Noto Sans Regular.
    *
    * - Width matching: the invisible text in Noto Sans has different
    *   character widths than the original font in the PDF. Without
@@ -62,13 +65,13 @@
    *
    * The file follows this flow:
    *
-   * 1. MODULE STATE (lines 85-93)
-   * 2. INITIALIZATION AND PUBLIC API (lines 96-117)
-   * 3. LAZY LOADERS (lines 120-157)
-   * 4. PROGRESS UI (lines 160-172)
-   * 5. LINK ANNOTATIONS (lines 175-296)
-   * 6. PER-PAGE EXPORT (lines 299-509)
-   * 7. MAIN EXPORT ORCHESTRATOR (lines 512-642)
+   * 1. MODULE STATE (line 89)
+   * 2. INITIALIZATION AND PUBLIC API (line 139)
+   * 3. LAZY LOADERS (line 163)
+   * 4. PROGRESS UI (line 246)
+   * 5. LINK ANNOTATIONS (line 261)
+   * 6. PER-PAGE EXPORT (line 385)
+   * 7. MAIN EXPORT ORCHESTRATOR (line 607)
 */
 
 import {
@@ -77,6 +80,7 @@ import {
   isOcrArtifact,
   compositeImageRegions,
   getNavigatorLanguage,
+  detectScript,
 } from './core.js';
 
 import { preprocessCanvasForOcr } from './ocr.js';
@@ -86,9 +90,48 @@ import { preprocessCanvasForOcr } from './ocr.js';
 
 let pdfLibModule = null;     // pdf-lib module (lazy-loaded on first export)
 let fontkitModule = null;    // fontkit for Unicode font embedding (lazy-loaded)
-let cachedFontBytes = null;  // Noto Sans TTF bytes (downloaded once, reused)
+let cachedFontBytes = null;  // Noto Sans Regular TTF bytes (downloaded once, reused)
 let exporting = false;
 let exportGeneration = 0;    // increments on every export/cancel, never decreases
+
+/*
+ * Multi-script font registry. The export needs different Noto Sans
+ * variants for different writing systems (Arabic text needs Noto Sans
+ * Arabic, Chinese needs Noto Sans SC, etc.). Each font is downloaded
+ * once and cached in fontBytesCache, then embedded once per export
+ * into fontRegistry. Latin-only documents never trigger any download.
+ *
+ * The map keys match the script names returned by detectScript() in
+ * core.js. The values are DEPS keys in app.js. Scripts not listed
+ * here fall through to the latin font (Noto Sans Regular)
+ */
+const SCRIPT_FONT_MAP = {
+  arabic:     'NOTO_SANS_ARABIC',
+  hebrew:     'NOTO_SANS_HEBREW',
+  devanagari: 'NOTO_SANS_DEVANAGARI',
+  bengali:    'NOTO_SANS_BENGALI',
+  gurmukhi:   'NOTO_SANS_GURMUKHI',
+  gujarati:   'NOTO_SANS_GUJARATI',
+  tamil:      'NOTO_SANS_TAMIL',
+  telugu:     'NOTO_SANS_TELUGU',
+  kannada:    'NOTO_SANS_KANNADA',
+  malayalam:  'NOTO_SANS_MALAYALAM',
+  sinhala:    'NOTO_SANS_SINHALA',
+  thai:       'NOTO_SANS_THAI',
+  lao:        'NOTO_SANS_LAO',
+  tibetan:    'NOTO_SANS_TIBETAN',
+  myanmar:    'NOTO_SANS_MYANMAR',
+  georgian:   'NOTO_SANS_GEORGIAN',
+  armenian:   'NOTO_SANS_ARMENIAN',
+  ethiopic:   'NOTO_SANS_ETHIOPIC',
+  khmer:      'NOTO_SANS_KHMER',
+  japanese:   'NOTO_SANS_JP',
+  korean:     'NOTO_SANS_KR',
+  cjk:        'NOTO_SANS_SC',
+};
+
+const fontBytesCache = {};   // { arabic: Uint8Array, ... } persists across exports
+const fontRegistry = {};     // { arabic: PDFFont, ... } reset per export (tied to outPdf)
 
 let ctx = null;
 
@@ -154,6 +197,49 @@ async function ensureUnicodeFont() {
   }
 
   return { fontkit: fontkitModule, fontBytes: cachedFontBytes };
+}
+
+/*
+ * Returns the correct font for a given script. On the first call for
+ * each script, downloads the font from CDN and embeds it in the PDF.
+ * Subsequent calls for the same script return the cached PDFFont.
+ *
+ * The font bytes are cached across exports (fontBytesCache) so a
+ * second export of the same document skips the download entirely.
+ * The PDFFont objects (fontRegistry) are reset per export because
+ * they are tied to a specific PDFDocument instance.
+ *
+ * Latin falls through to the main Noto Sans Regular font passed as
+ * latinFont. Scripts without a DEPS entry also fall through
+ */
+async function getFontForScript(script, outPdf, latinFont) {
+  if (script === 'latin' || !SCRIPT_FONT_MAP[script]) return latinFont;
+  if (fontRegistry[script]) return fontRegistry[script];
+
+  const depKey = SCRIPT_FONT_MAP[script];
+  const url = ctx.DEPS[depKey];
+  if (!url) return latinFont;
+
+  // Download font bytes (once per script, cached across exports)
+  if (!fontBytesCache[script]) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Font fetch ${resp.status}`);
+      fontBytesCache[script] = new Uint8Array(await resp.arrayBuffer());
+    } catch (e) {
+      console.warn(`[Export] Failed to load font for ${script}:`, e);
+      return latinFont;
+    }
+  }
+
+  // Embed in this PDF (once per script per export)
+  try {
+    fontRegistry[script] = await outPdf.embedFont(fontBytesCache[script], { subset: true });
+    return fontRegistry[script];
+  } catch (e) {
+    console.warn(`[Export] Failed to embed font for ${script}:`, e);
+    return latinFont;
+  }
 }
 
 
@@ -413,15 +499,21 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
       const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
       if (baseFontSize < 1) continue;
 
+      // Select the font that covers this item's writing system.
+      // Arabic text gets Noto Sans Arabic, Chinese gets Noto Sans SC,
+      // Latin stays on Noto Sans Regular. The font is downloaded once
+      // per script and cached for subsequent items and exports
+      const script = detectScript(itemText);
+      const itemFont = await getFontForScript(script, outPdf, font);
+
       try {
-        // Width matching: the invisible text uses Noto Sans but the
-        // original PDF might use Times, Arial, or a custom font.
-        // I adjust the fontSize so the text in Noto Sans has exactly
-        // the same width as the original, making the selection align
-        // with the visible text in the JPEG image underneath
+        // Width matching: the invisible text may use a different font
+        // than the original PDF. I adjust the fontSize so the rendered
+        // width matches, making the selection align with the visible
+        // text in the JPEG image underneath
         let drawSize = baseFontSize;
         if (item.width > 0) {
-          const naturalWidth = font.widthOfTextAtSize(itemText, baseFontSize);
+          const naturalWidth = itemFont.widthOfTextAtSize(itemText, baseFontSize);
           if (naturalWidth > 0) {
             drawSize = baseFontSize * (item.width / naturalWidth);
           }
@@ -431,7 +523,7 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
           x: tx[4],
           y: tx[5],
           size: drawSize,
-          font,
+          font: itemFont,
           opacity: 0, // invisible text, only for selection and search
         });
       } catch (_) {} // skip characters not in the font's encoding
@@ -458,11 +550,14 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
         const baseFontSize = (word.bbox.y1 - word.bbox.y0) * sy * 0.85;
         if (baseFontSize < 1) continue;
 
+        const script = detectScript(wordText);
+        const wordFont = await getFontForScript(script, outPdf, font);
+
         try {
           const targetWidth = (word.bbox.x1 - word.bbox.x0) * sx;
           let drawSize = baseFontSize;
           if (targetWidth > 0) {
-            const naturalWidth = font.widthOfTextAtSize(wordText, baseFontSize);
+            const naturalWidth = wordFont.widthOfTextAtSize(wordText, baseFontSize);
             if (naturalWidth > 0) {
               drawSize = baseFontSize * (targetWidth / naturalWidth);
             }
@@ -472,7 +567,7 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
             x: word.bbox.x0 * sx,
             y: origVp.height - word.bbox.y1 * sy,
             size: drawSize,
-            font,
+            font: wordFont,
             opacity: 0,
           });
         } catch (_) {}
@@ -604,6 +699,11 @@ export async function exportDarkPdf() {
     outPdf.setCreator('veil');
     let pdfBytes = await outPdf.save();
     hideExportProgress();
+
+    // Reset per-export font registry. The PDFFont objects are tied to
+    // this specific outPdf instance and can't be reused. The font bytes
+    // stay in fontBytesCache for the next export
+    for (const key of Object.keys(fontRegistry)) delete fontRegistry[key];
 
     // Aggressive memory release: a 200-page export accumulates ~300MB
     // of embedded JPEGs inside pdf-lib. Without nulling these references,
