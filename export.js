@@ -68,10 +68,10 @@
    * 1. MODULE STATE (line 89)
    * 2. INITIALIZATION AND PUBLIC API (line 139)
    * 3. LAZY LOADERS (line 163)
-   * 4. PROGRESS UI (line 246)
-   * 5. LINK ANNOTATIONS (line 261)
-   * 6. PER-PAGE EXPORT (line 385)
-   * 7. MAIN EXPORT ORCHESTRATOR (line 607)
+   * 4. PROGRESS UI (line 264)
+   * 5. LINK ANNOTATIONS (line 279)
+   * 6. PER-PAGE EXPORT (line 403)
+   * 7. MAIN EXPORT ORCHESTRATOR (line 625)
 */
 
 import {
@@ -95,11 +95,11 @@ let exporting = false;
 let exportGeneration = 0;    // increments on every export/cancel, never decreases
 
 /*
- * Multi-script font registry. The export needs different Noto Sans
- * variants for different writing systems (Arabic text needs Noto Sans
- * Arabic, Chinese needs Noto Sans SC, etc.). Each font is downloaded
- * once and cached in fontBytesCache, then embedded once per export
- * into fontRegistry. Latin-only documents never trigger any download.
+ * I use different Noto Sans variants for different writing systems
+ * (Arabic text needs Noto Sans Arabic, Chinese needs Noto Sans SC).
+ * Each font is downloaded once and cached in fontBytesCache, then
+ * embedded once per export into fontRegistry. Latin-only documents
+ * never trigger any download.
  *
  * The map keys match the script names returned by detectScript() in
  * core.js. The values are DEPS keys in app.js. Scripts not listed
@@ -200,18 +200,33 @@ async function ensureUnicodeFont() {
 }
 
 /*
- * Returns the correct font for a given script. On the first call for
- * each script, downloads the font from CDN and embeds it in the PDF.
- * Subsequent calls for the same script return the cached PDFFont.
+ * I select the correct Noto Sans variant for a given script. On the
+ * first call for each script, I download the font from CDN and embed
+ * it in the PDF. Subsequent calls return the cached PDFFont.
  *
- * The font bytes are cached across exports (fontBytesCache) so a
- * second export of the same document skips the download entirely.
- * The PDFFont objects (fontRegistry) are reset per export because
- * they are tied to a specific PDFDocument instance.
+ * Font bytes persist across exports (fontBytesCache) so a second
+ * export skips the download entirely. PDFFont objects (fontRegistry)
+ * are reset per export because they are tied to a specific
+ * PDFDocument instance.
+ *
+ * For non-Latin scripts, I disable OpenType shaping features (GSUB)
+ * during embedding. The text layer is invisible (opacity: 0) so
+ * visual shaping (connected Arabic letters, ligatures) does not
+ * matter. What matters is that the ToUnicode CMap maps each glyph
+ * back to the correct Unicode codepoint for copy/paste. When GSUB
+ * is active, fontkit substitutes glyph IDs for contextual forms and
+ * then generates a corrupted reverse mapping (e.g. Arabic "ta" gets
+ * mapped to "ya" because they share a base skeleton). Disabling
+ * GSUB keeps the mapping 1:1 and clean.
  *
  * Latin falls through to the main Noto Sans Regular font passed as
  * latinFont. Scripts without a DEPS entry also fall through
  */
+const NO_SHAPING_FEATURES = {
+  init: false, medi: false, fina: false, isol: false,
+  liga: false, rlig: false, clig: false, calt: false, ccmp: false,
+};
+
 async function getFontForScript(script, outPdf, latinFont) {
   if (script === 'latin' || !SCRIPT_FONT_MAP[script]) return latinFont;
   if (fontRegistry[script]) return fontRegistry[script];
@@ -232,9 +247,12 @@ async function getFontForScript(script, outPdf, latinFont) {
     }
   }
 
-  // Embed in this PDF (once per script per export)
+  // Embed with shaping disabled so ToUnicode stays clean
   try {
-    fontRegistry[script] = await outPdf.embedFont(fontBytesCache[script], { subset: true });
+    fontRegistry[script] = await outPdf.embedFont(fontBytesCache[script], {
+      subset: true,
+      features: NO_SHAPING_FEATURES,
+    });
     return fontRegistry[script];
   } catch (e) {
     console.warn(`[Export] Failed to embed font for ${script}:`, e);
