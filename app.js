@@ -110,18 +110,18 @@
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (line 2368)
+   * 22. MULTI-COLUMN HELPERS (line 2369)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (line 2584)
-   * 24. DARK MODE LOGIC (line 2690)
-   * 25. CURRENT PAGE TRACKING (line 2726)
-   * 26. TOGGLE BUTTON STATE (line 2758)
-   * 27. NAVIGATION (line 2786)
-   * 28. EVENT LISTENERS (line 2889)
+   * 23. LINK ANNOTATION LAYER (line 2595)
+   * 24. DARK MODE LOGIC (line 2701)
+   * 25. CURRENT PAGE TRACKING (line 2737)
+   * 26. TOGGLE BUTTON STATE (line 2769)
+   * 27. NAVIGATION (line 2797)
+   * 28. EVENT LISTENERS (line 2900)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (line 3104)
-   * 30. RESIZE (line 3229)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3296)
+   * 29. ZOOM (line 3115)
+   * 30. RESIZE (line 3240)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3307)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -2266,6 +2266,7 @@ function buildTextLayer(container, textContent, viewport, dpr) {
       hasEOL: !!item.hasEOL,
       tx1: tx[1],
       tx2: tx[2],
+      dir: item.dir || 'ltr',
     });
   }
 
@@ -2479,19 +2480,23 @@ function detectColumnGroupsFromLines(lines) {
  * contaminate each other's vertical positioning.
  */
 function buildLinesIntoContainer(container, lines, measureCtx, spaceAdvance, dpr) {
-  // Pre-process: sort and merge each line, compute top and height
+  // I sort and merge each line, compute top, height, and direction.
+  // A line is RTL if the majority of its items are RTL (from the
+  // dir property that PDF.js provides on each text content item)
   const processed = lines.map(rawLine => {
     rawLine.sort((a, b) => a.left - b.left);
     const line = mergePunctuation(rawLine);
     const lt = line[0].top;
     const lh = Math.max(...line.map(it => it.height));
-    return { line, lt, lh };
+    const rtlCount = line.filter(it => it.dir === 'rtl').length;
+    const isRtl = rtlCount > line.length / 2;
+    return { line, lt, lh, isRtl };
   });
 
   let prevBottom = 0;
 
   for (let idx = 0; idx < processed.length; idx++) {
-    const { line, lt, lh } = processed[idx];
+    const { line, lt, lh, isRtl } = processed[idx];
 
     const lineDiv = document.createElement('div');
     lineDiv.className = 'text-line';
@@ -2514,6 +2519,12 @@ function buildLinesIntoContainer(container, lines, measureCtx, spaceAdvance, dpr
 
     lineDiv.style.paddingTop = vGap + 'px';
     lineDiv.style.height = (extendedLh + vGap) + 'px';
+
+    // I set dir="rtl" on lines where the majority of items are RTL
+    // (Arabic, Hebrew). The visual layout does not change because
+    // spans are positioned with explicit left coordinates, but the
+    // browser's clipboard logic respects the reading direction
+    if (isRtl) lineDiv.dir = 'rtl';
 
     prevBottom = lt + extendedLh;
 
@@ -2554,7 +2565,7 @@ function buildLinesIntoContainer(container, lines, measureCtx, spaceAdvance, dpr
           span.style.display = 'inline-block';
           span.style.width = item.pdfWidth + 'px';
           span.style.transform = `scaleX(${scaleX})`;
-          span.style.transformOrigin = 'left top';
+          span.style.transformOrigin = isRtl ? 'right top' : 'left top';
         }
       }
 

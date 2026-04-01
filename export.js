@@ -65,13 +65,13 @@
    *
    * The file follows this flow:
    *
-   * 1. MODULE STATE (line 89)
-   * 2. INITIALIZATION AND PUBLIC API (line 139)
-   * 3. LAZY LOADERS (line 163)
-   * 4. PROGRESS UI (line 264)
-   * 5. LINK ANNOTATIONS (line 279)
-   * 6. PER-PAGE EXPORT (line 403)
-   * 7. MAIN EXPORT ORCHESTRATOR (line 625)
+   * 1. MODULE STATE (line 90)
+   * 2. INITIALIZATION AND PUBLIC API (line 140)
+   * 3. LAZY LOADERS (line 164)
+   * 4. PROGRESS UI (line 265)
+   * 5. LINK ANNOTATIONS (line 280)
+   * 6. PER-PAGE EXPORT (line 404)
+   * 7. MAIN EXPORT ORCHESTRATOR (line 678)
 */
 
 import {
@@ -81,6 +81,7 @@ import {
   compositeImageRegions,
   getNavigatorLanguage,
   detectScript,
+  groupItemsIntoLines,
 } from './core.js';
 
 import { preprocessCanvasForOcr } from './ocr.js';
@@ -510,41 +511,93 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
   });
 
   if (textContent) {
+    // I transform each item to get its position, then group them into
+    // lines and split each line into "runs" of consecutive same-script
+    // items. Each run becomes a single drawText call. This avoids two
+    // problems: (1) per-item drawText produces fragmented text that
+    // viewers show as one-word-per-line when pasting, and (2) mixing
+    // Arabic and Latin in one drawText confuses the viewer's bidi
+    // algorithm, reversing Arabic characters on mixed-script lines.
+    // Same-script runs are safe to concatenate because the viewer
+    // knows the direction from the characters themselves
+    const exportItems = [];
     for (const item of textContent.items) {
       if (!item.str || !item.str.trim()) continue;
-      const itemText = normalizeLigatures(item.str);
       const tx = item.transform;
       const baseFontSize = Math.sqrt(tx[2] * tx[2] + tx[3] * tx[3]);
       if (baseFontSize < 1) continue;
+      exportItems.push({
+        str: normalizeLigatures(item.str),
+        left: tx[4], top: tx[5],
+        fontSize: baseFontSize,
+        width: item.width,
+        height: baseFontSize,
+        dir: item.dir || 'ltr',
+      });
+    }
 
-      // Select the font that covers this item's writing system.
-      // Arabic text gets Noto Sans Arabic, Chinese gets Noto Sans SC,
-      // Latin stays on Noto Sans Regular. The font is downloaded once
-      // per script and cached for subsequent items and exports
-      const script = detectScript(itemText);
-      const itemFont = await getFontForScript(script, outPdf, font);
+    const lines = groupItemsIntoLines(exportItems);
 
-      try {
-        // Width matching: the invisible text may use a different font
-        // than the original PDF. I adjust the fontSize so the rendered
-        // width matches, making the selection align with the visible
-        // text in the JPEG image underneath
-        let drawSize = baseFontSize;
-        if (item.width > 0) {
-          const naturalWidth = itemFont.widthOfTextAtSize(itemText, baseFontSize);
-          if (naturalWidth > 0) {
-            drawSize = baseFontSize * (item.width / naturalWidth);
-          }
+    for (const line of lines) {
+      // Sort items by position within the line
+      const rtlCount = line.filter(it => it.dir === 'rtl').length;
+      const isRtl = rtlCount > line.length / 2;
+      line.sort((a, b) => isRtl ? b.left - a.left : a.left - b.left);
+
+      // Split the line into runs of consecutive same-script items.
+      // A "run" is a sequence where all items share the same script
+      // (e.g. all Arabic or all Latin). Punctuation and numbers
+      // that detectScript classifies as 'latin' attach to whichever
+      // run they are adjacent to
+      const runs = [];
+      let currentRun = [line[0]];
+      let currentScript = detectScript(line[0].str);
+
+      for (let i = 1; i < line.length; i++) {
+        const itemScript = detectScript(line[i].str);
+        if (itemScript === currentScript || itemScript === 'latin' && currentScript !== 'latin') {
+          // Same script, or latin punctuation/numbers inside a non-latin run
+          currentRun.push(line[i]);
+        } else if (currentScript === 'latin' && itemScript !== 'latin') {
+          // Switching from latin to non-latin: start new run
+          runs.push({ items: currentRun, script: currentScript });
+          currentRun = [line[i]];
+          currentScript = itemScript;
+        } else {
+          runs.push({ items: currentRun, script: currentScript });
+          currentRun = [line[i]];
+          currentScript = itemScript;
         }
+      }
+      runs.push({ items: currentRun, script: currentScript });
 
-        outPage.drawText(itemText, {
-          x: tx[4],
-          y: tx[5],
-          size: drawSize,
-          font: itemFont,
-          opacity: 0, // invisible text, only for selection and search
-        });
-      } catch (_) {} // skip characters not in the font's encoding
+      // Write each run as a single drawText
+      for (const run of runs) {
+        const runText = run.items.map(it => it.str).join(' ');
+        const runFont = await getFontForScript(run.script, outPdf, font);
+        const avgFontSize = run.items.reduce((s, it) => s + it.fontSize, 0) / run.items.length;
+        const minX = Math.min(...run.items.map(it => it.left));
+        const maxX = Math.max(...run.items.map(it => it.left + (it.width || 0)));
+        const totalWidth = maxX - minX;
+
+        try {
+          let drawSize = avgFontSize;
+          if (totalWidth > 0) {
+            const naturalWidth = runFont.widthOfTextAtSize(runText, avgFontSize);
+            if (naturalWidth > 0) {
+              drawSize = avgFontSize * (totalWidth / naturalWidth);
+            }
+          }
+
+          outPage.drawText(runText, {
+            x: minX,
+            y: run.items[0].top,
+            size: drawSize,
+            font: runFont,
+            opacity: 0,
+          });
+        } catch (_) {}
+      }
     }
 
   } else if (ctx.isScannedDocument && exportWorker) {
