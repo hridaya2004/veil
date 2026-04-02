@@ -71,7 +71,7 @@
    * 4. PROGRESS UI (line 268)
    * 5. LINK ANNOTATIONS (line 283)
    * 6. PER-PAGE EXPORT (line 407)
-   * 7. MAIN EXPORT ORCHESTRATOR (line 705)
+   * 7. MAIN EXPORT ORCHESTRATOR (line 713)
 */
 
 import {
@@ -564,6 +564,14 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
     }
 
     const lines = groupItemsIntoLines(exportItems);
+
+    // I reverse the line order so the content stream starts with the
+    // top of the page. In PDF coordinates Y=0 is at the bottom, so
+    // groupItemsIntoLines sorts bottom-first. Chrome and Acrobat
+    // extract text in content stream order, which without this
+    // reversal produces bottom-to-top paste. Apple Preview uses
+    // spatial analysis and is unaffected by stream order
+    lines.reverse();
 
     for (const line of lines) {
       // Sort items by position within the line
