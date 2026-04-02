@@ -16,16 +16,16 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (line 101)
+   * 1. CONSTANTS (line 108)
    *    Thresholds and identity values used across the codebase.
    *    Each threshold was calibrated on real documents and the comments
    *    explain why each number was chosen.
    *
-   * 2. OCR ARTIFACT DETECTION (line 133)
+   * 2. OCR ARTIFACT DETECTION (line 140)
    *    Filters garbage text from Tesseract's interpretation of borders,
    *    stamps, and logos in scanned documents.
    *
-   * 3. MATRIX UTILITIES (line 195)
+   * 3. MATRIX UTILITIES (line 202)
    *    PDF coordinate math. A PDF stores positions using a 6-number
    *    array called the CTM (Current Transformation Matrix) that encodes
    *    translation, scale, rotation and skew in a single compact form.
@@ -34,67 +34,74 @@
    *    pointing up, but canvas/CSS start at the top-left with Y pointing
    *    down. These functions handle the conversion.
    *
-   * 4. IMAGE REGION EXTRACTION (line 247)
+   * 4. IMAGE REGION EXTRACTION (line 254)
    *    A PDF page is a sequence of drawing instructions ("operators"):
    *    "draw text here", "place image there", "change the transform".
    *    I walk this sequence tracking position state to find every
    *    raster image. This is how veil knows which areas to protect
    *    from dark mode inversion.
    *
-   * 5. OVERLAY COMPOSITION (line 316)
+   * 5. OVERLAY COMPOSITION (line 323)
    *    The dark mode trick: CSS `filter: invert()` on the main canvas
    *    inverts everything (text becomes light, but images become
    *    wrong too). The overlay canvas sits on top with NO filter, and
    *    I copy the original image pixels there. Result: dark text with
    *    original-color images.
    *
-   * 6. ALREADY-DARK DETECTION (line 339)
+   * 6. ALREADY-DARK DETECTION (line 346)
    *    Samples luminance at page edges and corners to detect pages
    *    that are already dark (slides, dark-themed PDFs). These pages
    *    skip inversion because inverting an already-dark page makes it light.
    *
-   * 7. DARK MODE STATE RESOLUTION (line 389)
+   * 7. DARK MODE STATE RESOLUTION (line 396)
    *    Decides whether to apply dark mode on a given page. Three states:
    *    auto (respects detection), force dark, force light. The user can
    *    override any page with the toggle button, and the override is
    *    preserved in the exported PDF.
    *
-   * 8. TEXT NORMALIZATION (line 406)
+   * 8. TEXT NORMALIZATION (line 413)
    *    Decomposes typographic ligatures (ﬁ->fi, ﬂ->fl) so copy/paste
    *    produces normal characters instead of special Unicode glyphs.
    *
-   * 9. PUNCTUATION MERGING (line 426)
+   * 9. PUNCTUATION MERGING (line 433)
    *    Fuses tiny standalone punctuation items (3-4px wide periods,
    *    commas) into the preceding word so they're selectable.
    *
-   * 10. TEXT LAYER UTILITIES (line 486)
+   * 10. TEXT LAYER UTILITIES (line 493)
    *     Line grouping (which words belong on the same line?) and word
    *     boundary detection (should there be a space between two spans?).
    *     Used by both the native text layer and the OCR text layer.
    *
-   * 11. SCALE CALCULATION (line 573)
+   * 11. SCALE CALCULATION (line 580)
    *     Determines how large to render each page. Fit-to-page on desktop,
    *     fit-to-width on mobile landscape.
    *
-   * 12. NAVIGATOR LANGUAGE MAPPING (line 593)
+   * 12. NAVIGATOR LANGUAGE MAPPING (line 600)
    *     Maps the user's OS language to a Tesseract language code so the
    *     OCR worker starts with the right model from the beginning.
    *
-   * 13. SCANNED DOCUMENT DETECTION (line 642)
+   * 13. SCANNED DOCUMENT DETECTION (line 649)
    *     Samples multiple pages to determine if the PDF is a scan (one
    *     full-page image per page, almost no native text).
    *
-   * 14. OCR LANGUAGE DETECTION (line 671)
+   * 14. OCR LANGUAGE DETECTION (line 678)
    *     Detects the document language from character frequency and
    *     function words. Used as a fallback when navigator.languages
    *     doesn't provide a non-English language.
    *
-   * 15. SCRIPT DETECTION (line 820)
+   * 15. SCRIPT DETECTION (line 827)
    *     Identifies the writing system of a text string by scanning for
    *     Unicode range patterns. Used by the export pipeline to select
    *     the correct Noto Sans font variant for each text item, enabling
    *     proper rendering of Arabic, Hebrew, CJK, Indic and every other
    *     major writing system in exported PDFs.
+   *
+   * 16. IMAGE CONTENT ANALYSIS (line 882)
+   *     Detects OCR overlays (Adobe Paper Capture scans with invisible
+   *     text layer) using four independent signals: image coverage,
+   *     text containment, character density, and blank paper analysis.
+   *     Prevents false positives on book covers, magazine layouts,
+   *     and photographic slides.
 */
 
 
@@ -870,3 +877,43 @@ export function detectScript(str) {
   }
   return 'latin';
 }
+
+
+// --- IMAGE CONTENT ANALYSIS ---
+
+/*
+ * I analyze the pixel content of an image region to detect scanned
+ * paper (Adobe Paper Capture). A scan of a document page has >85%
+ * of pixels near-white (luminance >200) because it is photographed
+ * paper with printed text. A photograph or illustration has a much
+ * wider brightness distribution even if it appears "light."
+ *
+ * I sample with a stride to avoid reading every pixel. On a 300x400
+ * image this reads ~2500 pixels in <1ms instead of all 120.000.
+ * The BT.601 luminance formula is the same used in detectAlreadyDark
+ */
+export const IMAGE_BLANK_PAPER_THRESHOLD = 0.75;
+export const OCR_OVERLAY_COVERAGE_THRESHOLD = 0.40;
+export const OCR_OVERLAY_CHAR_THRESHOLD = 200;
+
+export function isBlankPaper(pixelData, width, height) {
+  if (!pixelData || width <= 0 || height <= 0) return false;
+
+  const stride = Math.max(1, Math.floor(Math.sqrt(width * height / 2500)));
+  let bright = 0;
+  let total = 0;
+
+  for (let y = 0; y < height; y += stride) {
+    for (let x = 0; x < width; x += stride) {
+      const idx = (y * width + x) * 4;
+      if (idx + 2 >= pixelData.length) continue;
+      const lum = 0.299 * pixelData[idx] + 0.587 * pixelData[idx + 1] + 0.114 * pixelData[idx + 2];
+      if (lum > 200) bright++;
+      total++;
+    }
+  }
+
+  if (total === 0) return false;
+  return (bright / total) >= IMAGE_BLANK_PAPER_THRESHOLD;
+}
+

@@ -85,43 +85,43 @@
    *
    * The file follows this flow:
    *
-   * 1. CONSTANTS (line 223)
-   * 2. STATE (line 313)
-   * 3. DOM REFERENCES (line 346)
-   * 4. FOCUS MODE (line 398)
-   * 5. ERROR DISPLAY (line 562)
-   * 6. SESSION PERSISTENCE (line 622)
-   * 7. FILE HANDLING (line 890)
-   * 8. PDF LOADING (line 936)
-   * 9. SCANNED DOCUMENT DETECTION (line 1017)
-   * 10. OCR LOADING INDICATOR (line 1080)
-   * 11. CLEANUP (line 1371)
-   * 12. SCALE CALCULATION (line 1383)
-   * 13. VIRTUAL SCROLLING (line 1412)
+   * 1. CONSTANTS (line 226)
+   * 2. STATE (line 316)
+   * 3. DOM REFERENCES (line 349)
+   * 4. FOCUS MODE (line 401)
+   * 5. ERROR DISPLAY (line 565)
+   * 6. SESSION PERSISTENCE (line 625)
+   * 7. FILE HANDLING (line 893)
+   * 8. PDF LOADING (line 939)
+   * 9. SCANNED DOCUMENT DETECTION (line 1020)
+   * 10. OCR LOADING INDICATOR (line 1083)
+   * 11. CLEANUP (line 1374)
+   * 12. SCALE CALCULATION (line 1386)
+   * 13. VIRTUAL SCROLLING (line 1415)
    *     Page geometry, container pool, reconciliation, eviction
-   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1812)
-   * 15. UNIFIED SCROLL COORDINATOR (line 1860)
-   * 16. CANVAS POOL (line 1912)
-   * 17. ENGINE RESET (line 1956)
-   * 18. RENDER QUEUE (line 2048)
-   * 19. PAGE RENDERING (line 2125)
-   * 20. ALREADY-DARK DETECTION (line 2251)
-   * 21. TEXT LAYER (line 2269)
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1815)
+   * 15. UNIFIED SCROLL COORDINATOR (line 1863)
+   * 16. CANVAS POOL (line 1915)
+   * 17. ENGINE RESET (line 1959)
+   * 18. RENDER QUEUE (line 2051)
+   * 19. PAGE RENDERING (line 2128)
+   * 20. ALREADY-DARK DETECTION (line 2292)
+   * 21. TEXT LAYER (line 2310)
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (line 2425)
+   * 22. MULTI-COLUMN HELPERS (line 2466)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (line 2651)
-   * 24. DARK MODE LOGIC (line 2757)
-   * 25. CURRENT PAGE TRACKING (line 2793)
-   * 26. TOGGLE BUTTON STATE (line 2825)
-   * 27. NAVIGATION (line 2853)
-   * 28. EVENT LISTENERS (line 2956)
+   * 23. LINK ANNOTATION LAYER (line 2692)
+   * 24. DARK MODE LOGIC (line 2798)
+   * 25. CURRENT PAGE TRACKING (line 2834)
+   * 26. TOGGLE BUTTON STATE (line 2866)
+   * 27. NAVIGATION (line 2894)
+   * 28. EVENT LISTENERS (line 2997)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (line 3171)
-   * 30. RESIZE (line 3296)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3363)
+   * 29. ZOOM (line 3212)
+   * 30. RESIZE (line 3337)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3404)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -215,6 +215,9 @@ import {
   calculateScale as _calculateScale,
   isScannedPattern,
   isOcrArtifact,
+  isBlankPaper,
+  OCR_OVERLAY_COVERAGE_THRESHOLD,
+  OCR_OVERLAY_CHAR_THRESHOLD,
 } from './core.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = DEPS.PDFJS_WORKER;
@@ -2183,9 +2186,47 @@ async function renderPageIfNeeded(pageNum) {
     const isDark = detectAlreadyDark(renderCanvas);
     pdfState.alreadyDark.set(pageNum, isDark);
 
-    const regions = pdfState.isScanned
+    let regions = pdfState.isScanned
       ? []
       : extractImageRegions(opList, scaledViewport.transform);
+
+    // I filter out images that are OCR overlays (Adobe Paper Capture).
+    // These are scanned pages with an invisible text layer on top.
+    // Without this filter, the image gets protected from inversion
+    // and the user sees the original white page in dark mode.
+    // Three signals: coverage >40% (image dominates the page),
+    // >200 characters on the page (not a book cover with just a
+    // title), and the image is predominantly blank paper (not a
+    // photograph or illustration)
+    if (regions.length > 0 && textContent) {
+      // I filter out OCR overlay images (Adobe Paper Capture) using
+      // three signals: coverage (image dominates the page), character
+      // density (enough text to be a document, not a cover), and blank
+      // paper analysis (the image is scanned paper, not a photograph).
+      // I originally had a fourth check (text coordinates inside image
+      // bounds) but removed it because PDF space and canvas space
+      // coordinate conversion is unreliable across rotated/cropped
+      // pages. The three remaining checks are sufficient: blank paper
+      // eliminates photos, char density eliminates covers
+      const pageArea = w * h;
+      const charCount = textContent.items.reduce((sum, it) => sum + (it.str || '').length, 0);
+      const rCtx = renderCanvas.getContext('2d');
+
+      regions = regions.filter(region => {
+        const coverage = (region.width * region.height) / pageArea;
+        if (coverage < OCR_OVERLAY_COVERAGE_THRESHOLD) return true;
+        if (charCount < OCR_OVERLAY_CHAR_THRESHOLD) return true;
+
+        const rx = Math.max(0, Math.round(region.x));
+        const ry = Math.max(0, Math.round(region.y));
+        const rw = Math.min(w - rx, Math.round(region.width));
+        const rh = Math.min(h - ry, Math.round(region.height));
+        if (rw <= 0 || rh <= 0) return true;
+
+        const imgData = rCtx.getImageData(rx, ry, rw, rh);
+        return !isBlankPaper(imgData.data, rw, rh);
+      });
+    }
 
     // --- Compose page behind placeholder, then reveal ---
     /*

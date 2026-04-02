@@ -65,13 +65,13 @@
    *
    * The file follows this flow:
    *
-   * 1. MODULE STATE (line 90)
-   * 2. INITIALIZATION AND PUBLIC API (line 140)
-   * 3. LAZY LOADERS (line 164)
-   * 4. PROGRESS UI (line 265)
-   * 5. LINK ANNOTATIONS (line 280)
-   * 6. PER-PAGE EXPORT (line 404)
-   * 7. MAIN EXPORT ORCHESTRATOR (line 678)
+   * 1. MODULE STATE (line 93)
+   * 2. INITIALIZATION AND PUBLIC API (line 143)
+   * 3. LAZY LOADERS (line 167)
+   * 4. PROGRESS UI (line 268)
+   * 5. LINK ANNOTATIONS (line 283)
+   * 6. PER-PAGE EXPORT (line 407)
+   * 7. MAIN EXPORT ORCHESTRATOR (line 705)
 */
 
 import {
@@ -82,6 +82,9 @@ import {
   getNavigatorLanguage,
   detectScript,
   groupItemsIntoLines,
+  isBlankPaper,
+  OCR_OVERLAY_COVERAGE_THRESHOLD,
+  OCR_OVERLAY_CHAR_THRESHOLD,
 } from './core.js';
 
 import { preprocessCanvasForOcr } from './ocr.js';
@@ -486,7 +489,31 @@ async function exportPage(pageNum, outPdf, font, exportWorker, exportScale, rend
     }
 
     if (!ctx.isScannedDocument) {
-      const regions = ctx.extractImageRegions(opList, renderVp.transform);
+      let regions = ctx.extractImageRegions(opList, renderVp.transform);
+
+      // Same OCR overlay filtering as the web viewer (3 signals:
+      // coverage, char density, blank paper)
+      if (regions.length > 0 && textContent) {
+        const pageArea = w * h;
+        const charCount = textContent.items.reduce((sum, it) => sum + (it.str || '').length, 0);
+        const rCtx = renderCanvas.getContext('2d');
+
+        regions = regions.filter(region => {
+          const coverage = (region.width * region.height) / pageArea;
+          if (coverage < OCR_OVERLAY_COVERAGE_THRESHOLD) return true;
+          if (charCount < OCR_OVERLAY_CHAR_THRESHOLD) return true;
+
+          const rx = Math.max(0, Math.round(region.x));
+          const ry = Math.max(0, Math.round(region.y));
+          const rw = Math.min(w - rx, Math.round(region.width));
+          const rh = Math.min(h - ry, Math.round(region.height));
+          if (rw <= 0 || rh <= 0) return true;
+
+          const imgData = rCtx.getImageData(rx, ry, rw, rh);
+          return !isBlankPaper(imgData.data, rw, rh);
+        });
+      }
+
       if (regions.length > 0) {
         compositeImageRegions(fCtx, renderCanvas, regions, w, h);
       }
