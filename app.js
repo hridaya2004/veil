@@ -1697,10 +1697,39 @@ function reconcileContainers() {
   const sorted = [...needed].filter(p => !pdfState.slots.has(p))
     .sort((a, b) => Math.abs(a - centerPage) - Math.abs(b - centerPage));
 
+  let assignmentChanged = sorted.length > 0;
   for (const pageNum of sorted) {
     const free = renderPipeline.pool.find(s => s.assignedPage === null);
     if (!free) break; // pool exhausted
     assignContainer(free, pageNum);
+  }
+
+  // Keep DOM order sorted by page number so cross-page text selection
+  // follows the visual reading order. The browser builds selection by
+  // DOM tree order, not by visual position. Without this, selecting
+  // across two pages grabs the wrong text because recycled containers
+  // can end up in any DOM position.
+  // Skip when text is selected: moving DOM nodes destroys the active
+  // selection. The reorder will run on the next reconcile after the
+  // user clears the selection
+  if (assignmentChanged) {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed) reorderContainersInDOM();
+  }
+}
+
+function reorderContainersInDOM() {
+  const spacer = renderPipeline.spacer;
+  const assigned = renderPipeline.pool
+    .filter(slot => slot.assignedPage !== null)
+    .sort((a, b) => a.assignedPage - b.assignedPage);
+
+  // appendChild moves an existing element to the end without
+  // removing it first. Appending in page order produces a DOM
+  // sorted by page number. Unassigned containers stay where
+  // they are (empty, no visual or selection impact)
+  for (const slot of assigned) {
+    spacer.appendChild(slot.element);
   }
 }
 
