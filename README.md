@@ -41,11 +41,11 @@ Scanned documents are detected by sampling a few pages. Tesseract.js runs OCR in
 ```
 npm install
 npm test            # 387 unit tests (~2s)
-npm run test:e2e    # 77 browser tests (Playwright)
+npm run test:e2e    # 80 browser tests (Playwright)
 npm run serve       # http://localhost:8000
 ```
 
-464 tests (387 unit + 77 e2e) including visual regression screenshots, export round-trip verification, and performance benchmarks.
+467 tests (387 unit + 80 e2e) including visual regression screenshots, export round-trip verification, and performance benchmarks.
 
 ---
 

@@ -3184,6 +3184,17 @@ exportCancelBtn.addEventListener('click', cancelExport);
 // --- Keyboard ---
 document.addEventListener('keydown', (e) => {
   if (!pdfState.doc) return;
+
+  // Cmd/Ctrl + Plus/Minus/Zero: zoom the PDF, not the browser.
+  // This is the standard behavior for document viewers.
+  // Users who need larger UI use OS accessibility settings, not browser zoom
+  if (e.metaKey || e.ctrlKey) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); zoomBy(0.25); return; }
+    if (e.key === '-')                  { e.preventDefault(); zoomBy(-0.25); return; }
+    if (e.key === '0')                  { e.preventDefault(); zoomReset(); return; }
+  }
+
   if (e.key === 'ArrowLeft') scrollToPage(pdfState.currentPage - 1, true);
   else if (e.key === 'ArrowRight') scrollToPage(pdfState.currentPage + 1, true);
   else if (e.key === 'd') toggleDarkMode();
@@ -3250,23 +3261,26 @@ async function rebuildForZoom() {
   updateZoomUI();
 }
 
-if (btnZoomIn) {
-  btnZoomIn.addEventListener('click', () => {
-    if (pdfState.zoomMultiplier >= 3) return;
-    pdfState.zoomMultiplier = Math.min(3, pdfState.zoomMultiplier + 0.25);
-    localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
-    rebuildForZoom();
-  });
+function zoomBy(delta) {
+  if (!pdfState.doc) return;
+  const newZoom = Math.min(3, Math.max(0.5, pdfState.zoomMultiplier + delta));
+  if (newZoom === pdfState.zoomMultiplier) return;
+  pdfState.zoomMultiplier = newZoom;
+  localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
+  rebuildForZoom();
+  announce('Zoom ' + Math.round(newZoom * 100) + '%');
 }
 
-if (btnZoomOut) {
-  btnZoomOut.addEventListener('click', () => {
-    if (pdfState.zoomMultiplier <= 0.5) return;
-    pdfState.zoomMultiplier = Math.max(0.5, pdfState.zoomMultiplier - 0.25);
-    localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
-    rebuildForZoom();
-  });
+function zoomReset() {
+  if (!pdfState.doc || pdfState.zoomMultiplier === 1.0) return;
+  pdfState.zoomMultiplier = 1.0;
+  localStorage.setItem('veil-zoom', pdfState.zoomMultiplier);
+  rebuildForZoom();
+  announce('Zoom reset to 100%');
 }
+
+if (btnZoomIn) btnZoomIn.addEventListener('click', () => zoomBy(0.25));
+if (btnZoomOut) btnZoomOut.addEventListener('click', () => zoomBy(-0.25));
 
 function checkPresentationMode() {
   if (!pdfState.doc || pdfState.geometry.length <= 1) {

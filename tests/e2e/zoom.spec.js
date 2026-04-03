@@ -60,4 +60,50 @@ test.describe('Zoom controls', () => {
     const zoomText = await page.locator('#zoom-level').textContent();
     expect(zoomText).toContain('%');
   });
+
+  test('Cmd/Ctrl+Plus zooms in the PDF', async ({ page }) => {
+    const initialZoom = await page.locator('#zoom-level').textContent();
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    await page.keyboard.press(`${modifier}+Equal`);
+    await waitForZoomChange(page, initialZoom);
+
+    const newValue = parseInt(await page.locator('#zoom-level').textContent(), 10);
+    expect(newValue).toBeGreaterThan(parseInt(initialZoom, 10));
+  });
+
+  test('Cmd/Ctrl+Minus zooms out the PDF', async ({ page }) => {
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    // Zoom in first so we can zoom out
+    const beforeZoomIn = await page.locator('#zoom-level').textContent();
+    await page.keyboard.press(`${modifier}+Equal`);
+    await waitForZoomChange(page, beforeZoomIn);
+
+    const afterZoomIn = await page.locator('#zoom-level').textContent();
+    await page.keyboard.press(`${modifier}+Minus`);
+    await waitForZoomChange(page, afterZoomIn);
+
+    const afterZoomOut = parseInt(await page.locator('#zoom-level').textContent(), 10);
+    expect(afterZoomOut).toBeLessThan(parseInt(afterZoomIn, 10));
+  });
+
+  test('Cmd/Ctrl+0 resets zoom to 100%', async ({ page }) => {
+    const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+    // Zoom in first
+    const initial = await page.locator('#zoom-level').textContent();
+    await page.keyboard.press(`${modifier}+Equal`);
+    await waitForZoomChange(page, initial);
+
+    const zoomed = await page.locator('#zoom-level').textContent();
+    expect(parseInt(zoomed, 10)).toBeGreaterThan(100);
+
+    // Reset
+    await page.keyboard.press(`${modifier}+Digit0`);
+    await waitForZoomChange(page, zoomed);
+
+    const reset = await page.locator('#zoom-level').textContent();
+    expect(parseInt(reset, 10)).toBe(100);
+  });
 });
