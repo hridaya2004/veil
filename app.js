@@ -1720,15 +1720,21 @@ function reconcileContainers() {
 
 function reorderContainersInDOM() {
   const spacer = renderPipeline.spacer;
-  const assigned = renderPipeline.pool
-    .filter(slot => slot.assignedPage !== null)
-    .sort((a, b) => a.assignedPage - b.assignedPage);
 
-  // appendChild moves an existing element to the end without
-  // removing it first. Appending in page order produces a DOM
-  // sorted by page number. Unassigned containers stay where
-  // they are (empty, no visual or selection impact)
-  for (const slot of assigned) {
+  // Sort all pool containers: assigned first (by page number),
+  // unassigned last. appendChild on an existing child moves it
+  // to the end, so appending in sorted order produces the correct
+  // DOM sequence. Assigned containers come first so that
+  // querySelector('.page-container') finds visible pages, not
+  // empty pool slots
+  const sorted = [...renderPipeline.pool].sort((a, b) => {
+    if (a.assignedPage === null && b.assignedPage === null) return 0;
+    if (a.assignedPage === null) return 1;
+    if (b.assignedPage === null) return -1;
+    return a.assignedPage - b.assignedPage;
+  });
+
+  for (const slot of sorted) {
     spacer.appendChild(slot.element);
   }
 }
