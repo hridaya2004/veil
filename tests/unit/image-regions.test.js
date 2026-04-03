@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractImageRegions, IDENTITY_MATRIX } from '../../core.js';
+import { extractImageRegions, compositeImageRegions, IDENTITY_MATRIX } from '../../core.js';
 
 // Mock OPS codes — same numeric values as PDF.js
 const OPS = {
@@ -50,6 +50,14 @@ describe('extractImageRegions', () => {
     expect(result[0].y).toBe(0);
     expect(result[0].width).toBe(1);
     expect(result[0].height).toBe(1);
+  });
+
+  it('detects paintInlineImageXObject', () => {
+    const opList = makeOpList([
+      [OPS.paintInlineImageXObject, [{ width: 10, height: 10, data: new Uint8Array(400) }]],
+    ]);
+    const result = extractImageRegions(opList, IDENTITY_MATRIX, OPS);
+    expect(result).toHaveLength(1);
   });
 
   it('applies CTM from transform op', () => {
@@ -172,5 +180,92 @@ describe('extractImageRegions', () => {
     expect(result[0].x).toBe(30); // 10 + 20
     expect(result[1].x).toBe(10); // only 10
     expect(result[2].x).toBe(0);  // identity
+  });
+});
+
+
+describe('compositeImageRegions', () => {
+  function mockCtx() {
+    const calls = [];
+    return {
+      calls,
+      drawImage(...args) { calls.push(args); },
+    };
+  }
+
+  const fakeCanvas = { width: 800, height: 600 };
+
+  it('copies region at exact bounds', () => {
+    const ctx = mockCtx();
+    const regions = [{ x: 100, y: 200, width: 300, height: 150 }];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+
+    expect(ctx.calls).toHaveLength(1);
+    const [, sx, sy, sw, sh, dx, dy, dw, dh] = ctx.calls[0];
+    expect(sx).toBe(100);
+    expect(sy).toBe(200);
+    expect(sw).toBe(300);
+    expect(sh).toBe(150);
+    expect(dx).toBe(sx);
+    expect(dy).toBe(sy);
+  });
+
+  it('clamps to canvas bounds at top-left', () => {
+    const ctx = mockCtx();
+    const regions = [{ x: -2, y: -3, width: 50, height: 40 }];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+
+    const [, sx, sy] = ctx.calls[0];
+    expect(sx).toBe(0);
+    expect(sy).toBe(0);
+  });
+
+  it('clamps to canvas bounds at bottom-right', () => {
+    const ctx = mockCtx();
+    const regions = [{ x: 750, y: 560, width: 60, height: 50 }];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+
+    const [, sx, sy, sw, sh] = ctx.calls[0];
+    expect(sx + sw).toBe(800);
+    expect(sy + sh).toBe(600);
+  });
+
+  it('skips regions with zero or negative dimensions', () => {
+    const ctx = mockCtx();
+    const regions = [
+      { x: 100, y: 100, width: 0, height: 50 },
+      { x: 100, y: 100, width: 50, height: -10 },
+    ];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+    expect(ctx.calls).toHaveLength(0);
+  });
+
+  it('handles multiple regions independently', () => {
+    const ctx = mockCtx();
+    const regions = [
+      { x: 10, y: 20, width: 100, height: 80 },
+      { x: 400, y: 300, width: 200, height: 150 },
+    ];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+    expect(ctx.calls).toHaveLength(2);
+
+    const [, sx1, sy1] = ctx.calls[0];
+    const [, sx2, sy2] = ctx.calls[1];
+    expect(sx1).toBe(10);
+    expect(sy1).toBe(20);
+    expect(sx2).toBe(400);
+    expect(sy2).toBe(300);
+  });
+
+  it('handles full-page image at exact canvas edges', () => {
+    const ctx = mockCtx();
+    const regions = [{ x: 0, y: 0, width: 800, height: 600 }];
+    compositeImageRegions(ctx, fakeCanvas, regions, 800, 600);
+
+    const [, sx, sy, sw, sh] = ctx.calls[0];
+    expect(sx).toBe(0);
+    expect(sy).toBe(0);
+    expect(sw).toBe(800);
+    expect(sh).toBe(600);
   });
 });
