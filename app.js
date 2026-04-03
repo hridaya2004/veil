@@ -94,34 +94,34 @@
    * 7. FILE HANDLING (line 893)
    * 8. PDF LOADING (line 939)
    * 9. SCANNED DOCUMENT DETECTION (line 1020)
-   * 10. OCR LOADING INDICATOR (line 1083)
-   * 11. CLEANUP (line 1374)
-   * 12. SCALE CALCULATION (line 1386)
-   * 13. VIRTUAL SCROLLING (line 1415)
+   * 10. OCR LOADING INDICATOR (line 1079)
+   * 11. CLEANUP (line 1370)
+   * 12. SCALE CALCULATION (line 1382)
+   * 13. VIRTUAL SCROLLING (line 1411)
    *     Page geometry, container pool, reconciliation, eviction
-   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1815)
-   * 15. UNIFIED SCROLL COORDINATOR (line 1863)
-   * 16. CANVAS POOL (line 1915)
-   * 17. ENGINE RESET (line 1959)
-   * 18. RENDER QUEUE (line 2051)
-   * 19. PAGE RENDERING (line 2128)
-   * 20. ALREADY-DARK DETECTION (line 2292)
-   * 21. TEXT LAYER (line 2310)
+   * 14. DEVICE DETECTION AND MEMORY PROFILES (line 1846)
+   * 15. UNIFIED SCROLL COORDINATOR (line 1894)
+   * 16. CANVAS POOL (line 1946)
+   * 17. ENGINE RESET (line 1990)
+   * 18. RENDER QUEUE (line 2082)
+   * 19. PAGE RENDERING (line 2159)
+   * 20. ALREADY-DARK DETECTION (line 2323)
+   * 21. TEXT LAYER (line 2341)
    *     Single-column: flow layout with paddingTop advancement.
    *     Multi-column: detected via backward Y jump in content stream,
    *     rendered with flex-row wrapper keeping everything in flow.
-   * 22. MULTI-COLUMN HELPERS (line 2466)
+   * 22. MULTI-COLUMN HELPERS (line 2497)
    *     Column detection, order-preserving grouping, line builder
-   * 23. LINK ANNOTATION LAYER (line 2692)
-   * 24. DARK MODE LOGIC (line 2798)
-   * 25. CURRENT PAGE TRACKING (line 2834)
-   * 26. TOGGLE BUTTON STATE (line 2866)
-   * 27. NAVIGATION (line 2894)
-   * 28. EVENT LISTENERS (line 2997)
+   * 23. LINK ANNOTATION LAYER (line 2723)
+   * 24. DARK MODE LOGIC (line 2829)
+   * 25. CURRENT PAGE TRACKING (line 2865)
+   * 26. TOGGLE BUTTON STATE (line 2897)
+   * 27. NAVIGATION (line 2925)
+   * 28. EVENT LISTENERS (line 3028)
    *     Option/Alt OCR, drop zone, toolbar, keyboard, presentation
-   * 29. ZOOM (line 3212)
-   * 30. RESIZE (line 3337)
-   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3404)
+   * 29. ZOOM (line 3254)
+   * 30. RESIZE (line 3382)
+   * 31. APP SHELL LOADER AND BOOTSTRAP (line 3449)
 */
 
 // CDN dependencies, single source of truth for all external library URLs.
@@ -1072,11 +1072,7 @@ async function detectScannedDocument() {
     pageSamples.push({ charCount, maxImageCoverage: maxCoverage });
   }
 
-  const result = isScannedPattern(pageSamples);
-  if (result) {
-    console.log(`Scanned document detected (${samplesToCheck.length} pages sampled)`);
-  }
-  return result;
+  return isScannedPattern(pageSamples);
 }
 
 
