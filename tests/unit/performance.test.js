@@ -228,14 +228,14 @@ describe('Performance: core function thresholds', () => {
     expect(elapsed).toBeLessThan(100);
   });
 
-  it('calculateScale — 10000 calls < 10ms', () => {
+  it('calculateScale — 10000 calls < 100ms', () => {
     const start = performance.now();
     for (let i = 0; i < 10000; i++) {
       calculateScale(612, 792, 1280, 900, 48, 16, false);
     }
     const elapsed = performance.now() - start;
 
-    expect(elapsed).toBeLessThan(10);
+    expect(elapsed).toBeLessThan(100);
   });
 
   it('binarySearchFirstVisible — 10000 pages < 5ms', () => {

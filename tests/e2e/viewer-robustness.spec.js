@@ -136,10 +136,21 @@ test.describe('Canvas pool integrity', () => {
     const isVisible = await exportBtn.isVisible().catch(() => false);
     test.skip(!isVisible, 'Export button not visible');
 
+    // Slow down canvas.toBlob so the export takes long enough for the
+    // progress bar to appear and the cancel button to be clickable.
+    // This is deterministic (always 500ms per page) regardless of CPU
+    // speed, and avoids needing a large multi-page fixture
+    await page.evaluate(() => {
+      const original = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function(...args) {
+        setTimeout(() => original.apply(this, args), 500);
+      };
+    });
+
     // Start export
     await exportBtn.click({ force: true });
 
-    // Wait for progress
+    // Wait for progress bar
     await page.waitForFunction(() => {
       const el = document.getElementById('export-progress');
       return el && !el.hidden;
